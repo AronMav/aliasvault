@@ -7,6 +7,7 @@
 
 namespace AliasVault.Cryptography.Server;
 
+using System.Security.Cryptography;
 using AliasServerDb;
 
 /// <summary>
@@ -47,10 +48,13 @@ public static class EmailEncryption
         email.FromLocal = Encryption.SymmetricEncrypt(email.FromLocal, symmetricKey);
         email.FromDomain = Encryption.SymmetricEncrypt(email.FromDomain, symmetricKey);
 
-        // Encrypt all attachments with the symmetric key.
+        // Encrypt all attachments with the symmetric key. The filename and MIME type are
+        // encrypted too: the server has no use for them and they reveal what a user receives.
         foreach (var attachment in email.Attachments)
         {
             attachment.Bytes = Encryption.SymmetricEncrypt(attachment.Bytes, symmetricKey);
+            attachment.Filename = Encryption.SymmetricEncrypt(attachment.Filename, symmetricKey);
+            attachment.MimeType = Encryption.SymmetricEncrypt(attachment.MimeType, symmetricKey);
         }
 
         // Encrypt the symmetric key with the user's public key.
@@ -93,6 +97,36 @@ public static class EmailEncryption
         email.FromLocal = Encryption.SymmetricDecrypt(email.FromLocal, symmetricKey);
         email.FromDomain = Encryption.SymmetricDecrypt(email.FromDomain, symmetricKey);
 
+        foreach (var attachment in email.Attachments)
+        {
+            attachment.Filename = DecryptLegacyAware(attachment.Filename, symmetricKey);
+            attachment.MimeType = DecryptLegacyAware(attachment.MimeType, symmetricKey);
+        }
+
         return email;
+    }
+
+    /// <summary>
+    /// Decrypts a value that may predate attachment metadata encryption.
+    /// </summary>
+    /// <remarks>
+    /// Emails received before attachment metadata was encrypted still hold plaintext values, and
+    /// they cannot be migrated: the per-email symmetric key is only recoverable with the user's
+    /// private key, which the server does not have. Such values are returned as-is. AES-GCM
+    /// verifies an authentication tag, so a plaintext value cannot be mistaken for ciphertext.
+    /// </remarks>
+    /// <param name="value">The stored value, either ciphertext or legacy plaintext.</param>
+    /// <param name="symmetricKey">The symmetric key of the email.</param>
+    /// <returns>The plaintext value.</returns>
+    private static string DecryptLegacyAware(string value, byte[] symmetricKey)
+    {
+        try
+        {
+            return Encryption.SymmetricDecrypt(value, symmetricKey);
+        }
+        catch (Exception ex) when (ex is FormatException or CryptographicException or ArgumentException or OverflowException)
+        {
+            return value;
+        }
     }
 }

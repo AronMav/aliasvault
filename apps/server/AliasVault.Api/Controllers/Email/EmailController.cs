@@ -135,8 +135,9 @@ public class EmailController(ILogger<VaultController> logger, IAliasServerDbCont
         }
 
         // Return the encrypted bytes as opaque binary. The original MIME type would be
-        // misleading since the payload is AES ciphertext, not a renderable file.
-        return File(attachment.Bytes, "application/octet-stream", attachment.Filename);
+        // misleading since the payload is AES ciphertext, not a renderable file. The filename is
+        // encrypted too, so a neutral name is used here; clients decrypt the real one themselves.
+        return File(attachment.Bytes, "application/octet-stream", $"attachment-{attachment.Id}.bin");
     }
 
     /// <summary>

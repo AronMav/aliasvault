@@ -100,10 +100,6 @@
                 {
                     <SortableTableRow>
                         <SortableTableColumn IsPrimary="true">@attachment.Id</SortableTableColumn>
-                        <SortableTableColumn>
-                            <span class="font-medium text-gray-900 dark:text-white">@attachment.Filename</span>
-                            <div class="text-sm text-gray-500 dark:text-gray-400">@attachment.MimeType</div>
-                        </SortableTableColumn>
                         <SortableTableColumn>@FormatFileSize(attachment.Filesize)</SortableTableColumn>
                         <SortableTableColumn>
                             <span>@attachment.EmailId</span>
@@ -189,7 +185,6 @@
 
     private readonly List<TableColumn> _tableColumns = [
         new TableColumn { Title = "ID", PropertyName = "Id" },
-        new TableColumn { Title = "Filename", PropertyName = "Filename" },
         new TableColumn { Title = "File Size", PropertyName = "Filesize" },
         new TableColumn { Title = "Email ID", PropertyName = "EmailId" },
         new TableColumn { Title = "User", PropertyName = "UserEmail" },
@@ -346,11 +341,6 @@
                 query = SortDirection == SortDirection.Ascending
                     ? query.OrderBy(x => x.Id)
                     : query.OrderByDescending(x => x.Id);
-                break;
-            case "Filename":
-                query = SortDirection == SortDirection.Ascending
-                    ? query.OrderBy(x => x.Filename)
-                    : query.OrderByDescending(x => x.Filename);
                 break;
             case "Filesize":
                 query = SortDirection == SortDirection.Ascending

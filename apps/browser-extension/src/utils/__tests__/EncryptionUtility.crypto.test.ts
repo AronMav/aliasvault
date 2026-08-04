@@ -224,3 +224,71 @@ describe('email RSA private key cache', () => {
     }
   });
 });
+
+describe('attachment metadata decryption', () => {
+  /**
+   * Builds an email carrying a single attachment with the supplied stored metadata.
+   */
+  async function createEmailWithAttachment(
+    encryptionKey: EncryptionKey,
+    rawSymmetricKey: string,
+    storedFilename: string,
+    storedMimeType: string
+  ): Promise<Email> {
+    const email = await createEmail(encryptionKey, rawSymmetricKey);
+    email.attachments = [
+      {
+        id: 1,
+        emailId: email.id,
+        filename: storedFilename,
+        mimeType: storedMimeType,
+        filesize: 13,
+      },
+    ];
+    return email;
+  }
+
+  it('decrypts the filename and mime type of an attachment', async () => {
+    const keyPair = await EncryptionUtility.generateRsaKeyPair();
+    const encryptionKey: EncryptionKey = {
+      Id: 'key-a',
+      PublicKey: keyPair.publicKey,
+      PrivateKey: keyPair.privateKey,
+      IsPrimary: true,
+    };
+    const rawSymmetricKey = '0123456789abcdef0123456789abcdef';
+    const symmetricKeyBase64 = Buffer.from(rawSymmetricKey).toString('base64');
+    const email = await createEmailWithAttachment(
+      encryptionKey,
+      rawSymmetricKey,
+      await EncryptionUtility.symmetricEncrypt('passport_scan.pdf', symmetricKeyBase64),
+      await EncryptionUtility.symmetricEncrypt('application/pdf', symmetricKeyBase64)
+    );
+
+    const decrypted = await EncryptionUtility.decryptEmail(email, [encryptionKey]);
+
+    expect(decrypted.attachments[0].filename).toBe('passport_scan.pdf');
+    expect(decrypted.attachments[0].mimeType).toBe('application/pdf');
+  });
+
+  it('keeps legacy plaintext metadata that predates encryption', async () => {
+    const keyPair = await EncryptionUtility.generateRsaKeyPair();
+    const encryptionKey: EncryptionKey = {
+      Id: 'key-a',
+      PublicKey: keyPair.publicKey,
+      PrivateKey: keyPair.privateKey,
+      IsPrimary: true,
+    };
+    const email = await createEmailWithAttachment(
+      encryptionKey,
+      '0123456789abcdef0123456789abcdef',
+      'legacy_invoice.pdf',
+      'application/pdf'
+    );
+
+    const decrypted = await EncryptionUtility.decryptEmail(email, [encryptionKey]);
+
+    expect(decrypted.attachments[0].filename).toBe('legacy_invoice.pdf');
+    expect(decrypted.attachments[0].mimeType).toBe('application/pdf');
+  });
+});
