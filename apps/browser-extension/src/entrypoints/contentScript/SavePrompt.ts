@@ -682,11 +682,19 @@ function setupEventListeners(
 
 /**
  * Escape HTML special characters to prevent XSS.
+ *
+ * Escapes quotes as well as the tag characters, because these values are interpolated
+ * into quoted HTML attributes. Serializing a text node (textContent -> innerHTML) is not
+ * sufficient here: it leaves quotes untouched, which lets page-controlled input close the
+ * attribute and inject one of its own.
  */
 function escapeHtml(text: string): string {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 /**
