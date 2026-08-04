@@ -11,6 +11,7 @@
 //! 4. PRIORITY 4: Text/Page Title Matching (non-URL search)
 
 mod domain;
+mod public_suffix;
 mod stop_words;
 
 use serde::{Deserialize, Serialize};
