@@ -20,7 +20,6 @@ static COMMON_TLDS: &[&str] = &[
     "blog", "news", "media", "tv", "video", "music", "pro", "info", "biz", "name",
 ];
 
-
 /// Check if a string is likely an app package name (reversed domain).
 /// Package names start with TLD followed by dot (e.g., "com.example", "nl.app").
 pub fn is_app_package_name(text: &str) -> bool {

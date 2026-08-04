@@ -13,11 +13,14 @@
 #
 # Adding a new task:
 #   1. Define a function named `task_<name>` that fetches the upstream payload
-#      and writes the result into the relevant source file. Use the
-#      `replace_generated_block` helper to swap content between
-#      `// BEGIN_GENERATED: <id>` and `// END_GENERATED: <id>` markers (any
-#      comment syntax works — the helper matches both line- and block-style).
-#   2. Register the task in TASK_ORDER + TASK_DESCRIPTIONS below.
+#      and writes the result into the relevant source file.
+#      - When the payload lands inside a file that also holds hand-written
+#        content, use the `replace_generated_block` helper to swap content
+#        between `// BEGIN_GENERATED: <id>` and `// END_GENERATED: <id>`
+#        markers (any comment syntax works — the helper matches both line-
+#        and block-style).
+#      - When the target file is generated in its entirety, write it directly.
+#   2. Register the task in TASKS below.
 
 set -euo pipefail
 
