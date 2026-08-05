@@ -1,7 +1,10 @@
 package net.aliasvault.app
 
+import android.app.Activity
 import android.app.Application
 import android.content.res.Configuration
+import android.os.Bundle
+import android.view.WindowManager
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
@@ -43,8 +46,37 @@ class MainApplication : Application(), ReactApplication {
         loadReactNative(this)
         ApplicationLifecycleDispatcher.onApplicationCreate(this)
 
+        // Keep vault contents out of screenshots and screen recordings
+        setupSecureWindowFlag()
+
         // Setup process lifecycle observer for auto-lock functionality
         setupProcessLifecycleObserver()
+    }
+
+    /**
+     * Mark every activity's window as secure.
+     *
+     * Without this the system snapshots the screen for the app switcher, and screen recorders
+     * and remote-assistance tools can capture it, so credentials on screen leak into places the
+     * user did not intend. Applying it here rather than in each activity means an activity added
+     * later is covered without anyone having to remember.
+     */
+    private fun setupSecureWindowFlag() {
+        registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+                activity.window.setFlags(
+                    WindowManager.LayoutParams.FLAG_SECURE,
+                    WindowManager.LayoutParams.FLAG_SECURE,
+                )
+            }
+
+            override fun onActivityStarted(activity: Activity) = Unit
+            override fun onActivityResumed(activity: Activity) = Unit
+            override fun onActivityPaused(activity: Activity) = Unit
+            override fun onActivityStopped(activity: Activity) = Unit
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+            override fun onActivityDestroyed(activity: Activity) = Unit
+        })
     }
 
     /**
