@@ -124,7 +124,9 @@ builder.Services.AddAuthentication(options =>
 {
     var jwtKey = SecretReader.GetJwtKey();
 
-    options.IncludeErrorDetails = true;
+    // Detailed token validation failures are useful while developing, but in production they
+    // tell an unauthenticated caller exactly why their token was rejected.
+    options.IncludeErrorDetails = builder.Environment.IsDevelopment();
     options.TokenValidationParameters = new TokenValidationParameters
     {
         ValidateIssuer = true,

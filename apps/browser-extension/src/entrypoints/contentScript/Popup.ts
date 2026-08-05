@@ -721,18 +721,24 @@ export function createBasePopup(input: HTMLInputElement, rootContainer: HTMLElem
  * Create a loading popup.
  */
 export function createLoadingPopup(input: HTMLInputElement, message: string, rootContainer: HTMLElement) : HTMLElement {
-  /**
-   * Get the loading wrapper HTML.
-   */
-  const getLoadingHtml = (message: string): string => `
-    <div class="av-loading-container">
-      <div class="av-loading-spinner"></div>
-      <span class="av-loading-text">${message}</span>
-    </div>
-  `;
-
   const popup = createBasePopup(input, rootContainer);
-  popup.innerHTML = getLoadingHtml(message);
+
+  const loadingContainer = document.createElement('div');
+  loadingContainer.className = 'av-loading-container';
+
+  const spinner = document.createElement('div');
+  spinner.className = 'av-loading-spinner';
+
+  /*
+   * Built as a text node rather than interpolated into innerHTML, so a message can never
+   * introduce markup into the extension's own UI.
+   */
+  const text = document.createElement('span');
+  text.className = 'av-loading-text';
+  text.textContent = message;
+
+  loadingContainer.append(spinner, text);
+  popup.replaceChildren(loadingContainer);
 
   rootContainer.appendChild(popup);
   return popup;
