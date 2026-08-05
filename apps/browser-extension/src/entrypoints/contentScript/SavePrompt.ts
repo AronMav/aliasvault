@@ -780,7 +780,7 @@ export async function getPersistedSavePromptState(): Promise<SavePromptPersisted
       const isRelatedDomain = currentDomain.endsWith(`.${state.domain}`) ||
                               state.domain.endsWith(`.${currentDomain}`) ||
                               // Also allow if they share the same base domain (e.g., login.example.com -> app.example.com)
-                              getBaseDomain(currentDomain) === getBaseDomain(state.domain);
+                              await getBaseDomain(currentDomain) === await getBaseDomain(state.domain);
 
       if (!isRelatedDomain) {
         await clearPersistedSavePromptState();
@@ -814,14 +814,20 @@ export async function clearPersistedSavePromptState(): Promise<void> {
 
 /**
  * Extract the base domain from a hostname (e.g., "login.example.com" -> "example.com").
+ *
+ * Resolved by the background script, which holds the Public Suffix List. Taking the last two
+ * labels here would treat every tenant of a shared hosting suffix as one site, so a prompt
+ * captured on one `github.io` page would be restorable on anyone else's.
  */
-function getBaseDomain(hostname: string): string {
-  const parts = hostname.split('.');
-  if (parts.length <= 2) {
+async function getBaseDomain(hostname: string): Promise<string> {
+  try {
+    const response = await sendMessage('EXTRACT_ROOT_DOMAIN', { hostname });
+    return response.rootDomain;
+  } catch (error) {
+    console.error('[AliasVault] Error extracting root domain:', error);
+    // Fall back to the hostname itself, which only ever compares equal to itself.
     return hostname;
   }
-  // Return the last two parts (this is a simple heuristic, doesn't handle all TLDs)
-  return parts.slice(-2).join('.');
 }
 
 /**

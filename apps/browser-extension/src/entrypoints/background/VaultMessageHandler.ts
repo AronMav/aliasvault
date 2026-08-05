@@ -2045,6 +2045,26 @@ export async function handleSetRecentlySelected(
 }
 
 /**
+ * Resolve the root domain of a hostname on behalf of a content script.
+ *
+ * The Rust core carries the Public Suffix List, so it is the only place that knows where the
+ * registrable domain boundary actually falls. Content scripts must not guess it themselves:
+ * a wrong boundary lets one tenant of a shared hosting suffix pass for another.
+ *
+ * Falls back to the hostname itself, which compares equal only to itself.
+ */
+export async function handleExtractRootDomain(
+  message: { hostname: string }
+): Promise<{ rootDomain: string }> {
+  try {
+    return { rootDomain: await extractRootDomain(message.hostname) };
+  } catch (error) {
+    console.error('Error extracting root domain:', error);
+    return { rootDomain: message.hostname };
+  }
+}
+
+/**
  * Get recently selected item for smart autofill.
  */
 export async function handleGetRecentlySelected(

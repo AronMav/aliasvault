@@ -52,6 +52,7 @@ export interface IExtensionMessageProtocol {
   FULL_VAULT_SYNC(): FullVaultSyncResult;
   GENERATE_PASSWORD(data: { settings: PasswordSettings }): { success: boolean; password?: string; error?: string };
   GENERATE_TOTP_CODE(data: { itemId: string }): { success: boolean; code?: string; error?: string };
+  EXTRACT_ROOT_DOMAIN(data: { hostname: string }): { rootDomain: string };
   GET_CLIPBOARD_CLEAR_TIMEOUT(): number;
   GET_CLIPBOARD_COUNTDOWN_STATE(): { remaining: number; total: number; id: number } | null;
   GET_DEFAULT_EMAIL_DOMAIN(): StringResponse;
