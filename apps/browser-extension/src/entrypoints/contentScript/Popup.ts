@@ -1565,7 +1565,7 @@ function addReliableClickHandler(
   const secureHandler = async (e: Event): Promise<void> => {
     const mouseEvent = e as MouseEvent;
 
-    if (!await clickValidator.validateClick(mouseEvent)) {
+    if (!await clickValidator.validateUserClick(mouseEvent)) {
       console.warn(`[AliasVault Security] Blocked click action due to security validation failure`);
       return;
     }
