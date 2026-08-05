@@ -8,6 +8,7 @@
 namespace AliasVault.Auth.IpAddress;
 
 using System.Net;
+using System.Net.Sockets;
 using Microsoft.AspNetCore.Http;
 
 /// <summary>
@@ -75,18 +76,73 @@ public static class IpAddressUtility
     }
 
     /// <summary>
-    /// Extracts the raw IP address string from the request, honoring the X-Forwarded-For header (first entry) when
-    /// present and otherwise falling back to the connection's remote IP address.
+    /// Extracts the raw IP address string from the request.
     /// </summary>
+    /// <remarks>
+    /// Only a reverse proxy reaching us over a private network may name the client. The bundled
+    /// nginx sets X-Real-IP from the connection it accepted, so that value is trustworthy; the
+    /// leftmost X-Forwarded-For entry is not, because nginx appends to whatever the client sent.
+    /// Honouring it would let anyone pick their own address and walk past the IP block list and
+    /// the per-IP registration limit.
+    /// </remarks>
     /// <param name="httpContext">HttpContext to extract the IP address from.</param>
     /// <returns>The raw IP address string, or null when it cannot be determined.</returns>
     private static string? ExtractRawIpString(HttpContext httpContext)
     {
-        if (httpContext.Request.Headers.TryGetValue("X-Forwarded-For", out var xForwardedFor))
+        var peer = httpContext.Connection.RemoteIpAddress;
+
+        if (IsPrivatePeer(peer) && httpContext.Request.Headers.TryGetValue("X-Real-IP", out var realIp))
         {
-            return xForwardedFor.ToString().Split(',')[0].Trim();
+            var forwardedFor = realIp.ToString().Trim();
+            if (forwardedFor.Length > 0)
+            {
+                return forwardedFor;
+            }
         }
 
-        return httpContext.Connection.RemoteIpAddress?.ToString();
+        return peer?.ToString();
+    }
+
+    /// <summary>
+    /// Determines whether the immediate peer sits on a private network, and may therefore be a
+    /// reverse proxy of ours rather than an arbitrary client from the internet.
+    /// </summary>
+    /// <param name="address">The address of the immediate peer.</param>
+    /// <returns>True when the peer address is loopback or in a private range.</returns>
+    private static bool IsPrivatePeer(IPAddress? address)
+    {
+        if (address is null)
+        {
+            return false;
+        }
+
+        if (IPAddress.IsLoopback(address))
+        {
+            return true;
+        }
+
+        if (address.IsIPv6LinkLocal || address.IsIPv6SiteLocal || address.IsIPv6UniqueLocal)
+        {
+            return true;
+        }
+
+        if (address.IsIPv4MappedToIPv6)
+        {
+            address = address.MapToIPv4();
+        }
+
+        if (address.AddressFamily != AddressFamily.InterNetwork)
+        {
+            return false;
+        }
+
+        var octets = address.GetAddressBytes();
+        return octets[0] switch
+        {
+            10 => true,
+            172 => octets[1] >= 16 && octets[1] <= 31,
+            192 => octets[1] == 168,
+            _ => false,
+        };
     }
 }
