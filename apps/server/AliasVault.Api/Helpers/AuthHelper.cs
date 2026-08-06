@@ -53,8 +53,7 @@ public static class AuthHelper
     /// <returns>SrpSession if validation succeeds, null otherwise.</returns>
     public static SrpSession? ValidateSrpSession(IMemoryCache cache, AliasVaultUser user, string clientEphemeral, string clientSessionProof)
     {
-        // Get or create SRP identity. For existing users without SrpIdentity, fall back to username (lowercase).
-        var srpIdentity = user.SrpIdentity ?? user.UserName!.ToLowerInvariant();
+        var srpIdentity = GetSrpIdentity(user);
 
         if (!cache.TryGetValue(CachePrefixEphemeral + srpIdentity, out var serverSecretEphemeral) || serverSecretEphemeral is not string)
         {
@@ -80,6 +79,34 @@ public static class AuthHelper
         }
 
         return serverSession;
+    }
+
+    /// <summary>
+    /// Drops the cached server ephemeral for a user, so it cannot be used a second time.
+    /// </summary>
+    /// <remarks>
+    /// Call this once the exchange the ephemeral was issued for has finished. It is deliberately not
+    /// called from <see cref="ValidateSrpSession"/>: a login with two-factor authentication validates
+    /// the same proof twice, once to check the password and once alongside the second factor, and a
+    /// mistyped second factor has to stay retryable. Until this runs the entry lives for its full five
+    /// minutes, which is long enough for a captured proof to be replayed.
+    /// </remarks>
+    /// <param name="cache">IMemoryCache instance.</param>
+    /// <param name="user">The user whose ephemeral should be dropped.</param>
+    public static void InvalidateSrpSession(IMemoryCache cache, AliasVaultUser user)
+    {
+        cache.Remove(CachePrefixEphemeral + GetSrpIdentity(user));
+    }
+
+    /// <summary>
+    /// Gets the SRP identity for a user. For existing users without one, this falls back to the
+    /// lowercased username, which is what the verifier was originally created with.
+    /// </summary>
+    /// <param name="user">The user object.</param>
+    /// <returns>The SRP identity.</returns>
+    public static string GetSrpIdentity(AliasVaultUser user)
+    {
+        return user.SrpIdentity ?? user.UserName!.ToLowerInvariant();
     }
 
     /// <summary>

@@ -311,6 +311,9 @@ public class VaultController(ILogger<VaultController> logger, IAliasServerDbCont
 
         await authLoggingService.LogAuthEventSuccessAsync(user.UserName!, AuthEventType.PasswordChange);
 
+        // The password change is complete, so the ephemeral this proof was checked against is spent.
+        AuthHelper.InvalidateSrpSession(cache, user);
+
         // Force revoke all user logged in sessions except current one.
         // This means that other clients which have not already updated to the new password will be logged out.
         // This ensures that all clients login again with the new password to refresh their encryption keys for future vault mutations.

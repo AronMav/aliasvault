@@ -204,11 +204,15 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
 
         await authLoggingService.LogAuthEventSuccessAsync(model.Username, AuthEventType.Login);
 
-        // If 2FA is required, return that status and no JWT token yet.
+        // If 2FA is required, return that status and no JWT token yet. The server ephemeral has to stay
+        // cached in that case: the second factor step validates the same proof again.
         if (user!.TwoFactorEnabled)
         {
             return Ok(new ValidateLoginResponse(true, string.Empty, null));
         }
+
+        // The login is complete, so the ephemeral this proof was checked against is spent.
+        AuthHelper.InvalidateSrpSession(cache, user);
 
         // Reset failed login attempts.
         await userManager.ResetAccessFailedCountAsync(user);
@@ -251,6 +255,9 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
 
         // Validation of 2-FA token is successful, user is authenticated.
         await authLoggingService.LogAuthEventSuccessAsync(model.Username, AuthEventType.TwoFactorAuthentication);
+
+        // The login is complete, so the ephemeral this proof was checked against is spent.
+        AuthHelper.InvalidateSrpSession(cache, user);
 
         // Reset failed login attempts.
         await userManager.ResetAccessFailedCountAsync(user);
@@ -298,6 +305,9 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
 
         // Recovery code is valid, user is authenticated.
         await authLoggingService.LogAuthEventSuccessAsync(model.Username, AuthEventType.TwoFactorAuthentication);
+
+        // The login is complete, so the ephemeral this proof was checked against is spent.
+        AuthHelper.InvalidateSrpSession(cache, user);
 
         // Reset failed login attempts.
         await userManager.ResetAccessFailedCountAsync(user);
@@ -883,6 +893,9 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
 
         // Log the successful account deletion.
         await authLoggingService.LogAuthEventSuccessAsync(user.UserName!, AuthEventType.AccountDeletion);
+
+        // The confirmation is complete, so the ephemeral this proof was checked against is spent.
+        AuthHelper.InvalidateSrpSession(cache, user);
 
         // Delete the user and their data.
         await using var context = await dbContextFactory.CreateDbContextAsync();
