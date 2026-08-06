@@ -27,6 +27,11 @@ public static class AuthHelper
     public static readonly string CachePrefixEphemeral = "LoginEphemeral_";
 
     /// <summary>
+    /// Cache prefix for the refresh token most recently issued in place of a given one.
+    /// </summary>
+    public static readonly string CachePrefixRotatedToken = "RotatedRefreshToken_";
+
+    /// <summary>
     /// Password the fake verifier for a non-existent user is derived from. Its value is irrelevant as
     /// long as it is fixed: no client can ever produce a proof that matches the resulting verifier.
     /// </summary>
@@ -79,6 +84,23 @@ public static class AuthHelper
         }
 
         return serverSession;
+    }
+
+    /// <summary>
+    /// Hashes a refresh token for storage and lookup, so the database holds no value that can be
+    /// presented as a session.
+    /// </summary>
+    /// <remarks>
+    /// A single SHA-256 pass is the right amount of work here. A refresh token is 32 bytes straight
+    /// from the CSPRNG, so there is no guessable input to protect against with a slow KDF; using one
+    /// would only add latency to every token refresh. The hash is deterministic on purpose, so the
+    /// lookup stays an indexed equality match.
+    /// </remarks>
+    /// <param name="token">The refresh token as the client presents it.</param>
+    /// <returns>The value to store and compare against.</returns>
+    public static string HashRefreshToken(string token)
+    {
+        return Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
     }
 
     /// <summary>
