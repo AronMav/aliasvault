@@ -133,27 +133,32 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
     [HttpPost("login")]
     public async Task<IActionResult> Login([FromBody] LoginInitiateRequest model)
     {
-        var user = await userManager.FindByNameAsync(model.Username);
+        // Bound the username before anything reads it. It is unauthenticated input and the work below
+        // hashes it, derives SRP values from it and writes it to the auth log, all of which would
+        // otherwise scale with whatever the caller put in the request body.
+        var username = TruncateUsername(model.Username);
 
-        // If user doesn't exist, generate or retrieve fake data to prevent user enumeration attacks.
+        var user = await userManager.FindByNameAsync(username);
+
+        // If user doesn't exist, derive fake data to prevent user enumeration attacks.
         if (user == null)
         {
             // Log the attempt internally
-            await authLoggingService.LogAuthEventFailAsync(model.Username, AuthEventType.Login, AuthFailureReason.InvalidUsername);
-            return FakeLoginResponse(model);
+            await authLoggingService.LogAuthEventFailAsync(username, AuthEventType.Login, AuthFailureReason.InvalidUsername);
+            return FakeLoginResponse(username);
         }
 
         // Check if the account is locked out.
         if (await userManager.IsLockedOutAsync(user))
         {
-            await authLoggingService.LogAuthEventFailAsync(model.Username, AuthEventType.TwoFactorAuthentication, AuthFailureReason.AccountLocked);
+            await authLoggingService.LogAuthEventFailAsync(username, AuthEventType.TwoFactorAuthentication, AuthFailureReason.AccountLocked);
             return BadRequest(ApiErrorCodeHelper.CreateValidationErrorResponse(ApiErrorCode.ACCOUNT_LOCKED, 400));
         }
 
         // Check if the account is blocked.
         if (user.Blocked)
         {
-            await authLoggingService.LogAuthEventFailAsync(model.Username, AuthEventType.Login, AuthFailureReason.AccountBlocked);
+            await authLoggingService.LogAuthEventFailAsync(username, AuthEventType.Login, AuthFailureReason.AccountBlocked);
             return BadRequest(ApiErrorCodeHelper.CreateValidationErrorResponse(ApiErrorCode.ACCOUNT_BLOCKED, 400));
         }
 
@@ -865,6 +870,18 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
     }
 
     /// <summary>
+    /// Truncates a username to the longest value that can belong to an account, so unauthenticated input
+    /// cannot drive work proportional to its length. Registration caps usernames far below this limit, so
+    /// no existing account can be shortened by it.
+    /// </summary>
+    /// <param name="username">The username as submitted.</param>
+    /// <returns>The username, shortened if it exceeds the maximum length.</returns>
+    private static string TruncateUsername(string username)
+    {
+        return username.Length <= AuthLog.UsernameMaxLength ? username : username[..AuthLog.UsernameMaxLength];
+    }
+
+    /// <summary>
     /// Generate a refresh token for a user. This token is used to request a new access token when the current
     /// access token expires. The refresh token is long-lived by design.
     /// </summary>
@@ -1172,35 +1189,23 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
     /// <summary>
     /// Generate a fake login response for a user that does not exist to prevent user enumeration attacks.
     /// </summary>
-    /// <param name="model">The login initiate request model.</param>
+    /// <param name="username">The username that was submitted, already bounded in length.</param>
     /// <returns>IActionResult.</returns>
-    private OkObjectResult FakeLoginResponse(LoginInitiateRequest model)
+    private OkObjectResult FakeLoginResponse(string username)
     {
-        // Generate a cache key for fake data
-        var fakeDataCacheKey = AuthHelper.CachePrefixFakeData + model.Username;
-
-        // Try to get cached fake data first
-        if (!cache.TryGetValue(fakeDataCacheKey, out (string Salt, string Verifier) fakeData))
-        {
-            // Generate new fake data if not cached
-            var client = new SrpClient();
-            var fakeSalt = client.GenerateSalt();
-            var fakePrivateKey = client.DerivePrivateKey(fakeSalt, model.Username, "fakePassword");
-            var fakeVerifier = client.DeriveVerifier(fakePrivateKey);
-            fakeData = (fakeSalt, fakeVerifier);
-
-            // Cache the fake data for 4 hours
-            cache.Set(fakeDataCacheKey, fakeData, TimeSpan.FromHours(4));
-        }
+        var fakeCredentials = AuthHelper.DeriveFakeSrpCredentials(username, GetJwtKey());
 
         // Always generate a new ephemeral for the fake data, as this is also done for existing users.
-        var fakeEphemeral = Srp.GenerateEphemeralServer(fakeData.Verifier);
+        var fakeEphemeral = Srp.GenerateEphemeralServer(fakeCredentials.Verifier);
 
-        // Return the same response format as for real users
+        // Return the same response format as for real users. The SRP identity has to be filled in too:
+        // a real account always resolves to one, so leaving it null here would tell the caller that the
+        // account does not exist regardless of how well the other values are faked.
         return Ok(new LoginInitiateResponse(
-            fakeData.Salt,
+            fakeCredentials.Salt,
             fakeEphemeral.Public,
             Defaults.EncryptionType,
-            Defaults.EncryptionSettings));
+            Defaults.EncryptionSettings,
+            fakeCredentials.SrpIdentity));
     }
 }

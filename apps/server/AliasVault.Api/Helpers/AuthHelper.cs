@@ -7,8 +7,11 @@
 
 namespace AliasVault.Api.Helpers;
 
+using System.Security.Cryptography;
+using System.Text;
 using AliasServerDb;
 using AliasVault.Api.Headers;
+using AliasVault.Auth;
 using AliasVault.Cryptography.Client;
 using Microsoft.Extensions.Caching.Memory;
 using SecureRemotePassword;
@@ -24,9 +27,21 @@ public static class AuthHelper
     public static readonly string CachePrefixEphemeral = "LoginEphemeral_";
 
     /// <summary>
-    /// Cache prefix for storing fake data for non-existent users.
+    /// Password the fake verifier for a non-existent user is derived from. Its value is irrelevant as
+    /// long as it is fixed: no client can ever produce a proof that matches the resulting verifier.
     /// </summary>
-    public static readonly string CachePrefixFakeData = "FakeData_";
+    private const string FakePassword = "fakePassword";
+
+    /// <summary>
+    /// Domain separation labels so the salt and the SRP identity of a username derive from
+    /// independent values.
+    /// </summary>
+    private const string FakeSaltLabel = "fake-srp-salt";
+
+    /// <summary>
+    /// Domain separation label for the derived SRP identity. See <see cref="FakeSaltLabel"/>.
+    /// </summary>
+    private const string FakeIdentityLabel = "fake-srp-identity";
 
     /// <summary>
     /// Helper method that validates the SRP session based on provided SRP identity, ephemeral and proof.
@@ -80,6 +95,40 @@ public static class AuthHelper
     }
 
     /// <summary>
+    /// Derives the SRP values that the login endpoint returns for a username that has no account, so
+    /// that response is indistinguishable from the response for a real one.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Every field a caller can observe is produced in the same shape a client would have registered it
+    /// in: the salt as uppercase hex of 32 bytes, the SRP identity as a version 4 UUID. A fake value in a
+    /// different shape than a real one turns this response into the enumeration oracle it exists to prevent.
+    /// </para>
+    /// <para>
+    /// The values are derived from a server-side secret instead of being generated once and cached,
+    /// because the username comes from an unauthenticated request. Caching per username lets any caller
+    /// grow server memory without limit by submitting names that do not exist, while deriving them keeps
+    /// the values stable per username at no stored cost.
+    /// </para>
+    /// </remarks>
+    /// <param name="username">The username that was submitted.</param>
+    /// <param name="serverSecret">Server-side secret the values are derived from.</param>
+    /// <returns>Tuple with the salt, verifier and SRP identity to return for this username.</returns>
+    public static (string Salt, string Verifier, string SrpIdentity) DeriveFakeSrpCredentials(string username, string serverSecret)
+    {
+        var normalizedUsername = UsernameHelper.NormalizeUsername(username);
+
+        var salt = Convert.ToHexString(DeriveFakeBytes(normalizedUsername, serverSecret, FakeSaltLabel));
+        var srpIdentity = DeriveFakeSrpIdentity(normalizedUsername, serverSecret);
+
+        // Real verifiers are derived with the SRP identity as identity, not with the username.
+        var privateKey = Srp.DerivePrivateKey(salt, srpIdentity, FakePassword);
+        var verifier = new SrpClient().DeriveVerifier(privateKey);
+
+        return (salt, verifier, srpIdentity);
+    }
+
+    /// <summary>
     /// Generate a device identifier based on request headers. This is used to associate refresh tokens
     /// with a specific device for a specific user.
     ///
@@ -119,5 +168,38 @@ public static class AuthHelper
         }
 
         return string.Join('|', parts);
+    }
+
+    /// <summary>
+    /// Derives the SRP identity returned for a username that has no account.
+    /// </summary>
+    /// <param name="normalizedUsername">The normalized username.</param>
+    /// <param name="serverSecret">Server-side secret the identity is derived from.</param>
+    /// <returns>A version 4 UUID, the same shape clients generate for a real registration.</returns>
+    private static string DeriveFakeSrpIdentity(string normalizedUsername, string serverSecret)
+    {
+        var bytes = DeriveFakeBytes(normalizedUsername, serverSecret, FakeIdentityLabel)[..16];
+
+        // Clients use crypto.randomUUID()/Guid.NewGuid(), which both produce a version 4 UUID. Stamp the
+        // version and variant bits so a derived identity is not recognizable by the nibbles that a real
+        // one always has fixed. Guid(byte[]) reads the first three groups little-endian, which puts the
+        // version nibble in the high half of byte 7 and the variant bits at the top of byte 8.
+        bytes[7] = (byte)((bytes[7] & 0x0F) | 0x40);
+        bytes[8] = (byte)((bytes[8] & 0x3F) | 0x80);
+
+        return new Guid(bytes).ToString();
+    }
+
+    /// <summary>
+    /// Derives a block of bytes for a username from the server secret.
+    /// </summary>
+    /// <param name="normalizedUsername">The normalized username.</param>
+    /// <param name="serverSecret">Server-side secret to derive from.</param>
+    /// <param name="label">Domain separation label keeping derived values independent of each other.</param>
+    /// <returns>32 derived bytes.</returns>
+    private static byte[] DeriveFakeBytes(string normalizedUsername, string serverSecret, string label)
+    {
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(serverSecret));
+        return hmac.ComputeHash(Encoding.UTF8.GetBytes(label + '|' + normalizedUsername));
     }
 }
