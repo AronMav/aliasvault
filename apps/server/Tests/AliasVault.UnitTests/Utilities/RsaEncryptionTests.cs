@@ -136,4 +136,38 @@ public class RsaEncryptionTests
             () => Encryption.EncryptSymmetricKeyWithRsa(symmetricKey, invalidPublicKey),
             "Encrypting with an invalid public key should throw an ArgumentException.");
     }
+
+    /// <summary>
+    /// A public key as the client generates it is accepted.
+    /// </summary>
+    [Test]
+    public void IsValidRsaPublicKey_WithClientGeneratedKey_ReturnsTrue()
+    {
+        Assert.That(Encryption.IsValidRsaPublicKey(PublicKey), Is.True);
+    }
+
+    /// <summary>
+    /// Values that are not a usable public key are rejected rather than stored and used later.
+    /// </summary>
+    /// <param name="publicKey">The value to check.</param>
+    [TestCase("")]
+    [TestCase("not json at all")]
+    [TestCase("{}")]
+    [TestCase("{\"kty\":\"RSA\",\"e\":\"AQAB\"}")]
+    [TestCase("{\"kty\":\"RSA\",\"e\":\"AQAB\",\"n\":\"AQAB\"}")]
+    public void IsValidRsaPublicKey_WithUnusableValue_ReturnsFalse(string publicKey)
+    {
+        Assert.That(Encryption.IsValidRsaPublicKey(publicKey), Is.False);
+    }
+
+    /// <summary>
+    /// An oversized value is rejected before it is parsed, so a caller cannot decide how much is stored.
+    /// </summary>
+    [Test]
+    public void IsValidRsaPublicKey_WithOversizedValue_ReturnsFalse()
+    {
+        var oversized = PublicKey + new string(' ', 8192);
+
+        Assert.That(Encryption.IsValidRsaPublicKey(oversized), Is.False);
+    }
 }

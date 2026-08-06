@@ -3638,6 +3638,11 @@ check_and_populate_env() {
         update_env_var "MAX_UPLOAD_SIZE_MB" "100"
     fi
 
+    # MAX_AUTH_REQUESTS_PER_IP_PER_MINUTE
+    if ! grep -q "^MAX_AUTH_REQUESTS_PER_IP_PER_MINUTE=" "$ENV_FILE" 2>/dev/null; then
+        update_env_var "MAX_AUTH_REQUESTS_PER_IP_PER_MINUTE" "60"
+    fi
+
     # ADMIN_IP_ALLOWLIST
     if ! grep -q "^ADMIN_IP_ALLOWLIST=" "$ENV_FILE" 2>/dev/null; then
         update_env_var "ADMIN_IP_ALLOWLIST" ""

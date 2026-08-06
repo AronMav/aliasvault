@@ -14,6 +14,7 @@ using System.Text;
 using AliasServerDb;
 using AliasVault.Api.Headers;
 using AliasVault.Api.Helpers;
+using AliasVault.Api.Services;
 using AliasVault.Auth;
 using AliasVault.Auth.IpAddress;
 using AliasVault.Cryptography.Client;
@@ -49,10 +50,11 @@ using SecureRemotePassword;
 /// <param name="settingsService">ServerSettingsService instance.</param>
 /// <param name="registrationRateLimitService">RegistrationRateLimitService instance.</param>
 /// <param name="ipBlockListService">IpBlockListService instance.</param>
+/// <param name="anonymousAuthRateLimitService">AnonymousAuthRateLimitService instance.</param>
 [Route("v{version:apiVersion}/[controller]")]
 [ApiController]
 [ApiVersion("1")]
-public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserManager<AliasVaultUser> userManager, SignInManager<AliasVaultUser> signInManager, IConfiguration configuration, IMemoryCache cache, ITimeProvider timeProvider, AuthLoggingService authLoggingService, Config config, ServerSettingsService settingsService, RegistrationRateLimitService registrationRateLimitService, IpBlockListService ipBlockListService) : ControllerBase
+public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserManager<AliasVaultUser> userManager, SignInManager<AliasVaultUser> signInManager, IConfiguration configuration, IMemoryCache cache, ITimeProvider timeProvider, AuthLoggingService authLoggingService, Config config, ServerSettingsService settingsService, RegistrationRateLimitService registrationRateLimitService, IpBlockListService ipBlockListService, AnonymousAuthRateLimitService anonymousAuthRateLimitService) : ControllerBase
 {
     /// <summary>
     /// Timeout in minutes for mobile login requests. Clients use 2 minutes for countdown, we use 3 here to give a bit of extra buffer time.
@@ -133,6 +135,13 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
     [HttpPost("login")]
     public async Task<IActionResult> Login([FromBody] LoginInitiateRequest model)
     {
+        // This endpoint is reachable without authentication and derives an SRP ephemeral per call,
+        // whether or not the account exists, so cap what a single address can ask for.
+        if (!anonymousAuthRateLimitService.TryConsume(IpAddressUtility.GetRawIpAddressFromContext(HttpContext)?.ToString()))
+        {
+            return StatusCode(429, ApiErrorCodeHelper.CreateValidationErrorResponse(ApiErrorCode.AUTH_RATE_LIMIT_EXCEEDED, 429));
+        }
+
         // Bound the username before anything reads it. It is unauthenticated input and the work below
         // hashes it, derives SRP values from it and writes it to the auth log, all of which would
         // otherwise scale with whatever the caller put in the request body.
@@ -640,6 +649,20 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
     [AllowAnonymous]
     public async Task<IActionResult> InitiateMobileLogin([FromBody] MobileLoginInitiateRequest model)
     {
+        // Each call to this endpoint stores a row that stays until the retention task removes it, and it
+        // needs no authentication to reach, so cap what a single address can create.
+        if (!anonymousAuthRateLimitService.TryConsume(IpAddressUtility.GetRawIpAddressFromContext(HttpContext)?.ToString()))
+        {
+            return StatusCode(429, ApiErrorCodeHelper.CreateValidationErrorResponse(ApiErrorCode.AUTH_RATE_LIMIT_EXCEEDED, 429));
+        }
+
+        // Reject a key that could never complete the exchange instead of storing it. The column holds
+        // unbounded text, so an unusable value is only ever a way to spend storage.
+        if (!Cryptography.Server.Encryption.IsValidRsaPublicKey(model.ClientPublicKey))
+        {
+            return BadRequest(ApiErrorCodeHelper.CreateValidationErrorResponse(ApiErrorCode.MOBILE_LOGIN_INVALID_PUBLIC_KEY, 400));
+        }
+
         await using var context = await dbContextFactory.CreateDbContextAsync();
 
         // Generate a unique request ID

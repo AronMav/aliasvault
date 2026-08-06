@@ -153,4 +153,14 @@ public enum ApiErrorCode
     /// Generic user account registration failure.
     /// </summary>
     REGISTRATION_FAILED,
+
+    /// <summary>
+    /// Too many authentication requests were made from this IP address.
+    /// </summary>
+    AUTH_RATE_LIMIT_EXCEEDED,
+
+    /// <summary>
+    /// The public key supplied for a mobile login request is not a usable RSA public key.
+    /// </summary>
+    MOBILE_LOGIN_INVALID_PUBLIC_KEY,
 }

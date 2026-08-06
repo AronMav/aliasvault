@@ -17,12 +17,52 @@ using System.Text.Json;
 public static class Encryption
 {
     /// <summary>
+    /// The RSA key size the mobile login exchange uses.
+    /// </summary>
+    private const int ExpectedRsaKeySizeBits = 2048;
+
+    /// <summary>
+    /// Upper bound on the length of a public key in JWK format, so an oversized value is rejected before
+    /// it is parsed. A 2048-bit key serializes to a few hundred characters.
+    /// </summary>
+    private const int MaxPublicKeyJwkLength = 4096;
+
+    /// <summary>
     /// Generates a random symmetric key for use with AES-256.
     /// </summary>
     /// <returns>A 256-bit (32-byte) random key as a byte array.</returns>
     public static byte[] GenerateRandomSymmetricKey()
     {
         return RandomNumberGenerator.GetBytes(32); // 256 bits
+    }
+
+    /// <summary>
+    /// Checks whether a string is an RSA public key in JWK format that this class can encrypt with.
+    /// </summary>
+    /// <remarks>
+    /// Used to reject a key on the way in rather than on the way out. Storing whatever a caller sent and
+    /// only finding out it was unusable when the key is needed leaves the caller in control of both the
+    /// stored size and the moment the failure surfaces.
+    /// </remarks>
+    /// <param name="publicKey">The value to check.</param>
+    /// <returns>True if the value is a usable RSA public key in JWK format.</returns>
+    public static bool IsValidRsaPublicKey(string publicKey)
+    {
+        if (string.IsNullOrEmpty(publicKey) || publicKey.Length > MaxPublicKeyJwkLength)
+        {
+            return false;
+        }
+
+        try
+        {
+            using var rsa = RSA.Create();
+            ImportPublicKey(rsa, publicKey);
+            return rsa.KeySize == ExpectedRsaKeySizeBits;
+        }
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException or FormatException or CryptographicException)
+        {
+            return false;
+        }
     }
 
     /// <summary>
