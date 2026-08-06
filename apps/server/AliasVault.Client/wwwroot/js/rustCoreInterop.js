@@ -528,3 +528,47 @@ window.rustCoreSrpVerifySession = async function(clientPublic, clientProof, sess
         throw error;
     }
 };
+
+/**
+ * Open a KDBX (KeePass) database and map its entries.
+ * Errors are thrown rather than returned: the caller must be able to tell a
+ * wrong password from a successful parse.
+ * @param {Uint8Array} fileBytes - The .kdbx file contents.
+ * @param {string} password - The master password.
+ * @returns {Promise<string>} JSON string containing KdbxImportResult.
+ */
+window.rustCoreKdbxOpen = async function(fileBytes, password) {
+    if (!await initRustCore()) {
+        throw new Error('Rust WASM module not available');
+    }
+
+    return wasmModule.kdbxOpen(fileBytes, password);
+};
+
+/**
+ * Take one attachment blob from an open session. The blob is released afterwards
+ * so a large import never holds every attachment twice.
+ * @param {string} sessionId - Session returned by rustCoreKdbxOpen.
+ * @param {string} attachmentId - Attachment id from the item metadata.
+ * @returns {Promise<Uint8Array|null>} The blob, or null if already taken.
+ */
+window.rustCoreKdbxTakeAttachment = async function(sessionId, attachmentId) {
+    if (!await initRustCore()) {
+        throw new Error('Rust WASM module not available');
+    }
+
+    return wasmModule.kdbxTakeAttachment(sessionId, attachmentId) ?? null;
+};
+
+/**
+ * Release a session and any blobs it still holds.
+ * @param {string} sessionId - Session returned by rustCoreKdbxOpen.
+ * @returns {Promise<void>} Nothing.
+ */
+window.rustCoreKdbxClose = async function(sessionId) {
+    if (!await initRustCore()) {
+        return;
+    }
+
+    wasmModule.kdbxClose(sessionId);
+};

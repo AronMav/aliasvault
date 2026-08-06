@@ -17,6 +17,7 @@ cd "$SCRIPT_DIR"
 # Output directories
 DIST_DIR="$SCRIPT_DIR/dist"
 WASM_DIR="$DIST_DIR/wasm"
+WASM_WEB_DIR="$DIST_DIR/wasm-web"
 DOTNET_DIR="$DIST_DIR/dotnet"
 IOS_DIR="$DIST_DIR/ios"
 ANDROID_DIR="$DIST_DIR/android"
@@ -200,6 +201,16 @@ build_browser() {
         wasm-pack build --release --target web --out-dir "$WASM_DIR" --features wasm
     fi
 
+    # Second artifact: the Blazor web client additionally gets KDBX import support,
+    # which is what makes importing KeePass databases with attachments possible.
+    # The browser extension keeps the smaller build without it.
+    echo -e "  Running wasm-pack build (web client, with kdbx)..."
+    if $FAST_MODE; then
+        wasm-pack build --dev --target web --out-dir "$WASM_WEB_DIR" --features wasm,kdbx
+    else
+        wasm-pack build --release --target web --out-dir "$WASM_WEB_DIR" --features wasm,kdbx
+    fi
+
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))
 
@@ -246,8 +257,8 @@ README_EOF
         echo -e "${BLUE}Distributing to Blazor client...${NC}"
         rm -rf "$BLAZOR_CLIENT_DIST"
         mkdir -p "$BLAZOR_CLIENT_DIST"
-        cp "$WASM_DIR"/aliasvault_core_bg.wasm "$BLAZOR_CLIENT_DIST/"
-        cp "$WASM_DIR"/aliasvault_core.js "$BLAZOR_CLIENT_DIST/"
+        cp "$WASM_WEB_DIR"/aliasvault_core_bg.wasm "$BLAZOR_CLIENT_DIST/"
+        cp "$WASM_WEB_DIR"/aliasvault_core.js "$BLAZOR_CLIENT_DIST/"
 
         echo -e "${GREEN}Distributed to: $BLAZOR_CLIENT_DIST${NC}"
         ls -lh "$BLAZOR_CLIENT_DIST/"

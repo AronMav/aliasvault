@@ -173,6 +173,7 @@ public static class LastPassImporter
             }
         }
 
-        return noteLines.Count > 0 ? string.Join(Environment.NewLine, noteLines) : null;
+        // Literal newline, not Environment.NewLine: imports must not differ per platform.
+        return noteLines.Count > 0 ? string.Join('\n', noteLines) : null;
     }
 }

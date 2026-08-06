@@ -24,6 +24,12 @@ public class ImportFileResult
     public List<ImportFailure> FailedItems { get; init; } = new();
 
     /// <summary>
+    /// Gets informational notes about the import that are neither failures nor items,
+    /// such as content that was deliberately skipped. Shown in the preview step.
+    /// </summary>
+    public List<string> Notes { get; init; } = new();
+
+    /// <summary>
     /// Implicit conversion from a plain credential list. Lets importers that don't support
     /// per-item failure collection (CSV imports, etc.) return a List directly without boilerplate.
     /// </summary>

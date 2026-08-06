@@ -87,6 +87,7 @@ public class VaultController(ILogger<VaultController> logger, IAliasServerDbCont
             return Ok(new Shared.Models.WebApi.Vault.VaultGetResponse
             {
                 Status = VaultStatus.Ok,
+                MaxUploadSizeMb = UploadLimits.MaxUploadSizeMb,
                 Vault = new Shared.Models.WebApi.Vault.Vault
                 {
                     Username = user.UserName!,
@@ -111,6 +112,7 @@ public class VaultController(ILogger<VaultController> logger, IAliasServerDbCont
         return Ok(new Shared.Models.WebApi.Vault.VaultGetResponse
         {
             Status = VaultStatus.Ok,
+            MaxUploadSizeMb = UploadLimits.MaxUploadSizeMb,
             Vault = new Shared.Models.WebApi.Vault.Vault
             {
                 Username = user.UserName!,

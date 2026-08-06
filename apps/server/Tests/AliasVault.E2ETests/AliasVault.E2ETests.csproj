@@ -31,6 +31,8 @@
       <EmbeddedResource Include="TestData\TestVault.avux" />
       <None Remove="TestData\TestVault.avex" />
       <EmbeddedResource Include="TestData\TestVault.avex" />
+      <None Remove="TestData\TestKeePassWithAttachment.kdbx" />
+      <EmbeddedResource Include="TestData\TestKeePassWithAttachment.kdbx" />
     </ItemGroup>
 
     <ItemGroup>

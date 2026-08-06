@@ -24,6 +24,9 @@ pub mod identity_generator;
 pub mod srp;
 pub mod argon2;
 
+#[cfg(feature = "kdbx")]
+pub mod kdbx;
+
 pub use error::VaultError;
 pub use vault_merge::{
     merge_vaults, MergeInput, MergeOutput, MergeStats, SqlStatement, TableData,

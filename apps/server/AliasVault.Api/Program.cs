@@ -61,8 +61,9 @@ var ipLoggingEnabled = Environment.GetEnvironmentVariable("IP_LOGGING_ENABLED") 
 config.IpLoggingEnabled = bool.Parse(ipLoggingEnabled);
 
 // Configure maximum upload size (applies to vault syncs and any other client uploads).
-var maxUploadSizeMb = int.TryParse(Environment.GetEnvironmentVariable("MAX_UPLOAD_SIZE_MB"), out var parsedMb) && parsedMb > 0 ? parsedMb : 100;
-var maxUploadSizeBytes = (long)maxUploadSizeMb * 1024 * 1024;
+// The same value is reported to clients in VaultGetResponse so they can warn before
+// an import instead of only discovering the limit through an HTTP 413.
+var maxUploadSizeBytes = AliasVault.Api.UploadLimits.MaxUploadSizeBytes;
 
 builder.WebHost.ConfigureKestrel(options =>
 {

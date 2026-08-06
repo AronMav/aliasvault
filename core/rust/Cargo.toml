@@ -24,6 +24,10 @@ uniffi-cli = ["uniffi/cli"]
 wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:console_error_panic_hook"]
 # Feature for C FFI exports (.NET P/Invoke)
 ffi = []
+# Feature for KDBX (KeePass database) import - only enabled for the Blazor web client build
+kdbx = ["dep:keepass"]
+# Feature that additionally enables database writing, used by tests to build fixtures
+kdbx-testing = ["kdbx", "keepass/save_kdbx4"]
 
 [dependencies]
 # Serialization - core dependency for JSON handling
@@ -47,6 +51,9 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 
 # Argon2 password hashing
 argon2 = "0.5"
+
+# KeePass .kdbx database parsing (optional, see the kdbx feature)
+keepass = { version = "0.13", optional = true, default-features = false }
 
 # UniFFI for Swift/Kotlin bindings (optional)
 # Note: Don't add "cli" feature here - it pulls in heavy bindgen dependencies

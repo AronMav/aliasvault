@@ -45,6 +45,13 @@ public sealed class DbServiceState
         DecryptionFailed,
 
         /// <summary>
+        /// The vault could not be fetched from the server, e.g. the request failed or was
+        /// rejected. Kept separate from <see cref="DecryptionFailed"/> because it usually
+        /// clears itself on a retry and says nothing about the integrity of the vault.
+        /// </summary>
+        LoadFailed,
+
+        /// <summary>
         /// The loaded vault version is not recognized by the current client (most likely a new version).
         /// </summary>
         VaultVersionUnrecognized,

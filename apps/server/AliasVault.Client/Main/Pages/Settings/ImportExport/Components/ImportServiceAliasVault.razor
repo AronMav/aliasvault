@@ -2,7 +2,9 @@
 @inject NavigationManager NavigationManager
 @inject GlobalNotificationService GlobalNotificationService
 @inject IStringLocalizerFactory LocalizerFactory
+@inject AliasVault.Client.Services.Crypto.AvexCryptoService AvexCrypto
 @using AliasVault.ImportExport.Models
+@using AliasVault.ImportExport.Exceptions
 @using AliasVault.ImportExport.Importers
 @using AliasVault.ImportExport
 @using Microsoft.Extensions.Localization
@@ -14,14 +16,41 @@
     Description="@Localizer["AliasVaultDescription"]"
     LogoUrl="img/logo.svg"
     AcceptedFileExtensions="AcceptedExtensions"
-    ProcessFileCallback="ProcessFile">
+    PasswordProtectedFileExtensions="PasswordProtectedExtensions"
+    ProcessFileCallback="ProcessFile"
+    DecryptFileCallback="DecryptFile">
     <p class="text-gray-700 dark:text-gray-300 mb-4">@Localizer["AliasVaultInstructionsPart1"]</p>
 </ImportServiceCard>
 
 @code {
     private IStringLocalizer Localizer => LocalizerFactory.Create("Components.Main.Settings.ImportExport.ImportServices", "AliasVault.Client");
     private static readonly string[] AcceptedExtensions = new[] { ".avex", ".avux", ".csv" };
+    private static readonly string[] PasswordProtectedExtensions = new[] { ".avex" };
     private ImportServiceCard? importServiceCard;
+
+    /// <summary>
+    /// Decrypts an encrypted .avex file and parses the resulting .avux payload.
+    /// This lives here rather than in the shared card so that the card stays
+    /// format agnostic and can serve .kdbx databases as well.
+    /// </summary>
+    /// <param name="fileBytes">The encrypted file bytes.</param>
+    /// <param name="filename">The original filename.</param>
+    /// <param name="password">The password entered by the user.</param>
+    /// <returns>The parsed import result.</returns>
+    private async Task<ImportFileResult> DecryptFile(byte[] fileBytes, string filename, string password)
+    {
+        byte[] avuxBytes;
+        try
+        {
+            avuxBytes = await AvexCrypto.DecryptAvexAsync(fileBytes, password);
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("password may be incorrect"))
+        {
+            throw new InvalidImportPasswordException(ex.Message, ex);
+        }
+
+        return await VaultImportService.ImportFromAvuxAsync(avuxBytes);
+    }
 
     /// <summary>
     /// Processes files with auto-detection based on file extension.

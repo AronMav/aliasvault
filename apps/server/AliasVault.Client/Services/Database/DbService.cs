@@ -7,6 +7,8 @@
 
 namespace AliasVault.Client.Services.Database;
 
+using System.Buffers;
+using System.Buffers.Text;
 using System.Data;
 using System.Net;
 using System.Net.Http.Json;
@@ -86,6 +88,13 @@ public sealed class DbService : IDisposable
     public SettingsService Settings => _settingsService;
 
     /// <summary>
+    /// Gets the maximum vault upload size in megabytes accepted by the server, as reported
+    /// when the vault was last fetched. Null when the server does not report one, in which
+    /// case callers must not assume any limit.
+    /// </summary>
+    public int? MaxUploadSizeMb { get; private set; }
+
+    /// <summary>
     /// Gets database service state object which can be subscribed to.
     /// </summary>
     /// <returns>DbServiceState instance.</returns>
@@ -156,10 +165,12 @@ public sealed class DbService : IDisposable
         // Save the actual dbContext.
         await _dbContext.SaveChangesAsync();
 
-        string base64String = await ExportSqliteToBase64Async();
+        // Encrypt the base64 payload as bytes. This is the same plaintext the string based
+        // overload would encrypt, so the stored vault format is unchanged, but it avoids
+        // building a vault-sized .NET string and JSON encoding it for the interop call.
+        var base64Utf8 = await ExportSqliteToUtf8Base64Async();
 
-        // SymmetricEncrypt base64 string using IJSInterop.
-        return await _jsInteropService.SymmetricEncrypt(base64String, _authService.GetEncryptionKeyAsBase64Async());
+        return await _jsInteropService.SymmetricEncryptFromBytes(base64Utf8, _authService.GetEncryptionKeyAsBase64Async());
     }
 
     /// <summary>
@@ -310,23 +321,61 @@ public sealed class DbService : IDisposable
     /// <returns>Base64 encoded string that represents SQLite database.</returns>
     public async Task<string> ExportSqliteToBase64Async()
     {
+        return Convert.ToBase64String(await ExportSqliteToBytesAsync());
+    }
+
+    /// <summary>
+    /// Exports the SQLite database and returns its base64 representation as UTF-8 bytes.
+    /// </summary>
+    /// <remarks>
+    /// Same payload as <see cref="ExportSqliteToBase64Async"/>, without ever materializing it as a
+    /// .NET string. A string would cost two bytes per character and then has to survive JSON
+    /// serialization on the way to JavaScript, which is what exhausts the browser heap on
+    /// attachment-heavy vaults.
+    /// </remarks>
+    /// <returns>Base64 of the database, encoded as UTF-8 bytes.</returns>
+    public async Task<byte[]> ExportSqliteToUtf8Base64Async()
+    {
+        var bytes = await ExportSqliteToBytesAsync();
+
+        var base64Utf8 = new byte[Base64.GetMaxEncodedToUtf8Length(bytes.Length)];
+        var status = Base64.EncodeToUtf8(bytes, base64Utf8, out _, out var written);
+        if (status != OperationStatus.Done || written != base64Utf8.Length)
+        {
+            throw new InvalidOperationException($"Failed to base64 encode the vault: {status}.");
+        }
+
+        return base64Utf8;
+    }
+
+    /// <summary>
+    /// Returns the size of the vault as it would be exported, without encrypting it.
+    /// </summary>
+    /// <remarks>
+    /// Used for size checks only. Encrypting the vault just to measure it would cost as much as
+    /// an actual save, on a path where the user is only being shown a warning.
+    /// </remarks>
+    /// <returns>Size of the exported database in bytes.</returns>
+    public async Task<long> GetVaultSizeBytesAsync()
+    {
         var tempFileName = Path.GetRandomFileName();
 
-        // Export SQLite memory database to a temp file.
-        using var memoryStream = new MemoryStream();
-        await using var command = _sqlConnection!.CreateCommand();
-        command.CommandText = "VACUUM main INTO @fileName";
-        command.Parameters.Add(new SqliteParameter("@fileName", tempFileName));
-        await command.ExecuteNonQueryAsync();
+        try
+        {
+            await using var command = _sqlConnection!.CreateCommand();
+            command.CommandText = "VACUUM main INTO @fileName";
+            command.Parameters.Add(new SqliteParameter("@fileName", tempFileName));
+            await command.ExecuteNonQueryAsync();
 
-        // Get bytes.
-        var bytes = await File.ReadAllBytesAsync(tempFileName);
-        string base64String = Convert.ToBase64String(bytes);
-
-        // Delete temp file.
-        File.Delete(tempFileName);
-
-        return base64String;
+            return new FileInfo(tempFileName).Length;
+        }
+        finally
+        {
+            if (File.Exists(tempFileName))
+            {
+                File.Delete(tempFileName);
+            }
+        }
     }
 
     /// <summary>
@@ -723,6 +772,34 @@ public sealed class DbService : IDisposable
     }
 
     /// <summary>
+    /// Exports the SQLite database to a temporary file and returns its raw bytes.
+    /// </summary>
+    /// <returns>The database file contents.</returns>
+    private async Task<byte[]> ExportSqliteToBytesAsync()
+    {
+        var tempFileName = Path.GetRandomFileName();
+
+        try
+        {
+            await using var command = _sqlConnection!.CreateCommand();
+            command.CommandText = "VACUUM main INTO @fileName";
+            command.Parameters.Add(new SqliteParameter("@fileName", tempFileName));
+            await command.ExecuteNonQueryAsync();
+
+            return await File.ReadAllBytesAsync(tempFileName);
+        }
+        finally
+        {
+            // The temp file holds the unencrypted database, so it must go even when the
+            // export throws partway through.
+            if (File.Exists(tempFileName))
+            {
+                File.Delete(tempFileName);
+            }
+        }
+    }
+
+    /// <summary>
     /// Fetches the latest vault from server, merges with local changes using Rust WASM, and saves the merged result.
     /// Called when server responds with "Outdated" status, indicating another client has uploaded a newer vault.
     /// </summary>
@@ -735,6 +812,8 @@ public sealed class DbService : IDisposable
 
             // Fetch the latest vault from server.
             var response = await _httpClient.GetFromJsonAsync<VaultGetResponse>("v1/Vault");
+            MaxUploadSizeMb = response?.MaxUploadSizeMb ?? MaxUploadSizeMb;
+
             if (response?.Vault == null || string.IsNullOrEmpty(response.Vault.Blob))
             {
                 _logger.LogError("Failed to fetch vault from server for merge.");
@@ -858,6 +937,8 @@ public sealed class DbService : IDisposable
             var response = await _httpClient.GetFromJsonAsync<VaultGetResponse>("v1/Vault");
             if (response is not null)
             {
+                MaxUploadSizeMb = response.MaxUploadSizeMb;
+
                 var vault = response.Vault!;
                 StoreVaultRevisionNumber(vault.CurrentRevisionNumber);
 
@@ -900,6 +981,15 @@ public sealed class DbService : IDisposable
                 _state.UpdateState(DbServiceState.DatabaseStatus.Ready);
                 return true;
             }
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            // Fetching the vault failed before any decryption was attempted. Reporting this
+            // as a decryption failure told users their data was inaccessible and to contact
+            // support, when in practice a retry fixes it, e.g. after a token refresh.
+            _logger.LogError(ex, "Error fetching vault from server.");
+            _state.UpdateState(DbServiceState.DatabaseStatus.LoadFailed);
+            return false;
         }
         catch (Exception ex)
         {

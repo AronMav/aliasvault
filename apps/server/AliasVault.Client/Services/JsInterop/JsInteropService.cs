@@ -58,6 +58,29 @@ public sealed class JsInteropService(IJSRuntime jsRuntime)
     }
 
     /// <summary>
+    /// Symmetrically encrypts already-encoded bytes and returns the base64 ciphertext.
+    /// </summary>
+    /// <remarks>
+    /// Produces byte-identical output to <see cref="SymmetricEncrypt"/> for the same plaintext,
+    /// because that method UTF-8 encodes its string argument on the JavaScript side. Prefer this
+    /// overload for large payloads: passing them as a string makes Blazor serialize the value as
+    /// a JSON interop argument, and the escape buffer for a vault-sized string exhausts the
+    /// 32-bit browser heap.
+    /// </remarks>
+    /// <param name="plainBytes">Plain bytes to encrypt.</param>
+    /// <param name="encryptionKey">Encryption key to use, base64 encoded.</param>
+    /// <returns>Base64 encoded ciphertext.</returns>
+    public async Task<string> SymmetricEncryptFromBytes(byte[] plainBytes, string encryptionKey)
+    {
+        if (plainBytes.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        return await jsRuntime.InvokeAsync<string>("cryptoInterop.encryptBytesToBase64", plainBytes, encryptionKey);
+    }
+
+    /// <summary>
     /// Symmetrically decrypts a string using the provided encryption key.
     /// </summary>
     /// <param name="ciphertext">Cipher text to decrypt.</param>

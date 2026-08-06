@@ -178,6 +178,18 @@
     <value>File size exceeds {0}MB limit.</value>
     <comment>Error message when file is too large. {0} is the maximum allowed size in megabytes</comment>
   </data>
+  <data name="ImportErrorDatabaseExceedsServerLimit" xml:space="preserve">
+    <value>This file is larger than the {0} MB this server accepts for a vault, so it cannot be imported. Remove some attachments in your password manager and export again.</value>
+    <comment>Error shown when the uploaded file alone already exceeds the server upload limit. {0} is the limit in megabytes</comment>
+  </data>
+  <data name="ImportWarningAttachmentsExceedBrowserLimit" xml:space="preserve">
+    <value>These attachments would grow your vault beyond about {0} MB, which is more than the browser can save in one piece. The import will fail at the end. Uncheck "Import attachments" to import everything else, and add the files you need individually afterwards.</value>
+    <comment>Warning shown in the preview when the resulting vault would be too large for the browser to save. {0} is the ceiling in megabytes</comment>
+  </data>
+  <data name="ImportWarningAttachmentsExceedServerLimit" xml:space="preserve">
+    <value>Importing these attachments would push your vault past the {0} MB this server accepts, and it would stop syncing. Uncheck "Import attachments" to import everything else.</value>
+    <comment>Warning shown in the preview when the vault plus the incoming attachments would exceed the server upload limit. {0} is the limit in megabytes</comment>
+  </data>
   <data name="EncryptedFilePasswordPrompt" xml:space="preserve">
     <value>This file is encrypted. Please enter the password you used when creating the export.</value>
     <comment>Prompt for encrypted file password</comment>
