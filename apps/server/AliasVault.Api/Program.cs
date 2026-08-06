@@ -146,14 +146,34 @@ builder.Services.AddAuthentication(options =>
     options.EventsType = typeof(TimeValidationJwtBearerEvents);
 });
 
-// Configure CORS
+// Configure CORS. ALLOWED_ORIGINS restricts which sites the browser will let call this API; leaving
+// it empty keeps accepting any origin, which is what installs have always done.
+//
+// The wildcard is not the hole it would be in a cookie-authenticated API: this one authenticates with
+// a bearer token only, and no credentials are ever allowed cross-origin, so another site's script
+// cannot make the browser attach a session it does not already hold. Restricting is still worth doing
+// where the set of clients is known, which is why this is configurable, but it is not made the default:
+// which origins are legitimate depends on the install, and getting it wrong locks out working clients.
+var allowedOrigins = (Environment.GetEnvironmentVariable("ALLOWED_ORIGINS") ?? string.Empty)
+    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
 builder.Services.AddCors(options =>
 {
     options.AddPolicy(
         "CorsPolicy",
-        policy => policy.AllowAnyOrigin()
-            .AllowAnyMethod()
-            .AllowAnyHeader());
+        policy =>
+        {
+            if (allowedOrigins.Length > 0)
+            {
+                policy.WithOrigins(allowedOrigins);
+            }
+            else
+            {
+                policy.AllowAnyOrigin();
+            }
+
+            policy.AllowAnyMethod().AllowAnyHeader();
+        });
 });
 
 builder.Services.AddControllers()
