@@ -100,7 +100,7 @@ public class EncryptionDefaultsConsistencyTests
     [Test]
     public void DefaultsSatisfyTheServerPolicyTest()
     {
-        Assert.That(EncryptionSettingsPolicy.IsAcceptable(Defaults.EncryptionType, Defaults.EncryptionSettings), Is.True);
+        Assert.That(EncryptionSettingsPolicy.IsAcceptable(Defaults.EncryptionType, Defaults.EncryptionSettings, Defaults.EncryptionSettings), Is.True);
     }
 
     private static int ReadValue(string content, string pattern, string relativePath, string what)

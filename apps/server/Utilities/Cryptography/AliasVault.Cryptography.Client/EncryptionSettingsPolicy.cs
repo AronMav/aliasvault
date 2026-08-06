@@ -10,35 +10,22 @@ namespace AliasVault.Cryptography.Client;
 using System.Text.Json;
 
 /// <summary>
-/// Parses and bounds the Argon2id parameters a client reports having used.
+/// Decides whether the Argon2id parameters a client reports having used can be recorded against a vault.
 /// </summary>
 /// <remarks>
-/// A vault is only openable with the parameters it was encrypted under, so whatever a client
-/// reports here is handed straight back to every client at the next login. That makes this the
-/// point where a value has to be checked: parameters below the current minimum would weaken the
-/// key derivation for the account from then on, and absurdly high ones would leave a vault that
-/// no device can afford to open. Both are rejected rather than clamped, because a client whose
-/// parameters are not stored verbatim would derive a different key than the one on record.
+/// A vault is only openable with the parameters it was encrypted under, so whatever is accepted here
+/// is handed back to every client at the next login. Two things have to be kept out: parameters that
+/// cost the account less work than the ones it already had, and parameters so expensive that no phone
+/// or browser tab can open the vault again.
+///
+/// The lower bound is the account's own current parameters rather than a fixed number, because a
+/// deployment chooses what it registers accounts with (see CryptographyOverride in the client config)
+/// and a password change must not quietly overrule that choice in either direction. Values are
+/// rejected rather than clamped: the client has already derived its key, so recording anything other
+/// than what it reports produces a vault it cannot open.
 /// </remarks>
 public static class EncryptionSettingsPolicy
 {
-    /// <summary>
-    /// Lowest memory size accepted, in KiB. This is the OWASP minimum for Argon2id at two
-    /// iterations, and was the AliasVault default up to and including 0.25, so every existing
-    /// vault satisfies it.
-    /// </summary>
-    public const int MinMemorySize = 19456;
-
-    /// <summary>
-    /// Lowest iteration count accepted.
-    /// </summary>
-    public const int MinIterations = 2;
-
-    /// <summary>
-    /// Lowest degree of parallelism accepted.
-    /// </summary>
-    public const int MinDegreeOfParallelism = 1;
-
     /// <summary>
     /// Highest memory size accepted, in KiB (1 GiB). Above this a vault stops being openable on
     /// the phones and browser tabs that also have to open it.
@@ -56,13 +43,22 @@ public static class EncryptionSettingsPolicy
     public const int MaxDegreeOfParallelism = 4;
 
     /// <summary>
-    /// Checks that a client-reported encryption type and settings pair is one this server is
-    /// willing to record against a vault.
+    /// Lowest memory size the Argon2id specification allows for a given degree of parallelism, per lane.
+    /// </summary>
+    private const int MinMemorySizePerLane = 8;
+
+    /// <summary>
+    /// Checks that the parameters a client reports can be recorded against a vault that currently
+    /// holds the given ones.
     /// </summary>
     /// <param name="encryptionType">The encryption type reported by the client.</param>
     /// <param name="encryptionSettings">The encryption settings JSON reported by the client.</param>
-    /// <returns>True when the pair is usable and within bounds.</returns>
-    public static bool IsAcceptable(string? encryptionType, string? encryptionSettings)
+    /// <param name="currentEncryptionSettings">
+    /// The settings the vault holds today. The reported parameters may not cost less work than these.
+    /// When they cannot be parsed, only the absolute bounds apply, since there is nothing to compare to.
+    /// </param>
+    /// <returns>True when the reported parameters are usable and no weaker than the current ones.</returns>
+    public static bool IsAcceptable(string? encryptionType, string? encryptionSettings, string? currentEncryptionSettings)
     {
         if (!string.Equals(encryptionType, Defaults.EncryptionType, StringComparison.Ordinal))
         {
@@ -74,12 +70,22 @@ public static class EncryptionSettingsPolicy
             return false;
         }
 
-        return parameters.MemorySize >= MinMemorySize
-            && parameters.MemorySize <= MaxMemorySize
-            && parameters.Iterations >= MinIterations
-            && parameters.Iterations <= MaxIterations
-            && parameters.DegreeOfParallelism >= MinDegreeOfParallelism
-            && parameters.DegreeOfParallelism <= MaxDegreeOfParallelism;
+        if (parameters.MemorySize > MaxMemorySize
+            || parameters.Iterations is < 1 or > MaxIterations
+            || parameters.DegreeOfParallelism is < 1 or > MaxDegreeOfParallelism
+            || parameters.MemorySize < MinMemorySizePerLane * parameters.DegreeOfParallelism)
+        {
+            return false;
+        }
+
+        if (!TryParse(currentEncryptionSettings, out var current))
+        {
+            return true;
+        }
+
+        // Compare the work a guess costs rather than each parameter on its own, so trading memory
+        // for passes is allowed as long as the total does not fall.
+        return (long)parameters.MemorySize * parameters.Iterations >= (long)current.MemorySize * current.Iterations;
     }
 
     /// <summary>

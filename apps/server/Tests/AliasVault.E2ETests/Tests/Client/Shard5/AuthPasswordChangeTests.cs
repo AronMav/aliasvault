@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------
 // <copyright file="AuthPasswordChangeTests.cs" company="aliasvault">
 // Copyright (c) aliasvault. All rights reserved.
 // Licensed under the AGPLv3 license. See LICENSE.md file in the project root for full license information.
@@ -6,6 +6,8 @@
 //-----------------------------------------------------------------------
 
 namespace AliasVault.E2ETests.Tests.Client.Shard5;
+
+using Microsoft.EntityFrameworkCore;
 
 /// <summary>
 /// End-to-end tests for authentication.
@@ -79,5 +81,26 @@ public class AuthPasswordChangeTests : ClientPlaywrightTest
         // Check if the service name is still present in the content.
         pageContent = await Page.TextContentAsync("body");
         Assert.That(pageContent, Does.Contain(serviceNameBefore), "Created item service name does not appear on login page after hard page reload. Check if the database is correctly persisted and then loaded from the server.");
+
+        // The vault has to keep the key derivation parameters this instance registers accounts with.
+        // This deployment overrides them (see CryptographyOverrideSettings above), and a password
+        // change that quietly swapped in the build's own defaults would hand a user a vault whose
+        // parameters their deployment never chose --- on a deployment that lowered them for a slow
+        // device, one that device can no longer open.
+        var vaults = await ApiDbContext.Vaults
+            .Where(x => x.User.UserName == TestUserUsername)
+            .OrderBy(x => x.RevisionNumber)
+            .Select(x => new { x.RevisionNumber, x.EncryptionType, x.EncryptionSettings })
+            .ToListAsync();
+
+        Assert.That(vaults, Is.Not.Empty, "No vaults found for the test user.");
+        Assert.Multiple(() =>
+        {
+            foreach (var vault in vaults)
+            {
+                Assert.That(vault.EncryptionType, Is.EqualTo("Argon2Id"), $"Vault revision {vault.RevisionNumber} records an unexpected encryption type.");
+                Assert.That(vault.EncryptionSettings, Is.EqualTo(TestEncryptionSettings), $"Vault revision {vault.RevisionNumber} records different key derivation parameters than the ones this instance registers accounts with.");
+            }
+        });
     }
 }

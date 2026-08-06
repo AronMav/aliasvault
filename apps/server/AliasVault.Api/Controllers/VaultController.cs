@@ -297,7 +297,7 @@ public class VaultController(ILogger<VaultController> logger, IAliasServerDbCont
         {
             // Reject rather than fall back: the client has already derived its key, so quietly
             // substituting different parameters would produce a vault it cannot open again.
-            if (!EncryptionSettingsPolicy.IsAcceptable(newEncryptionType, newEncryptionSettings))
+            if (!EncryptionSettingsPolicy.IsAcceptable(newEncryptionType, newEncryptionSettings, latestVault.EncryptionSettings))
             {
                 return BadRequest(ApiErrorCodeHelper.CreateValidationErrorResponse(ApiErrorCode.UNSUPPORTED_ENCRYPTION_SETTINGS, 400));
             }
