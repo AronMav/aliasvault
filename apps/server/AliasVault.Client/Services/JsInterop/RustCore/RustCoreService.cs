@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------
 // <copyright file="RustCoreService.cs" company="aliasvault">
 // Copyright (c) aliasvault. All rights reserved.
 // Licensed under the AGPLv3 license. See LICENSE.md file in the project root for full license information.
@@ -11,6 +11,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using AliasVault.Client.Main.Models;
+using AliasVault.Cryptography.Client;
 using AliasVault.ImportExport.Exceptions;
 using AliasVault.ImportExport.Importers;
 using AliasVault.ImportExport.Models;
@@ -230,6 +231,67 @@ public class RustCoreService : IAsyncDisposable
         {
             return string.Empty;
         }
+    }
+
+    /// <summary>
+    /// Derive an encryption key from a password using Argon2id.
+    /// </summary>
+    /// <remarks>
+    /// Runs in the Rust WASM module rather than the managed implementation, which costs seconds
+    /// per derivation on this runtime and is paid on every login, unlock and password change.
+    /// The parameters come from the vault rather than from the defaults, because a vault opens
+    /// only under the parameters its key was derived with.
+    /// </remarks>
+    /// <param name="password">The password to derive from.</param>
+    /// <param name="salt">The salt recorded against the vault.</param>
+    /// <param name="encryptionType">The encryption type recorded against the vault, or null for the default.</param>
+    /// <param name="encryptionSettings">The encryption settings recorded against the vault, or null for the defaults.</param>
+    /// <returns>The derived 256-bit key.</returns>
+    /// <exception cref="InvalidOperationException">Thrown if the WASM module is unavailable.</exception>
+    /// <exception cref="NotSupportedException">Thrown if the encryption type is not one this client implements.</exception>
+    public async Task<byte[]> DeriveKeyFromPasswordAsync(string password, string salt, string? encryptionType = null, string? encryptionSettings = null)
+    {
+        encryptionType ??= Defaults.EncryptionType;
+        if (!string.Equals(encryptionType, Defaults.EncryptionType, StringComparison.Ordinal))
+        {
+            throw new NotSupportedException($"Encryption type {encryptionType} is not supported.");
+        }
+
+        // Fall back to the defaults per parameter, matching how the managed implementation reads
+        // these, so a vault recorded with a partial settings object still opens.
+        var degreeOfParallelism = Defaults.Argon2IdDegreeOfParallelism;
+        var memorySize = Defaults.Argon2IdMemorySize;
+        var iterations = Defaults.Argon2IdIterations;
+
+        if (encryptionSettings is not null)
+        {
+            var properties = JsonSerializer.Deserialize<Dictionary<string, int>>(encryptionSettings);
+            if (properties is not null)
+            {
+                if (properties.TryGetValue("DegreeOfParallelism", out var parsedParallelism))
+                {
+                    degreeOfParallelism = parsedParallelism;
+                }
+
+                if (properties.TryGetValue("MemorySize", out var parsedMemorySize))
+                {
+                    memorySize = parsedMemorySize;
+                }
+
+                if (properties.TryGetValue("Iterations", out var parsedIterations))
+                {
+                    iterations = parsedIterations;
+                }
+            }
+        }
+
+        if (!await WaitForAvailabilityAsync())
+        {
+            throw new InvalidOperationException("Rust WASM module is not available.");
+        }
+
+        var hex = await jsRuntime.InvokeAsync<string>("rustCoreArgon2DeriveKey", password, salt, memorySize, iterations, degreeOfParallelism);
+        return Convert.FromHexString(hex);
     }
 
     /// <summary>

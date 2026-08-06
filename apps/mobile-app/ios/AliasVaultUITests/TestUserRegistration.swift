@@ -31,8 +31,8 @@ struct ApiError: Codable {
 /// These match the server defaults in AliasVault.Cryptography.Client/Defaults.cs
 enum EncryptionDefaults {
     static let type = "Argon2Id"
-    static let iterations: UInt32 = 2
-    static let memorySize: UInt32 = 19456
+    static let iterations: UInt32 = 3
+    static let memorySize: UInt32 = 65536
     static let parallelism: UInt32 = 1
 
     static var settingsJson: String {
@@ -75,8 +75,8 @@ enum TestUserRegistration {
     /// Derive encryption key from password using Argon2Id via Rust core.
     ///
     /// Uses the AliasVault default parameters:
-    /// - Iterations: 2
-    /// - Memory: 19456 KiB
+    /// - Iterations: 3
+    /// - Memory: 65536 KiB
     /// - Parallelism: 1
     /// - Output length: 32 bytes
     static func deriveKeyArgon2(_ password: String, salt: String) throws -> Data {

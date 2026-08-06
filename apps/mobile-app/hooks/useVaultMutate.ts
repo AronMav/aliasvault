@@ -7,7 +7,7 @@ import Toast from 'react-native-toast-message';
 import type { EncryptionKeyDerivationParams } from '@/utils/dist/core/models/metadata';
 import type { PasswordChangeInitiateResponse, Vault, VaultPasswordChangeRequest } from '@/utils/dist/core/models/webapi';
 import { FieldKey, getFieldValue } from '@/utils/dist/core/models/vault';
-import EncryptionUtility from '@/utils/EncryptionUtility';
+import EncryptionUtility, { DEFAULT_ENCRYPTION } from '@/utils/EncryptionUtility';
 import { SrpUtility } from '@/utils/SrpUtility';
 
 import { useVaultSync } from '@/hooks/useVaultSync';
@@ -212,14 +212,22 @@ export function useVaultMutate() : {
 
     // Generate salt and verifier for new password using native SRP
     const newSalt = await SrpUtility.generateSalt();
-    const newPasswordHash = await EncryptionUtility.deriveKeyFromPassword(newPasswordPlainText, newSalt, data.encryptionType, data.encryptionSettings);
+    /**
+     * Derive with this build's defaults rather than the parameters the vault was registered
+     * under, and report them to the server alongside the verifier. A password change is where
+     * an account picks up stronger parameters; the server records what is reported here, so
+     * these two have to be the same values.
+     */
+    const newEncryptionType = DEFAULT_ENCRYPTION.type;
+    const newEncryptionSettings = DEFAULT_ENCRYPTION.settings;
+    const newPasswordHash = await EncryptionUtility.deriveKeyFromPassword(newPasswordPlainText, newSalt, newEncryptionType, newEncryptionSettings);
     const newPasswordHashString = Buffer.from(newPasswordHash).toString('hex').toUpperCase();
 
     // Store the new encryption key and derivation parameters locally
     try {
       const newEncryptionKeyDerivationParams : EncryptionKeyDerivationParams = {
-        encryptionType: data.encryptionType,
-        encryptionSettings: data.encryptionSettings,
+        encryptionType: newEncryptionType,
+        encryptionSettings: newEncryptionSettings,
         salt: newSalt,
       };
 
@@ -254,7 +262,9 @@ export function useVaultMutate() : {
       currentClientPublicEphemeral: currentClientProof.clientPublicEphemeral,
       currentClientSessionProof: currentClientProof.clientSessionProof,
       newPasswordSalt: newSalt,
-      newPasswordVerifier: newVerifier
+      newPasswordVerifier: newVerifier,
+      newPasswordEncryptionType: newEncryptionType,
+      newPasswordEncryptionSettings: newEncryptionSettings
     };
 
     try {

@@ -3,6 +3,7 @@
 @inherits AliasVault.Client.Auth.Pages.Base.LoginBase
 @inject ILogger<Unlock> Logger
 @inject IJSRuntime JSRuntime
+@inject AliasVault.Client.Services.JsInterop.RustCore.RustCoreService RustCoreService
 @layout Auth.Layout.MainLayout
 @using System.Text.Json
 @using AliasVault.Client.Auth.Components
@@ -187,7 +188,7 @@ else
             }
 
             // 3. Client derives shared session key.
-            byte[] passwordHash = await Encryption.DeriveKeyFromPasswordAsync(_unlockModel.Password, loginResponse.Salt, loginResponse.EncryptionType, loginResponse.EncryptionSettings);
+            byte[] passwordHash = await RustCoreService.DeriveKeyFromPasswordAsync(_unlockModel.Password, loginResponse.Salt, loginResponse.EncryptionType, loginResponse.EncryptionSettings);
 
             // Check if the password is correct locally by decrypting the test string.
             var validPassword = await AuthService.ValidateEncryptionKeyAsync(passwordHash);

@@ -7,6 +7,23 @@ import type { EncryptionKey } from '@/utils/dist/core/models/vault';
 import type { Email, MailboxEmail } from '@/utils/dist/core/models/webapi';
 
 /**
+ * Default Argon2id parameters this build derives new keys with.
+ * These match the server defaults in AliasVault.Cryptography.Client/Defaults.cs.
+ *
+ * Only used where there is no vault to take parameters from yet. An existing vault is
+ * always opened with the parameters the server reports for it, which are the ones its
+ * key was derived under.
+ */
+export const DEFAULT_ENCRYPTION = {
+  type: 'Argon2Id',
+  settings: JSON.stringify({
+    DegreeOfParallelism: 1,
+    MemorySize: 65536,
+    Iterations: 3,
+  }),
+} as const;
+
+/**
  * Utility class for encryption operations including:
  * - Argon2Id key derivation
  * - AES-GCM symmetric encryption/decryption
@@ -21,8 +38,8 @@ class EncryptionUtility {
   public static async deriveKeyFromPassword(
     password: string,
     salt: string,
-    encryptionType: string = 'Argon2Id',
-    encryptionSettings: string = '{"Iterations":2,"MemorySize":19456,"DegreeOfParallelism":1}'
+    encryptionType: string = DEFAULT_ENCRYPTION.type,
+    encryptionSettings: string = DEFAULT_ENCRYPTION.settings
   ): Promise<Uint8Array> {
     try {
       // Call the native method to derive the key via Argon2id

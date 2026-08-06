@@ -32,6 +32,36 @@ pub fn get_core_version_js() -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Argon2id WASM Bindings
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Derive a key from a password using Argon2id.
+///
+/// Exposed to the browser clients because a managed Argon2 implementation running on the
+/// WebAssembly runtime costs seconds per derivation, which is paid on every unlock and login.
+///
+/// # Arguments
+/// * `password` - The password to derive from
+/// * `salt` - Salt as a string (UTF-8 encoded, minimum 8 bytes)
+/// * `memory_kib` - Memory cost in KiB, as recorded against the vault
+/// * `iterations` - Iteration count, as recorded against the vault
+/// * `parallelism` - Degree of parallelism, as recorded against the vault
+///
+/// # Returns
+/// Derived key as an uppercase hex string (64 characters = 32 bytes)
+#[wasm_bindgen(js_name = argon2DeriveKey)]
+pub fn argon2_derive_key_js(
+    password: &str,
+    salt: &str,
+    memory_kib: u32,
+    iterations: u32,
+    parallelism: u32,
+) -> Result<String, JsValue> {
+    crate::argon2::argon2_derive_key(password, salt, memory_kib, iterations, parallelism)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Vault Merge WASM Bindings
 // ═══════════════════════════════════════════════════════════════════════════════
 

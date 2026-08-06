@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------
 // <copyright file="AuthController.cs" company="aliasvault">
 // Copyright (c) aliasvault. All rights reserved.
 // Licensed under the AGPLv3 license. See LICENSE.md file in the project root for full license information.
@@ -83,6 +83,18 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
     private const int TokenReuseWindowSeconds = 30;
 
     /// <summary>
+    /// Cache key under which the spread of key derivation parameters across this instance's vaults is held.
+    /// </summary>
+    private const string VaultEncryptionDistributionCacheKey = "VaultEncryptionSettingsDistribution";
+
+    /// <summary>
+    /// How long that spread is cached. It only shifts when an account is registered or a password
+    /// is changed, so a stale reading costs nothing beyond a newly used parameter set taking this
+    /// long to start appearing in responses for unknown usernames.
+    /// </summary>
+    private const int VaultEncryptionDistributionCacheMinutes = 10;
+
+    /// <summary>
     /// Semaphore to prevent concurrent access to the database when generating new tokens for a user.
     /// </summary>
     private static readonly SemaphoreSlim Semaphore = new(1, 1);
@@ -163,7 +175,7 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
         {
             // Log the attempt internally
             await authLoggingService.LogAuthEventFailAsync(username, AuthEventType.Login, AuthFailureReason.InvalidUsername);
-            return FakeLoginResponse(username);
+            return await FakeLoginResponse(username);
         }
 
         // Check if the account is locked out.
@@ -1239,12 +1251,20 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
     /// </summary>
     /// <param name="username">The username that was submitted, already bounded in length.</param>
     /// <returns>IActionResult.</returns>
-    private OkObjectResult FakeLoginResponse(string username)
+    private async Task<OkObjectResult> FakeLoginResponse(string username)
     {
-        var fakeCredentials = AuthHelper.DeriveFakeSrpCredentials(username, GetJwtKey());
+        var serverSecret = GetJwtKey();
+        var fakeCredentials = AuthHelper.DeriveFakeSrpCredentials(username, serverSecret);
 
         // Always generate a new ephemeral for the fake data, as this is also done for existing users.
         var fakeEphemeral = Srp.GenerateEphemeralServer(fakeCredentials.Verifier);
+
+        // Draw the key derivation parameters from the ones this instance actually holds. Reporting
+        // the current defaults would name every account registered under an older default.
+        var fakeEncryption = AuthHelper.DeriveFakeEncryptionSettings(
+            username,
+            serverSecret,
+            await GetVaultEncryptionSettingsDistribution());
 
         // Return the same response format as for real users. The SRP identity has to be filled in too:
         // a real account always resolves to one, so leaving it null here would tell the caller that the
@@ -1252,8 +1272,41 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
         return Ok(new LoginInitiateResponse(
             fakeCredentials.Salt,
             fakeEphemeral.Public,
-            Defaults.EncryptionType,
-            Defaults.EncryptionSettings,
+            fakeEncryption.EncryptionType,
+            fakeEncryption.EncryptionSettings,
             fakeCredentials.SrpIdentity));
+    }
+
+    /// <summary>
+    /// Returns how many vaults on this instance hold each combination of key derivation parameters.
+    /// </summary>
+    /// <remarks>
+    /// Counted over all vault revisions rather than one per user, which is close enough for drawing
+    /// a plausible value and avoids a per-user aggregate on an unauthenticated request. Cached
+    /// because the shape of this only changes when someone registers or changes their password,
+    /// and the endpoint that needs it can be reached without credentials.
+    /// </remarks>
+    /// <returns>The parameter combinations in use with the number of vaults holding each.</returns>
+    private async Task<IReadOnlyList<(string EncryptionType, string EncryptionSettings, int Count)>> GetVaultEncryptionSettingsDistribution()
+    {
+        if (cache.TryGetValue(VaultEncryptionDistributionCacheKey, out IReadOnlyList<(string EncryptionType, string EncryptionSettings, int Count)>? cached) && cached is not null)
+        {
+            return cached;
+        }
+
+        await using var context = await dbContextFactory.CreateDbContextAsync();
+        var distribution = await context.Vaults
+            .GroupBy(x => new { x.EncryptionType, x.EncryptionSettings })
+            .Select(g => new { g.Key.EncryptionType, g.Key.EncryptionSettings, Count = g.Count() })
+            .OrderBy(x => x.EncryptionType)
+            .ThenBy(x => x.EncryptionSettings)
+            .ToListAsync();
+
+        var result = distribution
+            .Select(x => (x.EncryptionType, x.EncryptionSettings, x.Count))
+            .ToList();
+
+        cache.Set(VaultEncryptionDistributionCacheKey, (IReadOnlyList<(string EncryptionType, string EncryptionSettings, int Count)>)result, TimeSpan.FromMinutes(VaultEncryptionDistributionCacheMinutes));
+        return result;
     }
 }

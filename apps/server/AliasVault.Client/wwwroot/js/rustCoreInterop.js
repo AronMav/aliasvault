@@ -403,6 +403,36 @@ window.rustCoreGetIdentityAgeRanges = async function() {
 };
 
 // ============================================================================
+// Argon2id Key Derivation
+// ============================================================================
+
+/**
+ * Derive an encryption key from a password using Argon2id.
+ *
+ * Runs in the Rust WASM module rather than in managed code, which costs seconds per
+ * derivation on this runtime and is paid on every login and unlock.
+ *
+ * @param {string} password - The password to derive from.
+ * @param {string} salt - The salt recorded against the vault.
+ * @param {number} memoryKib - Memory cost in KiB, as recorded against the vault.
+ * @param {number} iterations - Iteration count, as recorded against the vault.
+ * @param {number} parallelism - Degree of parallelism, as recorded against the vault.
+ * @returns {Promise<string>} 64-character uppercase hex string (32 bytes).
+ */
+window.rustCoreArgon2DeriveKey = async function(password, salt, memoryKib, iterations, parallelism) {
+    if (!await initRustCore()) {
+        throw new Error('Rust WASM module not available');
+    }
+
+    try {
+        return wasmModule.argon2DeriveKey(password, salt, memoryKib, iterations, parallelism);
+    } catch (error) {
+        console.error('[RustCore] Argon2 derive key failed:', error);
+        throw error;
+    }
+};
+
+// ============================================================================
 // SRP (Secure Remote Password) Functions
 // ============================================================================
 

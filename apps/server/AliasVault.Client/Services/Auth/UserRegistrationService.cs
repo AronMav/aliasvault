@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------
 // <copyright file="UserRegistrationService.cs" company="aliasvault">
 // Copyright (c) aliasvault. All rights reserved.
 // Licensed under the AGPLv3 license. See LICENSE.md file in the project root for full license information.
@@ -54,7 +54,7 @@ public class UserRegistrationService(HttpClient httpClient, AuthenticationStateP
             // Generate salt using Rust WASM
             var salt = await rustCoreService.SrpGenerateSaltAsync();
 
-            var passwordHash = await Encryption.DeriveKeyFromPasswordAsync(password, salt, encryptionType, encryptionSettings);
+            var passwordHash = await rustCoreService.DeriveKeyFromPasswordAsync(password, salt, encryptionType, encryptionSettings);
             var passwordHashString = BitConverter.ToString(passwordHash).Replace("-", string.Empty);
 
             // Derive SRP private key and verifier using the same salt

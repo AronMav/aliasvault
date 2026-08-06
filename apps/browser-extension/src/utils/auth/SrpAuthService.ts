@@ -51,8 +51,8 @@ export const DEFAULT_ENCRYPTION = {
   type: 'Argon2Id',
   settings: JSON.stringify({
     DegreeOfParallelism: 1,
-    MemorySize: 19456,
-    Iterations: 2,
+    MemorySize: 65536,
+    Iterations: 3,
   }),
 } as const;
 

@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------
 // <copyright file="VaultController.cs" company="aliasvault">
 // Copyright (c) aliasvault. All rights reserved.
 // Licensed under the AGPLv3 license. See LICENSE.md file in the project root for full license information.
@@ -264,7 +264,7 @@ public class VaultController(ILogger<VaultController> logger, IAliasServerDbCont
         var latestVault = await context.Vaults
             .Where(x => x.UserId == user.Id)
             .OrderByDescending(x => x.RevisionNumber)
-            .Select(x => new { x.RevisionNumber, x.Version })
+            .Select(x => new { x.RevisionNumber, x.Version, x.EncryptionType, x.EncryptionSettings })
             .FirstAsync();
         if (VersionHelper.IsVersionOlder(model.Version, latestVault.Version))
         {
@@ -281,6 +281,28 @@ public class VaultController(ILogger<VaultController> logger, IAliasServerDbCont
             return Ok(new VaultUpdateResponse { Status = VaultStatus.Outdated, NewRevisionNumber = latestVault.RevisionNumber });
         }
 
+        // Record the key derivation parameters the client actually derived the new verifier with.
+        // These are handed back to every client at the next login and are the only parameters the
+        // new vault can be opened under, so storing anything else here locks the user out of it.
+        //
+        // A client that sends nothing predates the fields, and every such client derives with the
+        // parameters the vault already holds: the mobile app reads them from the password change
+        // response, and the web client of that era used its own defaults, which are the ones the
+        // vault was registered under. Carrying the previous parameters forward therefore matches
+        // what those clients did. Substituting the server's current defaults would not, and would
+        // lock out every older client the moment the default moves.
+        var newEncryptionType = model.NewPasswordEncryptionType ?? latestVault.EncryptionType;
+        var newEncryptionSettings = model.NewPasswordEncryptionSettings ?? latestVault.EncryptionSettings;
+        if (model.NewPasswordEncryptionType is not null || model.NewPasswordEncryptionSettings is not null)
+        {
+            // Reject rather than fall back: the client has already derived its key, so quietly
+            // substituting different parameters would produce a vault it cannot open again.
+            if (!EncryptionSettingsPolicy.IsAcceptable(newEncryptionType, newEncryptionSettings))
+            {
+                return BadRequest(ApiErrorCodeHelper.CreateValidationErrorResponse(ApiErrorCode.UNSUPPORTED_ENCRYPTION_SETTINGS, 400));
+            }
+        }
+
         // Create new vault entry with salt and verifier of current vault.
         var newVault = new AliasServerDb.Vault
         {
@@ -293,8 +315,8 @@ public class VaultController(ILogger<VaultController> logger, IAliasServerDbCont
             FileSize = FileHelper.Base64StringToKilobytes(model.Blob),
             Salt = model.NewPasswordSalt,
             Verifier = model.NewPasswordVerifier,
-            EncryptionType = Defaults.EncryptionType,
-            EncryptionSettings = Defaults.EncryptionSettings,
+            EncryptionType = newEncryptionType,
+            EncryptionSettings = newEncryptionSettings,
             Client = clientHeader,
             CreatedAt = timeProvider.UtcNow,
             UpdatedAt = timeProvider.UtcNow,

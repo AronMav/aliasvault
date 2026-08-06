@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------
 // <copyright file="AuthHelper.cs" company="aliasvault">
 // Copyright (c) aliasvault. All rights reserved.
 // Licensed under the AGPLv3 license. See LICENSE.md file in the project root for full license information.
@@ -7,6 +7,7 @@
 
 namespace AliasVault.Api.Helpers;
 
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
 using AliasServerDb;
@@ -47,6 +48,11 @@ public static class AuthHelper
     /// Domain separation label for the derived SRP identity. See <see cref="FakeSaltLabel"/>.
     /// </summary>
     private const string FakeIdentityLabel = "fake-srp-identity";
+
+    /// <summary>
+    /// Domain separation label for the drawn encryption settings. See <see cref="FakeSaltLabel"/>.
+    /// </summary>
+    private const string FakeEncryptionSettingsLabel = "fake-encryption-settings";
 
     /// <summary>
     /// Helper method that validates the SRP session based on provided SRP identity, ephemeral and proof.
@@ -217,6 +223,71 @@ public static class AuthHelper
         }
 
         return string.Join('|', parts);
+    }
+
+    /// <summary>
+    /// Picks the key derivation parameters to report for a username that has no account.
+    /// </summary>
+    /// <remarks>
+    /// The parameters a vault was encrypted under are returned to the caller at login, and an
+    /// account keeps the ones it was registered with until its password is changed. An instance
+    /// whose default has moved therefore holds a mix of them, and answering every unknown username
+    /// with the current default would say "no account here" for every account registered before the
+    /// move. Draw from the parameters the instance actually holds instead, weighted by how common
+    /// each one is, so an unknown username looks like an account picked at random.
+    ///
+    /// The draw is deterministic in the username, so repeating a request cannot reveal that the
+    /// answer was made up, and it is keyed on the server secret, so the caller cannot work out
+    /// which value a given username should have produced.
+    /// </remarks>
+    /// <param name="username">The username that was submitted.</param>
+    /// <param name="serverSecret">Server-side secret the draw is keyed on.</param>
+    /// <param name="distribution">
+    /// The encryption type and settings pairs in use on this instance with the number of vaults
+    /// holding each. An empty distribution falls back to the current defaults, which is the only
+    /// honest answer when the instance has no vaults to imitate.
+    /// </param>
+    /// <returns>The encryption type and settings to report.</returns>
+    public static (string EncryptionType, string EncryptionSettings) DeriveFakeEncryptionSettings(
+        string username,
+        string serverSecret,
+        IReadOnlyList<(string EncryptionType, string EncryptionSettings, int Count)> distribution)
+    {
+        var total = 0L;
+        foreach (var entry in distribution)
+        {
+            if (entry.Count > 0)
+            {
+                total += entry.Count;
+            }
+        }
+
+        if (total == 0)
+        {
+            return (Defaults.EncryptionType, Defaults.EncryptionSettings);
+        }
+
+        var normalizedUsername = UsernameHelper.NormalizeUsername(username);
+        var draw = BinaryPrimitives.ReadUInt64BigEndian(DeriveFakeBytes(normalizedUsername, serverSecret, FakeEncryptionSettingsLabel)) % (ulong)total;
+
+        var cumulative = 0UL;
+        foreach (var entry in distribution)
+        {
+            if (entry.Count <= 0)
+            {
+                continue;
+            }
+
+            cumulative += (ulong)entry.Count;
+            if (draw < cumulative)
+            {
+                return (entry.EncryptionType, entry.EncryptionSettings);
+            }
+        }
+
+        // Unreachable while the counts above sum to total, but a fallback keeps a rounding
+        // mistake from throwing on an unauthenticated request.
+        return (Defaults.EncryptionType, Defaults.EncryptionSettings);
     }
 
     /// <summary>

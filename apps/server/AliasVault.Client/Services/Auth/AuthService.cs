@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------
 // <copyright file="AuthService.cs" company="aliasvault">
 // Copyright (c) aliasvault. All rights reserved.
 // Licensed under the AGPLv3 license. See LICENSE.md file in the project root for full license information.
@@ -10,6 +10,7 @@ namespace AliasVault.Client.Services.Auth;
 using System.Net.Http.Json;
 using System.Text.Json;
 using AliasVault.Client.Services.Auth.Enums;
+using AliasVault.Client.Services.JsInterop.RustCore;
 using AliasVault.Cryptography.Client;
 using AliasVault.Shared.Models.WebApi.Auth;
 using Blazored.LocalStorage;
@@ -24,7 +25,8 @@ using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
 /// <param name="environment">IWebAssemblyHostEnvironment instance.</param>
 /// <param name="config">Config instance.</param>
 /// <param name="jsInteropService">JSInteropService instance.</param>
-public sealed class AuthService(HttpClient httpClient, ILocalStorageService localStorage, IWebAssemblyHostEnvironment environment, Config config, JsInteropService jsInteropService)
+/// <param name="rustCoreService">RustCoreService instance, which derives the encryption key.</param>
+public sealed class AuthService(HttpClient httpClient, ILocalStorageService localStorage, IWebAssemblyHostEnvironment environment, Config config, JsInteropService jsInteropService, RustCoreService rustCoreService)
 {
     /// <summary>
     /// Test string value that is stored in local storage in encrypted state. This is used to validate the encryption key
@@ -312,7 +314,7 @@ public sealed class AuthService(HttpClient httpClient, ILocalStorageService loca
             }
 
             // Derive password hash using server parameters
-            byte[] passwordHash = await Encryption.DeriveKeyFromPasswordAsync(
+            byte[] passwordHash = await rustCoreService.DeriveKeyFromPasswordAsync(
                 password,
                 loginResponse.Salt,
                 loginResponse.EncryptionType,

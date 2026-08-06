@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------
 // <copyright file="Defaults.cs" company="aliasvault">
 // Copyright (c) aliasvault. All rights reserved.
 // Licensed under the AGPLv3 license. See LICENSE.md file in the project root for full license information.
@@ -25,12 +25,12 @@ public static class Defaults
     /// <summary>
     /// Gets the default memory size for Argon2id (in KB).
     /// </summary>
-    public static int Argon2IdMemorySize { get; } = 19456;
+    public static int Argon2IdMemorySize { get; } = 65536;
 
     /// <summary>
     /// Gets the default number of iterations for Argon2id.
     /// </summary>
-    public static int Argon2IdIterations { get; } = 2;
+    public static int Argon2IdIterations { get; } = 3;
 
     /// <summary>
     /// Gets the default encryption settings.

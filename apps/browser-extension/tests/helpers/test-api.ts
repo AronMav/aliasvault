@@ -80,12 +80,12 @@ const DEFAULT_ENCRYPTION = {
   type: 'Argon2Id',
   settings: JSON.stringify({
     DegreeOfParallelism: 1,
-    MemorySize: 19456,
-    Iterations: 2,
+    MemorySize: 65536,
+    Iterations: 3,
   }),
   // Parsed settings for argon2 usage
-  iterations: 2,
-  memorySize: 19456,
+  iterations: 3,
+  memorySize: 65536,
   parallelism: 1,
 };
 
