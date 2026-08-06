@@ -448,6 +448,10 @@ apps/browser-extension/safari-xcode/build
 core/rust/dist/
 core/rust/target/
 
+# Load-testing database written by the ignored write_large_fixture_for_manual_testing test.
+# The committed KDBX fixtures under core/rust/src/kdbx/testdata are deliberately not ignored.
+core/rust/large_test*.kdbx
+
 # Browser extension WASM (built by: cd core/rust && ./build.sh --browser)
 apps/browser-extension/src/utils/dist/core/rust
 
@@ -460,3 +464,13 @@ apps/server/AliasVault.Client/wwwroot/js/bundle.min.js
 
 # Docker compose local overrides
 docker-compose.override.yml
+
+# Playwright MCP scratch output (page snapshots, console logs, screenshots)
+.playwright-mcp/
+
+# Agent working documents (design specs and implementation plans)
+docs/superpowers/
+
+# Test run output (dotnet test --logger trx --results-directory e2e-results)
+e2e-results/
+*.trx
