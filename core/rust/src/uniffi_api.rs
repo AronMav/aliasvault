@@ -208,10 +208,8 @@ pub use crate::srp::{SrpEphemeral, SrpSession, SrpError};
 
 /// Derive a key from a password using Argon2Id.
 ///
-/// Uses the AliasVault default parameters:
-/// - Iterations: 3
-/// - Memory: 65536 KiB
-/// - Parallelism: 1
+/// Uses the AliasVault default parameters, generated from
+/// `core/models/src/defaults/EncryptionDefaults.ts`.
 /// - Output length: 32 bytes
 ///
 /// # Arguments

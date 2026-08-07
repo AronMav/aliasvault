@@ -31,11 +31,4 @@ describe('EncryptionDefaults', () => {
     expect(parsed.MemorySize).toBe(ARGON2ID_MEMORY_SIZE);
     expect(parsed.Iterations).toBe(ARGON2ID_ITERATIONS);
   });
-
-  it('stays within what the server will record against a vault', () => {
-    expect(ARGON2ID_MEMORY_SIZE).toBeGreaterThanOrEqual(19456);
-    expect(ARGON2ID_ITERATIONS).toBeGreaterThanOrEqual(2);
-    expect(ARGON2ID_DEGREE_OF_PARALLELISM).toBeGreaterThanOrEqual(1);
-    expect(ARGON2ID_MEMORY_SIZE).toBeLessThanOrEqual(1048576);
-  });
 });

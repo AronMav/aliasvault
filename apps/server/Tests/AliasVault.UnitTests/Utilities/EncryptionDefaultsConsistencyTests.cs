@@ -31,38 +31,49 @@ public class EncryptionDefaultsConsistencyTests
     /// it, regenerating C# and Rust while forgetting to rebuild dist would leave the extension
     /// and the mobile app on stale numbers with nothing to catch it.
     /// </summary>
-    private static readonly (string RelativePath, string MemoryPattern, string IterationsPattern, string ParallelismPattern)[] Artifacts =
+    /// <remarks>
+    /// The dist entries check <c>index.d.ts</c>, not the sibling <c>index.js</c> where the
+    /// runtime values actually live. Both are written by the same tsup run into a directory that
+    /// is wiped first, so the two drifting apart is contrived.
+    /// </remarks>
+    private static readonly (string RelativePath, string MemoryPattern, string IterationsPattern, string ParallelismPattern, string TypePattern)[] Artifacts =
     [
         (
             "apps/server/Utilities/Cryptography/AliasVault.Cryptography.Client/Argon2Defaults.cs",
             @"Argon2idMemorySize\s*=\s*(\d+)",
             @"Argon2idIterations\s*=\s*(\d+)",
-            @"Argon2idDegreeOfParallelism\s*=\s*(\d+)"),
+            @"Argon2idDegreeOfParallelism\s*=\s*(\d+)",
+            @"EncryptionType\s*=\s*""(\w+)"""),
         (
             "core/rust/src/argon2/defaults.rs",
             @"ARGON2ID_MEMORY_SIZE:\s*u32\s*=\s*(\d+)",
             @"ARGON2ID_ITERATIONS:\s*u32\s*=\s*(\d+)",
-            @"ARGON2ID_DEGREE_OF_PARALLELISM:\s*u32\s*=\s*(\d+)"),
+            @"ARGON2ID_DEGREE_OF_PARALLELISM:\s*u32\s*=\s*(\d+)",
+            @"ENCRYPTION_TYPE:\s*&str\s*=\s*""(\w+)"""),
         (
             "apps/mobile-app/android/app/src/androidTest/java/net/aliasvault/app/EncryptionDefaults.kt",
             @"ARGON2ID_MEMORY_SIZE\s*=\s*(\d+)",
             @"ARGON2ID_ITERATIONS\s*=\s*(\d+)",
-            @"ARGON2ID_DEGREE_OF_PARALLELISM\s*=\s*(\d+)"),
+            @"ARGON2ID_DEGREE_OF_PARALLELISM\s*=\s*(\d+)",
+            @"ENCRYPTION_TYPE\s*=\s*""(\w+)"""),
         (
             "apps/mobile-app/ios/AliasVaultUITests/EncryptionDefaults.swift",
             @"argon2idMemorySize:\s*UInt32\s*=\s*(\d+)",
             @"argon2idIterations:\s*UInt32\s*=\s*(\d+)",
-            @"argon2idDegreeOfParallelism:\s*UInt32\s*=\s*(\d+)"),
+            @"argon2idDegreeOfParallelism:\s*UInt32\s*=\s*(\d+)",
+            @"encryptionType:\s*String\s*=\s*""(\w+)"""),
         (
             "apps/browser-extension/src/utils/dist/core/models/defaults/index.d.ts",
             @"ARGON2ID_MEMORY_SIZE\s*=\s*(\d+)",
             @"ARGON2ID_ITERATIONS\s*=\s*(\d+)",
-            @"ARGON2ID_DEGREE_OF_PARALLELISM\s*=\s*(\d+)"),
+            @"ARGON2ID_DEGREE_OF_PARALLELISM\s*=\s*(\d+)",
+            @"ENCRYPTION_TYPE\s*=\s*""(\w+)"""),
         (
             "apps/mobile-app/utils/dist/core/models/defaults/index.d.ts",
             @"ARGON2ID_MEMORY_SIZE\s*=\s*(\d+)",
             @"ARGON2ID_ITERATIONS\s*=\s*(\d+)",
-            @"ARGON2ID_DEGREE_OF_PARALLELISM\s*=\s*(\d+)"),
+            @"ARGON2ID_DEGREE_OF_PARALLELISM\s*=\s*(\d+)",
+            @"ENCRYPTION_TYPE\s*=\s*""(\w+)"""),
     ];
 
     /// <summary>
@@ -90,7 +101,7 @@ public class EncryptionDefaultsConsistencyTests
     [TestCase(5)]
     public void GeneratedArtifactMatchesTheSourceTest(int index)
     {
-        var (relativePath, memoryPattern, iterationsPattern, parallelismPattern) = Artifacts[index];
+        var (relativePath, memoryPattern, iterationsPattern, parallelismPattern, typePattern) = Artifacts[index];
         var root = FindRepositoryRoot();
         var source = ReadRepositoryFile(root, SourceRelativePath);
         var artifact = ReadRepositoryFile(root, relativePath);
@@ -98,12 +109,14 @@ public class EncryptionDefaultsConsistencyTests
         var expectedMemory = ReadValue(source, @"ARGON2ID_MEMORY_SIZE\s*=\s*(\d+)", SourceRelativePath, "memory size");
         var expectedIterations = ReadValue(source, @"ARGON2ID_ITERATIONS\s*=\s*(\d+)", SourceRelativePath, "iterations");
         var expectedParallelism = ReadValue(source, @"ARGON2ID_DEGREE_OF_PARALLELISM\s*=\s*(\d+)", SourceRelativePath, "parallelism");
+        var expectedType = ReadStringValue(source, @"ENCRYPTION_TYPE\s*=\s*'(\w+)'", SourceRelativePath, "encryption type");
 
         Assert.Multiple(() =>
         {
             Assert.That(ReadValue(artifact, memoryPattern, relativePath, "memory size"), Is.EqualTo(expectedMemory), $"{relativePath} is stale. Run core/models/build.sh.");
             Assert.That(ReadValue(artifact, iterationsPattern, relativePath, "iterations"), Is.EqualTo(expectedIterations), $"{relativePath} is stale. Run core/models/build.sh.");
             Assert.That(ReadValue(artifact, parallelismPattern, relativePath, "parallelism"), Is.EqualTo(expectedParallelism), $"{relativePath} is stale. Run core/models/build.sh.");
+            Assert.That(ReadStringValue(artifact, typePattern, relativePath, "encryption type"), Is.EqualTo(expectedType), $"{relativePath} is stale. Run core/models/build.sh.");
         });
     }
 
@@ -204,6 +217,21 @@ public class EncryptionDefaultsConsistencyTests
         Assert.That(matches, Is.Not.Empty, $"Could not find the Argon2id {what} in {relativePath}. The declaration moved or was reworded; update the pattern in this test.");
 
         var values = matches.Select(m => int.Parse(m.Groups[1].Value)).Distinct().ToList();
+        Assert.That(values, Has.Count.EqualTo(1), $"{relativePath} declares more than one Argon2id {what}: {string.Join(", ", values)}.");
+
+        return values[0];
+    }
+
+    /// <summary>
+    /// Same contract as <see cref="ReadValue"/>, for a pattern whose captured group is a string
+    /// rather than a number.
+    /// </summary>
+    private static string ReadStringValue(string content, string pattern, string relativePath, string what)
+    {
+        var matches = Regex.Matches(content, pattern);
+        Assert.That(matches, Is.Not.Empty, $"Could not find the Argon2id {what} in {relativePath}. The declaration moved or was reworded; update the pattern in this test.");
+
+        var values = matches.Select(m => m.Groups[1].Value).Distinct().ToList();
         Assert.That(values, Has.Count.EqualTo(1), $"{relativePath} declares more than one Argon2id {what}: {string.Join(", ", values)}.");
 
         return values[0];

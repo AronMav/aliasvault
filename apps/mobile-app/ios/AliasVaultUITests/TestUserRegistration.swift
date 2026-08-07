@@ -59,10 +59,8 @@ enum TestUserRegistration {
 
     /// Derive encryption key from password using Argon2Id via Rust core.
     ///
-    /// Uses the AliasVault default parameters:
-    /// - Iterations: 3
-    /// - Memory: 65536 KiB
-    /// - Parallelism: 1
+    /// Uses the AliasVault default parameters, generated from
+    /// `core/models/src/defaults/EncryptionDefaults.ts`.
     /// - Output length: 32 bytes
     static func deriveKeyArgon2(_ password: String, salt: String) throws -> Data {
         // Use the Rust core's Argon2 implementation
