@@ -132,8 +132,8 @@ object TestUserRegistration {
             put("username", normalizedUsername)
             put("salt", salt)
             put("verifier", verifier)
-            put("encryptionType", TestConfiguration.EncryptionDefaults.TYPE)
-            put("encryptionSettings", TestConfiguration.EncryptionDefaults.settingsJson)
+            put("encryptionType", EncryptionDefaults.ENCRYPTION_TYPE)
+            put("encryptionSettings", EncryptionDefaults.ENCRYPTION_SETTINGS)
         }
 
         // Send registration request

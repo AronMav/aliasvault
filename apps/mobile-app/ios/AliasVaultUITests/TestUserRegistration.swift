@@ -27,21 +27,6 @@ struct ApiError: Codable {
     let message: String?
 }
 
-/// Default encryption settings for Argon2Id.
-/// These match the server defaults in AliasVault.Cryptography.Client/Defaults.cs
-enum EncryptionDefaults {
-    static let type = "Argon2Id"
-    static let iterations: UInt32 = 3
-    static let memorySize: UInt32 = 65536
-    static let parallelism: UInt32 = 1
-
-    static var settingsJson: String {
-        """
-        {"DegreeOfParallelism":\(parallelism),"MemorySize":\(memorySize),"Iterations":\(iterations)}
-        """
-    }
-}
-
 /// Test user registration helper using SRP protocol.
 /// Mirrors the browser extension's test-api.ts implementation.
 enum TestUserRegistration {
@@ -147,8 +132,8 @@ enum TestUserRegistration {
             "username": normalizedUsername,
             "salt": salt,
             "verifier": verifier,
-            "encryptionType": EncryptionDefaults.type,
-            "encryptionSettings": EncryptionDefaults.settingsJson
+            "encryptionType": EncryptionDefaults.encryptionType,
+            "encryptionSettings": EncryptionDefaults.encryptionSettings
         ]
 
         let requestData = try JSONSerialization.data(withJSONObject: registerRequest)
