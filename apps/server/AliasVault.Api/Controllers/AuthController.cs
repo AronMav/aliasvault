@@ -203,7 +203,7 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
 
         // Store the server ephemeral in memory cache for Validate() endpoint to use.
         // Use SrpIdentity as the cache key to ensure consistency.
-        cache.Set(AuthHelper.CachePrefixEphemeral + srpIdentity, ephemeral.Secret, TimeSpan.FromMinutes(5));
+        AuthHelper.StoreSrpEphemeral(cache, srpIdentity, ephemeral.Secret);
 
         return Ok(new LoginInitiateResponse(latestVaultEncryptionSettings.Salt, ephemeral.Public, latestVaultEncryptionSettings.EncryptionType, latestVaultEncryptionSettings.EncryptionSettings, srpIdentity));
     }
@@ -586,7 +586,7 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
 
         // Store the server ephemeral in memory cache for the Vault update (and set new password) endpoint to use.
         // Use SrpIdentity as the cache key to ensure consistency.
-        cache.Set(AuthHelper.CachePrefixEphemeral + srpIdentity, ephemeral.Secret, TimeSpan.FromMinutes(5));
+        AuthHelper.StoreSrpEphemeral(cache, srpIdentity, ephemeral.Secret);
 
         return Ok(new PasswordChangeInitiateResponse(latestVaultEncryptionSettings.Salt, ephemeral.Public, latestVaultEncryptionSettings.EncryptionType, latestVaultEncryptionSettings.EncryptionSettings, srpIdentity));
     }
@@ -663,7 +663,7 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
 
         // Store the server ephemeral in memory cache for confirmation endpoint.
         // Use SrpIdentity as the cache key to ensure consistency.
-        cache.Set(AuthHelper.CachePrefixEphemeral + srpIdentity, ephemeral.Secret, TimeSpan.FromMinutes(5));
+        AuthHelper.StoreSrpEphemeral(cache, srpIdentity, ephemeral.Secret);
 
         return Ok(new LoginInitiateResponse(
             latestVaultEncryptionSettings.Salt,

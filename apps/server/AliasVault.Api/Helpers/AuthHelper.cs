@@ -23,6 +23,11 @@ using SecureRemotePassword;
 public static class AuthHelper
 {
     /// <summary>
+    /// How long an unused server ephemeral stays valid, in minutes.
+    /// </summary>
+    public const int EphemeralLifetimeMinutes = 5;
+
+    /// <summary>
     /// Cache prefix for storing generated login ephemeral.
     /// </summary>
     public static readonly string CachePrefixEphemeral = "LoginEphemeral_";
@@ -55,6 +60,12 @@ public static class AuthHelper
     private const string FakeEncryptionSettingsLabel = "fake-encryption-settings";
 
     /// <summary>
+    /// Guards creation of an account's ephemeral set so two concurrent logins cannot each create one
+    /// and have the first lose its secret.
+    /// </summary>
+    private static readonly Lock EphemeralSetCreationLock = new();
+
+    /// <summary>
     /// Helper method that validates the SRP session based on provided SRP identity, ephemeral and proof.
     /// </summary>
     /// <param name="cache">IMemoryCache instance.</param>
@@ -66,7 +77,7 @@ public static class AuthHelper
     {
         var srpIdentity = GetSrpIdentity(user);
 
-        if (!cache.TryGetValue(CachePrefixEphemeral + srpIdentity, out var serverSecretEphemeral) || serverSecretEphemeral is not string)
+        if (!cache.TryGetValue(CachePrefixEphemeral + srpIdentity, out var cached) || cached is not SrpEphemeralSet ephemeralSet)
         {
             return null;
         }
@@ -74,22 +85,67 @@ public static class AuthHelper
         // Retrieve latest vault of user which contains the current salt and verifier.
         var latestVaultEncryptionSettings = GetUserLatestVaultEncryptionSettings(user);
 
-        // Use SrpIdentity for the SRP session derivation. This is the fixed identity that was used
-        // when the verifier was originally created, ensuring username changes don't break authentication.
-        var serverSession = Srp.DeriveSessionServer(
-            serverSecretEphemeral.ToString() ?? string.Empty,
-            clientEphemeral,
-            latestVaultEncryptionSettings.Salt,
-            srpIdentity,
-            latestVaultEncryptionSettings.Verifier,
-            clientSessionProof);
-
-        if (serverSession is null)
+        // An account can have several exchanges in flight, so the proof is checked against each
+        // live secret rather than against one the newest login happened to leave behind. Only the
+        // secret the client actually proved against produces a session; the rest return null.
+        foreach (var serverSecretEphemeral in ephemeralSet.GetSecrets())
         {
-            return null;
+            // Use SrpIdentity for the SRP session derivation. This is the fixed identity that was used
+            // when the verifier was originally created, ensuring username changes don't break authentication.
+            var serverSession = Srp.DeriveSessionServer(
+                serverSecretEphemeral,
+                clientEphemeral,
+                latestVaultEncryptionSettings.Salt,
+                srpIdentity,
+                latestVaultEncryptionSettings.Verifier,
+                clientSessionProof);
+
+            if (serverSession is not null)
+            {
+                return serverSession;
+            }
         }
 
-        return serverSession;
+        return null;
+    }
+
+    /// <summary>
+    /// Stores a freshly generated server ephemeral for the exchange that is starting.
+    /// </summary>
+    /// <remarks>
+    /// Added to the account's live set rather than replacing it. Anyone who knows a username can
+    /// start an exchange, and replacing meant that single request cancelled whatever exchange the
+    /// account owner had in progress.
+    /// </remarks>
+    /// <param name="cache">IMemoryCache instance.</param>
+    /// <param name="srpIdentity">The SRP identity the exchange belongs to.</param>
+    /// <param name="serverSecretEphemeral">The server ephemeral secret to store.</param>
+    public static void StoreSrpEphemeral(IMemoryCache cache, string srpIdentity, string serverSecretEphemeral)
+    {
+        var cacheKey = CachePrefixEphemeral + srpIdentity;
+
+        // Creating the set is the one step two concurrent logins can race on. The lock is held only
+        // for the lookup-or-create, never for the SRP work, and a lost race would cost one ephemeral
+        // and a retried login rather than anyone else's request.
+        SrpEphemeralSet ephemeralSet;
+        lock (EphemeralSetCreationLock)
+        {
+            if (!cache.TryGetValue(cacheKey, out var cached) || cached is not SrpEphemeralSet existing)
+            {
+                ephemeralSet = new SrpEphemeralSet();
+            }
+            else
+            {
+                ephemeralSet = existing;
+            }
+
+            // Written back on every exchange, not only when the set is created, so the entry always
+            // has the full lifetime ahead of it. Setting it once would give an exchange started in
+            // the fourth minute only the remainder of the first one's clock.
+            cache.Set(cacheKey, ephemeralSet, TimeSpan.FromMinutes(EphemeralLifetimeMinutes));
+        }
+
+        ephemeralSet.Add(serverSecretEphemeral);
     }
 
     /// <summary>
@@ -123,7 +179,16 @@ public static class AuthHelper
     /// <param name="user">The user whose ephemeral should be dropped.</param>
     public static void InvalidateSrpSession(IMemoryCache cache, AliasVaultUser user)
     {
-        cache.Remove(CachePrefixEphemeral + GetSrpIdentity(user));
+        var cacheKey = CachePrefixEphemeral + GetSrpIdentity(user);
+
+        // Clear the set as well as removing the entry: another request may already hold a reference
+        // to this instance, and clearing is what makes the secrets in it unusable to that caller too.
+        if (cache.TryGetValue(cacheKey, out var cached) && cached is SrpEphemeralSet ephemeralSet)
+        {
+            ephemeralSet.Clear();
+        }
+
+        cache.Remove(cacheKey);
     }
 
     /// <summary>
