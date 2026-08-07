@@ -1,4 +1,4 @@
-﻿//-----------------------------------------------------------------------
+//-----------------------------------------------------------------------
 // <copyright file="EncryptionDefaultsConsistencyTests.cs" company="aliasvault">
 // Copyright (c) aliasvault. All rights reserved.
 // Licensed under the AGPLv3 license. See LICENSE.md file in the project root for full license information.
@@ -11,63 +11,76 @@ using System.Text.RegularExpressions;
 using AliasVault.Cryptography.Client;
 
 /// <summary>
-/// Checks that every client declares the same Argon2id parameters.
+/// Checks that every generated copy of the Argon2id parameters still matches the source they
+/// are generated from.
 /// </summary>
 /// <remarks>
-/// The parameters are declared separately in each client because they are written in five languages,
-/// and there is no build step tying them together. They are not free to differ: a vault registered by
-/// one client has to be openable by all of them, so a value that drifts in one place produces a key
-/// the others cannot reproduce, which reads to the user as a correct password being rejected.
-/// This test is the tie.
+/// The parameters are declared once, in TypeScript, and generated into the other languages by
+/// core/models/scripts/generate-encryption-defaults.cjs. Nothing runs that generator in CI and
+/// its output is committed, so a change to the source with no regeneration would leave clients
+/// deriving keys the others cannot reproduce. This test is what makes that a failing build
+/// rather than a vault that stops opening.
 /// </remarks>
 public class EncryptionDefaultsConsistencyTests
 {
+    private const string SourceRelativePath = "core/models/src/defaults/EncryptionDefaults.ts";
+
     /// <summary>
-    /// Each declaration, as a path relative to the repository root with a pattern per parameter.
+    /// Each generated artifact, with a pattern per parameter. The dist pair is included because
+    /// the TypeScript clients read their values from there rather than from the source: without
+    /// it, regenerating C# and Rust while forgetting to rebuild dist would leave the extension
+    /// and the mobile app on stale numbers with nothing to catch it.
     /// </summary>
-    private static readonly (string RelativePath, string MemoryPattern, string IterationsPattern, string ParallelismPattern)[] Declarations =
+    private static readonly (string RelativePath, string MemoryPattern, string IterationsPattern, string ParallelismPattern)[] Artifacts =
     [
         (
-            "apps/browser-extension/src/utils/auth/SrpAuthService.ts",
-            @"MemorySize:\s*(\d+)",
-            @"Iterations:\s*(\d+)",
-            @"DegreeOfParallelism:\s*(\d+)"),
+            "apps/server/Utilities/Cryptography/AliasVault.Cryptography.Client/Argon2Defaults.cs",
+            @"Argon2idMemorySize\s*=\s*(\d+)",
+            @"Argon2idIterations\s*=\s*(\d+)",
+            @"Argon2idDegreeOfParallelism\s*=\s*(\d+)"),
         (
-            "apps/browser-extension/src/utils/EncryptionUtility.ts",
-            @"""MemorySize"":(\d+)",
-            @"""Iterations"":(\d+)",
-            @"""DegreeOfParallelism"":(\d+)"),
+            "core/rust/src/argon2/defaults.rs",
+            @"ARGON2ID_MEMORY_SIZE:\s*u32\s*=\s*(\d+)",
+            @"ARGON2ID_ITERATIONS:\s*u32\s*=\s*(\d+)",
+            @"ARGON2ID_DEGREE_OF_PARALLELISM:\s*u32\s*=\s*(\d+)"),
         (
-            "apps/browser-extension/tests/helpers/test-api.ts",
-            @"MemorySize:\s*(\d+)",
-            @"Iterations:\s*(\d+)",
-            @"DegreeOfParallelism:\s*(\d+)"),
+            "apps/mobile-app/android/app/src/androidTest/java/net/aliasvault/app/EncryptionDefaults.kt",
+            @"ARGON2ID_MEMORY_SIZE\s*=\s*(\d+)",
+            @"ARGON2ID_ITERATIONS\s*=\s*(\d+)",
+            @"ARGON2ID_DEGREE_OF_PARALLELISM\s*=\s*(\d+)"),
         (
-            "apps/mobile-app/utils/EncryptionUtility.ts",
-            @"MemorySize:\s*(\d+)",
-            @"Iterations:\s*(\d+)",
-            @"DegreeOfParallelism:\s*(\d+)"),
+            "apps/mobile-app/ios/AliasVaultUITests/EncryptionDefaults.swift",
+            @"argon2idMemorySize:\s*UInt32\s*=\s*(\d+)",
+            @"argon2idIterations:\s*UInt32\s*=\s*(\d+)",
+            @"argon2idDegreeOfParallelism:\s*UInt32\s*=\s*(\d+)"),
         (
-            "apps/mobile-app/android/app/src/androidTest/java/net/aliasvault/app/TestConfiguration.kt",
-            @"MEMORY_SIZE\s*=\s*(\d+)",
-            @"ITERATIONS\s*=\s*(\d+)",
-            @"PARALLELISM\s*=\s*(\d+)"),
+            "apps/browser-extension/src/utils/dist/core/models/defaults/index.d.ts",
+            @"ARGON2ID_MEMORY_SIZE\s*=\s*(\d+)",
+            @"ARGON2ID_ITERATIONS\s*=\s*(\d+)",
+            @"ARGON2ID_DEGREE_OF_PARALLELISM\s*=\s*(\d+)"),
         (
-            "apps/mobile-app/ios/AliasVaultUITests/TestUserRegistration.swift",
-            @"memorySize:\s*UInt32\s*=\s*(\d+)",
-            @"iterations:\s*UInt32\s*=\s*(\d+)",
-            @"parallelism:\s*UInt32\s*=\s*(\d+)"),
-        (
-            "core/rust/src/argon2/mod.rs",
-            @"DEFAULT_MEMORY_KIB:\s*u32\s*=\s*(\d+)",
-            @"DEFAULT_ITERATIONS:\s*u32\s*=\s*(\d+)",
-            @"DEFAULT_PARALLELISM:\s*u32\s*=\s*(\d+)"),
+            "apps/mobile-app/utils/dist/core/models/defaults/index.d.ts",
+            @"ARGON2ID_MEMORY_SIZE\s*=\s*(\d+)",
+            @"ARGON2ID_ITERATIONS\s*=\s*(\d+)",
+            @"ARGON2ID_DEGREE_OF_PARALLELISM\s*=\s*(\d+)"),
     ];
 
     /// <summary>
-    /// Every client declares the same values as the C# defaults.
+    /// The generated files that hold the settings as a string literal. All four escape the
+    /// inner quotes the same way, so one expected value covers them.
     /// </summary>
-    /// <param name="index">Index into the declaration list, so a mismatch names the file that drifted.</param>
+    private static readonly string[] GeneratedFilesHoldingTheSettingsLiteral =
+    [
+        "apps/server/Utilities/Cryptography/AliasVault.Cryptography.Client/Argon2Defaults.cs",
+        "core/rust/src/argon2/defaults.rs",
+        "apps/mobile-app/android/app/src/androidTest/java/net/aliasvault/app/EncryptionDefaults.kt",
+        "apps/mobile-app/ios/AliasVaultUITests/EncryptionDefaults.swift",
+    ];
+
+    /// <summary>
+    /// Every generated artifact declares the numbers the source declares.
+    /// </summary>
+    /// <param name="index">Index into the artifact list, so a mismatch names the file that drifted.</param>
     [Test]
     [TestCase(0)]
     [TestCase(1)]
@@ -75,32 +88,114 @@ public class EncryptionDefaultsConsistencyTests
     [TestCase(3)]
     [TestCase(4)]
     [TestCase(5)]
-    [TestCase(6)]
-    public void ClientDeclaresTheSameParametersTest(int index)
+    public void GeneratedArtifactMatchesTheSourceTest(int index)
     {
-        var (relativePath, memoryPattern, iterationsPattern, parallelismPattern) = Declarations[index];
-        var path = Path.Combine(FindRepositoryRoot(), relativePath);
+        var (relativePath, memoryPattern, iterationsPattern, parallelismPattern) = Artifacts[index];
+        var root = FindRepositoryRoot();
+        var source = ReadRepositoryFile(root, SourceRelativePath);
+        var artifact = ReadRepositoryFile(root, relativePath);
 
-        Assert.That(File.Exists(path), Is.True, $"{relativePath} no longer exists; update this test along with the move.");
-
-        var content = File.ReadAllText(path);
+        var expectedMemory = ReadValue(source, @"ARGON2ID_MEMORY_SIZE\s*=\s*(\d+)", SourceRelativePath, "memory size");
+        var expectedIterations = ReadValue(source, @"ARGON2ID_ITERATIONS\s*=\s*(\d+)", SourceRelativePath, "iterations");
+        var expectedParallelism = ReadValue(source, @"ARGON2ID_DEGREE_OF_PARALLELISM\s*=\s*(\d+)", SourceRelativePath, "parallelism");
 
         Assert.Multiple(() =>
         {
-            Assert.That(ReadValue(content, memoryPattern, relativePath, "memory size"), Is.EqualTo(Defaults.Argon2IdMemorySize), $"{relativePath} declares a different Argon2id memory size than Defaults.cs.");
-            Assert.That(ReadValue(content, iterationsPattern, relativePath, "iterations"), Is.EqualTo(Defaults.Argon2IdIterations), $"{relativePath} declares a different Argon2id iteration count than Defaults.cs.");
-            Assert.That(ReadValue(content, parallelismPattern, relativePath, "parallelism"), Is.EqualTo(Defaults.Argon2IdDegreeOfParallelism), $"{relativePath} declares a different Argon2id parallelism than Defaults.cs.");
+            Assert.That(ReadValue(artifact, memoryPattern, relativePath, "memory size"), Is.EqualTo(expectedMemory), $"{relativePath} is stale. Run core/models/build.sh.");
+            Assert.That(ReadValue(artifact, iterationsPattern, relativePath, "iterations"), Is.EqualTo(expectedIterations), $"{relativePath} is stale. Run core/models/build.sh.");
+            Assert.That(ReadValue(artifact, parallelismPattern, relativePath, "parallelism"), Is.EqualTo(expectedParallelism), $"{relativePath} is stale. Run core/models/build.sh.");
         });
     }
 
     /// <summary>
-    /// The defaults are at least what the server is willing to accept, so an up to date client is
+    /// The C# defaults expose the same numbers as the source, so the server derives keys with
+    /// what the clients were told to use.
+    /// </summary>
+    [Test]
+    public void CSharpDefaultsMatchTheSourceTest()
+    {
+        var source = ReadRepositoryFile(FindRepositoryRoot(), SourceRelativePath);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Defaults.Argon2IdMemorySize, Is.EqualTo(ReadValue(source, @"ARGON2ID_MEMORY_SIZE\s*=\s*(\d+)", SourceRelativePath, "memory size")));
+            Assert.That(Defaults.Argon2IdIterations, Is.EqualTo(ReadValue(source, @"ARGON2ID_ITERATIONS\s*=\s*(\d+)", SourceRelativePath, "iterations")));
+            Assert.That(Defaults.Argon2IdDegreeOfParallelism, Is.EqualTo(ReadValue(source, @"ARGON2ID_DEGREE_OF_PARALLELISM\s*=\s*(\d+)", SourceRelativePath, "parallelism")));
+        });
+    }
+
+    /// <summary>
+    /// Every generated file spells the settings string the same way, and it is the string the
+    /// source describes.
+    /// </summary>
+    /// <remarks>
+    /// Key order is the one thing stated twice: once in the TypeScript source, once in the
+    /// generator. The string is what registration stores against the vault, so a reordering
+    /// would change the stored value while every number still agreed. The expected string is
+    /// built from the numbers rather than written out, so raising a parameter does not mean
+    /// editing this test.
+    ///
+    /// The generated files hold the string as a literal and are all checked. The two dist
+    /// artifacts are not: tsup widens a computed export to `declare const X: string`, leaving
+    /// no value to compare. That is safe, because the string there is computed at runtime from
+    /// the numbers this class already checks.
+    /// </remarks>
+    [Test]
+    public void SettingsStringIsConsistentEverywhereTest()
+    {
+        var root = FindRepositoryRoot();
+        var source = ReadRepositoryFile(root, SourceRelativePath);
+
+        var keyOrder = ReadSourceKeyOrder(source);
+        Assert.That(keyOrder, Is.EqualTo(new[] { "DegreeOfParallelism", "MemorySize", "Iterations" }), "The canonical key order changed in the source but not in the generator.");
+
+        var expected = string.Format(
+            System.Globalization.CultureInfo.InvariantCulture,
+            "{{\"DegreeOfParallelism\":{0},\"MemorySize\":{1},\"Iterations\":{2}}}",
+            ReadValue(source, @"ARGON2ID_DEGREE_OF_PARALLELISM\s*=\s*(\d+)", SourceRelativePath, "parallelism"),
+            ReadValue(source, @"ARGON2ID_MEMORY_SIZE\s*=\s*(\d+)", SourceRelativePath, "memory size"),
+            ReadValue(source, @"ARGON2ID_ITERATIONS\s*=\s*(\d+)", SourceRelativePath, "iterations"));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Defaults.EncryptionSettings, Is.EqualTo(expected));
+
+            foreach (var relativePath in GeneratedFilesHoldingTheSettingsLiteral)
+            {
+                var artifact = ReadRepositoryFile(root, relativePath);
+                Assert.That(artifact, Does.Contain(expected.Replace("\"", "\\\"")), $"{relativePath} spells the settings string differently. Run core/models/build.sh.");
+            }
+        });
+    }
+
+    /// <summary>
+    /// The defaults are within what the server is willing to record, so an up to date client is
     /// never refused by the bounds applied at a password change.
     /// </summary>
     [Test]
     public void DefaultsSatisfyTheServerPolicyTest()
     {
         Assert.That(EncryptionSettingsPolicy.IsAcceptable(Defaults.EncryptionType, Defaults.EncryptionSettings, Defaults.EncryptionSettings), Is.True);
+    }
+
+    /// <summary>
+    /// Reads the key order out of the JSON.stringify call in the TypeScript source.
+    /// </summary>
+    private static List<string> ReadSourceKeyOrder(string source)
+    {
+        var match = Regex.Match(source, @"JSON\.stringify\(\{(.*?)\}\)", RegexOptions.Singleline);
+        Assert.That(match.Success, Is.True, $"Could not find the settings literal in {SourceRelativePath}.");
+
+        return Regex.Matches(match.Groups[1].Value, @"(\w+)\s*:")
+            .Select(m => m.Groups[1].Value)
+            .ToList();
+    }
+
+    private static string ReadRepositoryFile(string root, string relativePath)
+    {
+        var path = Path.Combine(root, relativePath);
+        Assert.That(File.Exists(path), Is.True, $"{relativePath} no longer exists; update this test along with the move.");
+        return File.ReadAllText(path);
     }
 
     private static int ReadValue(string content, string pattern, string relativePath, string what)
