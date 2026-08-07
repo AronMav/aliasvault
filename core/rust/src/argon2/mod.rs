@@ -7,25 +7,16 @@ use thiserror::Error;
 
 use crate::hex::bytes_to_hex;
 
+pub mod defaults;
+
+pub use defaults::{ARGON2ID_DEGREE_OF_PARALLELISM, ARGON2ID_ITERATIONS, ARGON2ID_MEMORY_SIZE};
+
 /// Argon2-related errors.
 #[derive(Error, Debug, Clone)]
 pub enum Argon2Error {
     #[error("Invalid parameter: {0}")]
     InvalidParameter(String),
 }
-
-/// Default memory cost in KiB.
-///
-/// The defaults here have to stay equal to `Defaults` in AliasVault.Cryptography.Client. A vault
-/// opens only under the parameters its key was derived with, so a value that drifts here derives
-/// a key no other client agrees on.
-pub const DEFAULT_MEMORY_KIB: u32 = 65536; // m_cost (memory in KiB)
-
-/// Default number of iterations.
-pub const DEFAULT_ITERATIONS: u32 = 3; // t_cost (iterations)
-
-/// Default degree of parallelism.
-pub const DEFAULT_PARALLELISM: u32 = 1; // p_cost (parallelism)
 
 /// Length of the derived key in bytes.
 const OUTPUT_LENGTH: usize = 32;
@@ -78,9 +69,9 @@ pub fn argon2_hash_password(password: &str, salt: &str) -> Result<String, Argon2
     argon2_derive_key(
         password,
         salt,
-        DEFAULT_MEMORY_KIB,
-        DEFAULT_ITERATIONS,
-        DEFAULT_PARALLELISM,
+        ARGON2ID_MEMORY_SIZE,
+        ARGON2ID_ITERATIONS,
+        ARGON2ID_DEGREE_OF_PARALLELISM,
     )
 }
 
@@ -113,15 +104,27 @@ mod tests {
         let explicit_defaults = argon2_derive_key(
             "password123",
             "somesalt12345678",
-            DEFAULT_MEMORY_KIB,
-            DEFAULT_ITERATIONS,
-            DEFAULT_PARALLELISM,
+            ARGON2ID_MEMORY_SIZE,
+            ARGON2ID_ITERATIONS,
+            ARGON2ID_DEGREE_OF_PARALLELISM,
         )
         .unwrap();
-        let other_memory =
-            argon2_derive_key("password123", "somesalt12345678", 19456, DEFAULT_ITERATIONS, DEFAULT_PARALLELISM).unwrap();
-        let other_iterations =
-            argon2_derive_key("password123", "somesalt12345678", DEFAULT_MEMORY_KIB, 2, DEFAULT_PARALLELISM).unwrap();
+        let other_memory = argon2_derive_key(
+            "password123",
+            "somesalt12345678",
+            19456,
+            ARGON2ID_ITERATIONS,
+            ARGON2ID_DEGREE_OF_PARALLELISM,
+        )
+        .unwrap();
+        let other_iterations = argon2_derive_key(
+            "password123",
+            "somesalt12345678",
+            ARGON2ID_MEMORY_SIZE,
+            2,
+            ARGON2ID_DEGREE_OF_PARALLELISM,
+        )
+        .unwrap();
 
         assert_eq!(with_defaults, explicit_defaults);
         assert_ne!(with_defaults, other_memory);
