@@ -2,6 +2,7 @@ import { Buffer } from 'buffer';
 
 import argon2 from 'argon2-browser/dist/argon2-bundled.min.js';
 
+import { ENCRYPTION_SETTINGS, ENCRYPTION_TYPE } from '@/utils/dist/core/models/defaults';
 import type { EncryptionKey } from '@/utils/dist/core/models/vault';
 import type { Email, MailboxEmail } from '@/utils/dist/core/models/webapi';
 
@@ -20,8 +21,8 @@ export class EncryptionUtility {
   public static async deriveKeyFromPassword(
     password: string,
     salt: string,
-    encryptionType: string = 'Argon2Id',
-    encryptionSettings: string = '{"Iterations":3,"MemorySize":65536,"DegreeOfParallelism":1}'
+    encryptionType: string = ENCRYPTION_TYPE,
+    encryptionSettings: string = ENCRYPTION_SETTINGS
   ): Promise<Uint8Array> {
     const settings = JSON.parse(encryptionSettings);
 

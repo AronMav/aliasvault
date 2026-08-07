@@ -3,24 +3,21 @@ import { Buffer } from 'buffer';
 import AesGcmCrypto from 'react-native-aes-gcm-crypto';
 
 import NativeVaultManager from '@/specs/NativeVaultManager';
+import { ENCRYPTION_SETTINGS, ENCRYPTION_TYPE } from '@/utils/dist/core/models/defaults';
 import type { EncryptionKey } from '@/utils/dist/core/models/vault';
 import type { Email, MailboxEmail } from '@/utils/dist/core/models/webapi';
 
 /**
- * Default Argon2id parameters this build derives new keys with.
- * These match the server defaults in AliasVault.Cryptography.Client/Defaults.cs.
+ * Default Argon2id parameters this build derives new keys with, generated from
+ * core/models/src/defaults/EncryptionDefaults.ts.
  *
  * Only used where there is no vault to take parameters from yet. An existing vault is
  * always opened with the parameters the server reports for it, which are the ones its
  * key was derived under.
  */
 export const DEFAULT_ENCRYPTION = {
-  type: 'Argon2Id',
-  settings: JSON.stringify({
-    DegreeOfParallelism: 1,
-    MemorySize: 65536,
-    Iterations: 3,
-  }),
+  type: ENCRYPTION_TYPE,
+  settings: ENCRYPTION_SETTINGS,
 } as const;
 
 /**

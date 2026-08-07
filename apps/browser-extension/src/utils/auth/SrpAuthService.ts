@@ -1,5 +1,6 @@
 import { browser } from 'wxt/browser';
 
+import { ENCRYPTION_SETTINGS, ENCRYPTION_TYPE } from '@/utils/dist/core/models/defaults';
 import type { TokenModel, LoginResponse, BadRequestResponse } from '@/utils/dist/core/models/webapi';
 
 import initWasm, {
@@ -44,16 +45,12 @@ export type PreparedCredentials = {
 };
 
 /**
- * Default encryption settings for Argon2Id.
- * These match the server defaults in AliasVault.Cryptography.Client/Defaults.cs
+ * Default encryption settings for Argon2Id, generated from
+ * core/models/src/defaults/EncryptionDefaults.ts.
  */
 export const DEFAULT_ENCRYPTION = {
-  type: 'Argon2Id',
-  settings: JSON.stringify({
-    DegreeOfParallelism: 1,
-    MemorySize: 65536,
-    Iterations: 3,
-  }),
+  type: ENCRYPTION_TYPE,
+  settings: ENCRYPTION_SETTINGS,
 } as const;
 
 /**
