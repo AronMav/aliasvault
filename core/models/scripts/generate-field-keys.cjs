@@ -30,6 +30,19 @@ const KOTLIN_ICONS_OUTPUT = path.join(REPO_ROOT, 'apps/mobile-app/android/app/sr
 const RN_ICONS_OUTPUT = path.join(REPO_ROOT, 'apps/mobile-app/components/items/ItemTypeIconComponents.tsx');
 
 /**
+ * Read a TypeScript source file with its line endings normalised to LF.
+ *
+ * The parsers below decide where a value ends by matching the end of a line. On a checkout
+ * with CRLF endings the carriage return sits after the terminator, so those matches fail and
+ * the terminator is carried into the generated value — which produced SVG constants ending in
+ * a stray backtick and comma on Windows. Normalising here keeps every parser in this file
+ * independent of how git happened to write the working tree.
+ */
+function readSource(filePath) {
+  return fs.readFileSync(filePath, 'utf8').replace(/\r\n/g, '\n');
+}
+
+/**
  * Parse the TypeScript FieldKey.ts file and extract constants
  */
 function parseTypeScriptFieldKeys(tsContent) {
@@ -1350,7 +1363,7 @@ function main() {
     throw new Error(`Source file not found: ${TS_SOURCE}`);
   }
 
-  const tsContent = fs.readFileSync(TS_SOURCE, 'utf8');
+  const tsContent = readSource(TS_SOURCE);
   const fieldKeys = parseTypeScriptFieldKeys(tsContent);
 
   if (Object.keys(fieldKeys).length === 0) {
@@ -1362,7 +1375,7 @@ function main() {
     throw new Error(`Source file not found: ${TS_ITEM_SOURCE}`);
   }
 
-  const tsItemContent = fs.readFileSync(TS_ITEM_SOURCE, 'utf8');
+  const tsItemContent = readSource(TS_ITEM_SOURCE);
   const fieldTypes = parseFieldTypes(tsItemContent);
   const itemTypes = parseItemTypes(tsItemContent);
 
@@ -1379,7 +1392,7 @@ function main() {
     throw new Error(`Source file not found: ${TS_REGISTRY_SOURCE}`);
   }
 
-  const tsRegistryContent = fs.readFileSync(TS_REGISTRY_SOURCE, 'utf8');
+  const tsRegistryContent = readSource(TS_REGISTRY_SOURCE);
 
   // Parse types dynamically from TypeScript
   const categories = parseFieldCategories(tsRegistryContent);
@@ -1476,7 +1489,7 @@ function main() {
   if (!fs.existsSync(TS_ICONS_SOURCE)) {
     console.warn(`Warning: Icons source file not found: ${TS_ICONS_SOURCE}`);
   } else {
-    const tsIconsContent = fs.readFileSync(TS_ICONS_SOURCE, 'utf8');
+    const tsIconsContent = readSource(TS_ICONS_SOURCE);
     const iconSvgs = parseItemTypeIconSvgs(tsIconsContent);
 
     if (Object.keys(iconSvgs).length === 0) {
