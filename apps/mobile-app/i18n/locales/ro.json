@@ -646,7 +646,11 @@
     "USERNAME_INVALID_CHARACTERS": "Numele de utilizator este invalid, folosește doar litere sau cifre.",
     "VAULT_NOT_UP_TO_DATE": "Seiful tău nu este actualizat. Sincronizează seiful și încearcă din nou.",
     "INTERNAL_SERVER_ERROR": "Eroare internă de server.",
-    "VAULT_ERROR": "Seiful local nu este actualizat. Sincronizează seiful prin reîmprospătarea paginii și încearcă din nou."
+    "VAULT_ERROR": "Seiful local nu este actualizat. Sincronizează seiful prin reîmprospătarea paginii și încearcă din nou.",
+    "AUTH_RATE_LIMIT_EXCEEDED": "Prea multe încercări din rețeaua ta. Așteaptă câteva minute și încearcă din nou.",
+    "MOBILE_LOGIN_REQUEST_NOT_FOUND": "Această cerere de autentificare nu mai există. Este posibil să fi expirat. Începe una nouă și încearcă din nou.",
+    "MOBILE_LOGIN_REQUEST_ALREADY_FULFILLED": "Această cerere de autentificare a fost deja aprobată. Începe una nouă și încearcă din nou.",
+    "UNSUPPORTED_ENCRYPTION_SETTINGS": "Serverul nu acceptă setările de criptare folosite de această versiune. Actualizează la cea mai recentă versiune și încearcă din nou."
   },
   "sync": {
     "offline": "Offline",

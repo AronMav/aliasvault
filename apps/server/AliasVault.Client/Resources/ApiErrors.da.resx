@@ -191,4 +191,22 @@
   <data name="ACCOUNT_LOCKED" xml:space="preserve">
     <value>Du har indtastet en forkert adgangskode for mange gange, og din konto er nu blevet låst. Du kan prøve igen om 30 minutter.</value>
   </data>
+  <data name="AUTH_RATE_LIMIT_EXCEEDED" xml:space="preserve">
+    <value>For mange forsøg fra dit netværk. Vent et par minutter, og prøv igen.</value>
+  </data>
+  <data name="REGISTRATION_RATE_LIMIT_EXCEEDED" xml:space="preserve">
+    <value>Der er oprettet for mange konti fra dit netværk. Vent et stykke tid, og prøv igen.</value>
+  </data>
+  <data name="MOBILE_LOGIN_REQUEST_NOT_FOUND" xml:space="preserve">
+    <value>Denne loginanmodning findes ikke længere. Den er muligvis udløbet. Start en ny, og prøv igen.</value>
+  </data>
+  <data name="MOBILE_LOGIN_REQUEST_ALREADY_FULFILLED" xml:space="preserve">
+    <value>Denne loginanmodning er allerede godkendt. Start en ny, og prøv igen.</value>
+  </data>
+  <data name="MOBILE_LOGIN_INVALID_PUBLIC_KEY" xml:space="preserve">
+    <value>Denne loginanmodning kunne ikke startes. Opdatér til den nyeste version, og prøv igen.</value>
+  </data>
+  <data name="UNSUPPORTED_ENCRYPTION_SETTINGS" xml:space="preserve">
+    <value>Serveren accepterer ikke de krypteringsindstillinger, denne version bruger. Opdatér til den nyeste version, og prøv igen.</value>
+  </data>
 </root>

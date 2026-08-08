@@ -646,7 +646,11 @@
     "USERNAME_INVALID_CHARACTERS": "Nazwa użytkownika jest nieprawidłowa, może zawierać tylko litery lub cyfry.",
     "VAULT_NOT_UP_TO_DATE": "Twój sejf nie jest aktualny. Zsynchronizuj sejf i spróbuj ponownie.",
     "INTERNAL_SERVER_ERROR": "Wystąpił wewnętrzny błąd serwera.",
-    "VAULT_ERROR": "Lokalny sejf nie jest aktualny. Zsynchronizuj sejf, odświeżając stronę, i spróbuj ponownie."
+    "VAULT_ERROR": "Lokalny sejf nie jest aktualny. Zsynchronizuj sejf, odświeżając stronę, i spróbuj ponownie.",
+    "AUTH_RATE_LIMIT_EXCEEDED": "Zbyt wiele prób z Twojej sieci. Odczekaj kilka minut i spróbuj ponownie.",
+    "MOBILE_LOGIN_REQUEST_NOT_FOUND": "To żądanie logowania już nie istnieje. Mogło wygasnąć. Rozpocznij nowe i spróbuj ponownie.",
+    "MOBILE_LOGIN_REQUEST_ALREADY_FULFILLED": "To żądanie logowania zostało już zatwierdzone. Rozpocznij nowe i spróbuj ponownie.",
+    "UNSUPPORTED_ENCRYPTION_SETTINGS": "Serwer nie akceptuje ustawień szyfrowania używanych przez tę wersję. Zaktualizuj do najnowszej wersji i spróbuj ponownie."
   },
   "sync": {
     "offline": "Jesteś w trybie offline",

@@ -142,7 +142,13 @@
       "USERNAME_INVALID_CHARACTERS": "Der Benutzername ist ungültig. Er darf nur aus Buchstaben oder Ziffern bestehen.",
       "VAULT_NOT_UP_TO_DATE": "Dein Tresor ist nicht aktuell. Bitte synchronisiere Deinen Tresor und versuche es erneut.",
       "INTERNAL_SERVER_ERROR": "Interner Server Fehler.",
-      "VAULT_ERROR": "Der lokale Tresor ist nicht aktuell. Bitte synchronisiere Deinen Tresor, indem Du die Seite aktualisierst, und versuche es erneut."
+      "VAULT_ERROR": "Der lokale Tresor ist nicht aktuell. Bitte synchronisiere Deinen Tresor, indem Du die Seite aktualisierst, und versuche es erneut.",
+      "AUTH_RATE_LIMIT_EXCEEDED": "Zu viele Versuche aus Deinem Netzwerk. Bitte warte ein paar Minuten und versuche es erneut.",
+      "MOBILE_LOGIN_REQUEST_NOT_FOUND": "Diese Anmeldeanfrage existiert nicht mehr. Möglicherweise ist sie abgelaufen. Bitte starte eine neue und versuche es erneut.",
+      "MOBILE_LOGIN_INVALID_PUBLIC_KEY": "Diese Anmeldeanfrage konnte nicht gestartet werden. Bitte aktualisiere auf die neueste Version und versuche es erneut.",
+      "REGISTRATION_RATE_LIMIT_EXCEEDED": "Aus Deinem Netzwerk wurden zu viele Konten erstellt. Bitte warte eine Weile und versuche es erneut.",
+      "REGISTRATION_FAILED": "Das Konto konnte nicht erstellt werden. Bitte versuche es in ein paar Minuten erneut. Wenn dieses Problem weiterhin besteht, kontaktiere bitte den Support.",
+      "UNSUPPORTED_ENCRYPTION_SETTINGS": "Der Server akzeptiert die Verschlüsselungseinstellungen dieser Version nicht. Bitte aktualisiere auf die neueste Version und versuche es erneut."
     }
   },
   "content": {

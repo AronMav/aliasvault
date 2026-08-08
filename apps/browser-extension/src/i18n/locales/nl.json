@@ -142,7 +142,13 @@
       "USERNAME_INVALID_CHARACTERS": "Gebruikersnaam is ongeldig, mag alleen letters of cijfers bevatten.",
       "VAULT_NOT_UP_TO_DATE": "Je vault is niet up-to-date. Synchroniseer je vault en probeer het opnieuw.",
       "INTERNAL_SERVER_ERROR": "Interne serverfout.",
-      "VAULT_ERROR": "Je lokale vault is niet up-to-date. Synchroniseer je vault door de pagina te vernieuwen en probeer het opnieuw."
+      "VAULT_ERROR": "Je lokale vault is niet up-to-date. Synchroniseer je vault door de pagina te vernieuwen en probeer het opnieuw.",
+      "AUTH_RATE_LIMIT_EXCEEDED": "Te veel pogingen vanaf je netwerk. Wacht een paar minuten en probeer het opnieuw.",
+      "MOBILE_LOGIN_REQUEST_NOT_FOUND": "Dit inlogverzoek bestaat niet meer. Mogelijk is het verlopen. Start een nieuw verzoek en probeer het opnieuw.",
+      "MOBILE_LOGIN_INVALID_PUBLIC_KEY": "Dit inlogverzoek kon niet worden gestart. Werk bij naar de nieuwste versie en probeer het opnieuw.",
+      "REGISTRATION_RATE_LIMIT_EXCEEDED": "Er zijn te veel accounts aangemaakt vanaf je netwerk. Wacht even en probeer het opnieuw.",
+      "REGISTRATION_FAILED": "Kon het account niet aanmaken. Probeer het over een paar minuten opnieuw. Als dit probleem zich blijft voordoen, neem dan contact op met support.",
+      "UNSUPPORTED_ENCRYPTION_SETTINGS": "De server accepteert de versleutelingsinstellingen van deze versie niet. Werk bij naar de nieuwste versie en probeer het opnieuw."
     }
   },
   "content": {

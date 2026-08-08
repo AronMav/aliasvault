@@ -142,7 +142,13 @@
       "USERNAME_INVALID_CHARACTERS": "El nombre de usuario inválido, solo puede contener letras o dígitos.",
       "VAULT_NOT_UP_TO_DATE": "Su bóveda no está actualizada. Por favor, sincronice su bóveda e inténtelo de nuevo.",
       "INTERNAL_SERVER_ERROR": "Error interno del servidor.",
-      "VAULT_ERROR": "La bóveda local no está actualizada. Por favor, sincronice su bóveda actualizando la página e inténtelo de nuevo."
+      "VAULT_ERROR": "La bóveda local no está actualizada. Por favor, sincronice su bóveda actualizando la página e inténtelo de nuevo.",
+      "AUTH_RATE_LIMIT_EXCEEDED": "Demasiados intentos desde tu red. Espera unos minutos e inténtalo de nuevo.",
+      "MOBILE_LOGIN_REQUEST_NOT_FOUND": "Esta solicitud de inicio de sesión ya no existe. Es posible que haya caducado. Inicia una nueva e inténtalo de nuevo.",
+      "MOBILE_LOGIN_INVALID_PUBLIC_KEY": "No se ha podido iniciar esta solicitud de inicio de sesión. Actualiza a la última versión e inténtalo de nuevo.",
+      "REGISTRATION_RATE_LIMIT_EXCEEDED": "Se han creado demasiadas cuentas desde tu red. Espera un rato e inténtalo de nuevo.",
+      "REGISTRATION_FAILED": "No se pudo crear la cuenta. Por favor, inténtelo de nuevo en unos minutos. Si el problema persiste, póngase en contacto con soporte.",
+      "UNSUPPORTED_ENCRYPTION_SETTINGS": "El servidor no acepta la configuración de cifrado que usa esta versión. Actualiza a la última versión e inténtalo de nuevo."
     }
   },
   "content": {

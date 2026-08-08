@@ -191,4 +191,22 @@
   <data name="ACCOUNT_LOCKED" xml:space="preserve">
     <value>Vous avez entré un mot de passe incorrect trop de fois et votre compte a été bloqué. Vous pouvez réessayer dans 30 minutes.</value>
   </data>
+  <data name="AUTH_RATE_LIMIT_EXCEEDED" xml:space="preserve">
+    <value>Trop de tentatives depuis votre réseau. Veuillez patienter quelques minutes et réessayer.</value>
+  </data>
+  <data name="REGISTRATION_RATE_LIMIT_EXCEEDED" xml:space="preserve">
+    <value>Trop de comptes ont été créés depuis votre réseau. Veuillez patienter un moment et réessayer.</value>
+  </data>
+  <data name="MOBILE_LOGIN_REQUEST_NOT_FOUND" xml:space="preserve">
+    <value>Cette demande de connexion n'existe plus. Elle a peut-être expiré. Veuillez en démarrer une nouvelle et réessayer.</value>
+  </data>
+  <data name="MOBILE_LOGIN_REQUEST_ALREADY_FULFILLED" xml:space="preserve">
+    <value>Cette demande de connexion a déjà été approuvée. Veuillez en démarrer une nouvelle et réessayer.</value>
+  </data>
+  <data name="MOBILE_LOGIN_INVALID_PUBLIC_KEY" xml:space="preserve">
+    <value>Impossible de démarrer cette demande de connexion. Veuillez mettre à jour vers la dernière version et réessayer.</value>
+  </data>
+  <data name="UNSUPPORTED_ENCRYPTION_SETTINGS" xml:space="preserve">
+    <value>Le serveur n'accepte pas les paramètres de chiffrement utilisés par cette version. Veuillez mettre à jour vers la dernière version et réessayer.</value>
+  </data>
 </root>

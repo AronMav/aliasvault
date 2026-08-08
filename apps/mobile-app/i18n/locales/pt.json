@@ -646,7 +646,11 @@
     "USERNAME_INVALID_CHARACTERS": "Usuário é inválido, só pode conter letras ou números.",
     "VAULT_NOT_UP_TO_DATE": "Seu cofre não está atualizado. Por favor sincronize seu cofre e tente novamente.",
     "INTERNAL_SERVER_ERROR": "Erro interno do servidor.",
-    "VAULT_ERROR": "O cofre local não está atualizado. Por favor sincronize seu cofre recarregando a página e tente novamente."
+    "VAULT_ERROR": "O cofre local não está atualizado. Por favor sincronize seu cofre recarregando a página e tente novamente.",
+    "AUTH_RATE_LIMIT_EXCEEDED": "Muitas tentativas a partir da sua rede. Por favor, aguarde alguns minutos e tente novamente.",
+    "MOBILE_LOGIN_REQUEST_NOT_FOUND": "Esta solicitação de login não existe mais. Ela pode ter expirado. Por favor, inicie uma nova e tente novamente.",
+    "MOBILE_LOGIN_REQUEST_ALREADY_FULFILLED": "Esta solicitação de login já foi aprovada. Por favor, inicie uma nova e tente novamente.",
+    "UNSUPPORTED_ENCRYPTION_SETTINGS": "O servidor não aceita as configurações de criptografia que esta versão usa. Por favor, atualize para a versão mais recente e tente novamente."
   },
   "sync": {
     "offline": "Offline",

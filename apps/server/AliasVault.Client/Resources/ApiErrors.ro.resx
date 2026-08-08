@@ -191,4 +191,22 @@
   <data name="ACCOUNT_LOCKED" xml:space="preserve">
     <value>Ai introdus o parolă greșită de prea multe ori, iar contul tău a fost blocat. Încearcă din nou peste 30 de minute.</value>
   </data>
+  <data name="AUTH_RATE_LIMIT_EXCEEDED" xml:space="preserve">
+    <value>Prea multe încercări din rețeaua ta. Așteaptă câteva minute și încearcă din nou.</value>
+  </data>
+  <data name="REGISTRATION_RATE_LIMIT_EXCEEDED" xml:space="preserve">
+    <value>Au fost create prea multe conturi din rețeaua ta. Așteaptă puțin și încearcă din nou.</value>
+  </data>
+  <data name="MOBILE_LOGIN_REQUEST_NOT_FOUND" xml:space="preserve">
+    <value>Această cerere de autentificare nu mai există. Este posibil să fi expirat. Începe una nouă și încearcă din nou.</value>
+  </data>
+  <data name="MOBILE_LOGIN_REQUEST_ALREADY_FULFILLED" xml:space="preserve">
+    <value>Această cerere de autentificare a fost deja aprobată. Începe una nouă și încearcă din nou.</value>
+  </data>
+  <data name="MOBILE_LOGIN_INVALID_PUBLIC_KEY" xml:space="preserve">
+    <value>Această cerere de autentificare nu a putut fi inițiată. Actualizează la cea mai recentă versiune și încearcă din nou.</value>
+  </data>
+  <data name="UNSUPPORTED_ENCRYPTION_SETTINGS" xml:space="preserve">
+    <value>Serverul nu acceptă setările de criptare folosite de această versiune. Actualizează la cea mai recentă versiune și încearcă din nou.</value>
+  </data>
 </root>

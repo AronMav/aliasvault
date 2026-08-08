@@ -646,7 +646,11 @@
     "USERNAME_INVALID_CHARACTERS": "Helytelen felhasználónév, csak betűket és számokat tartalmazhat.",
     "VAULT_NOT_UP_TO_DATE": "A széfje nem friss. Kérem, szinkronizálja széfjét és próbálja újra.",
     "INTERNAL_SERVER_ERROR": "Belső szerver hiba.",
-    "VAULT_ERROR": "A helyi széf nem friss. Szinkronizálja széfjét az oldal frissítésével, majd próbálja újra."
+    "VAULT_ERROR": "A helyi széf nem friss. Szinkronizálja széfjét az oldal frissítésével, majd próbálja újra.",
+    "AUTH_RATE_LIMIT_EXCEEDED": "Túl sok próbálkozás a hálózatáról. Kérjük, várjon néhány percet, és próbálja újra.",
+    "MOBILE_LOGIN_REQUEST_NOT_FOUND": "Ez a bejelentkezési kérés már nem létezik. Lehet, hogy lejárt. Kérjük, indítson egy újat, és próbálja újra.",
+    "MOBILE_LOGIN_REQUEST_ALREADY_FULFILLED": "Ezt a bejelentkezési kérést már jóváhagyták. Kérjük, indítson egy újat, és próbálja újra.",
+    "UNSUPPORTED_ENCRYPTION_SETTINGS": "A kiszolgáló nem fogadja el az ebben a verzióban használt titkosítási beállításokat. Kérjük, frissítsen a legújabb verzióra, és próbálja újra."
   },
   "sync": {
     "offline": "Offline",

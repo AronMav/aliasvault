@@ -191,4 +191,22 @@
   <data name="ACCOUNT_LOCKED" xml:space="preserve">
     <value>You have entered an incorrect password too many times and your account has now been locked out. You can try again in 30 minutes.</value>
   </data>
+  <data name="AUTH_RATE_LIMIT_EXCEEDED" xml:space="preserve">
+    <value>Terlalu banyak percobaan dari jaringan Anda. Silakan tunggu beberapa menit dan coba lagi.</value>
+  </data>
+  <data name="REGISTRATION_RATE_LIMIT_EXCEEDED" xml:space="preserve">
+    <value>Terlalu banyak akun dibuat dari jaringan Anda. Silakan tunggu beberapa saat dan coba lagi.</value>
+  </data>
+  <data name="MOBILE_LOGIN_REQUEST_NOT_FOUND" xml:space="preserve">
+    <value>Permintaan masuk ini sudah tidak ada. Mungkin sudah kedaluwarsa. Silakan mulai yang baru dan coba lagi.</value>
+  </data>
+  <data name="MOBILE_LOGIN_REQUEST_ALREADY_FULFILLED" xml:space="preserve">
+    <value>Permintaan masuk ini sudah disetujui. Silakan mulai yang baru dan coba lagi.</value>
+  </data>
+  <data name="MOBILE_LOGIN_INVALID_PUBLIC_KEY" xml:space="preserve">
+    <value>Permintaan masuk ini tidak dapat dimulai. Silakan perbarui ke versi terbaru dan coba lagi.</value>
+  </data>
+  <data name="UNSUPPORTED_ENCRYPTION_SETTINGS" xml:space="preserve">
+    <value>Server tidak menerima pengaturan enkripsi yang digunakan versi ini. Silakan perbarui ke versi terbaru dan coba lagi.</value>
+  </data>
 </root>

@@ -191,4 +191,22 @@
   <data name="ACCOUNT_LOCKED" xml:space="preserve">
     <value>מילאת סיסמה שגויה יותר מדי פעמים והחשבון שלך ננעל כרגע. אפשר לנסות שוב בעוד חצי שעה.</value>
   </data>
+  <data name="AUTH_RATE_LIMIT_EXCEEDED" xml:space="preserve">
+    <value>יותר מדי ניסיונות מהרשת שלך. נא להמתין כמה דקות ולנסות שוב.</value>
+  </data>
+  <data name="REGISTRATION_RATE_LIMIT_EXCEEDED" xml:space="preserve">
+    <value>נוצרו יותר מדי חשבונות מהרשת שלך. נא להמתין זמן מה ולנסות שוב.</value>
+  </data>
+  <data name="MOBILE_LOGIN_REQUEST_NOT_FOUND" xml:space="preserve">
+    <value>בקשת ההתחברות הזו כבר לא קיימת. ייתכן שפג תוקפה. נא להתחיל בקשה חדשה ולנסות שוב.</value>
+  </data>
+  <data name="MOBILE_LOGIN_REQUEST_ALREADY_FULFILLED" xml:space="preserve">
+    <value>בקשת ההתחברות הזו כבר אושרה. נא להתחיל בקשה חדשה ולנסות שוב.</value>
+  </data>
+  <data name="MOBILE_LOGIN_INVALID_PUBLIC_KEY" xml:space="preserve">
+    <value>לא ניתן היה להתחיל את בקשת ההתחברות הזו. נא לעדכן לגרסה האחרונה ולנסות שוב.</value>
+  </data>
+  <data name="UNSUPPORTED_ENCRYPTION_SETTINGS" xml:space="preserve">
+    <value>השרת אינו מקבל את הגדרות ההצפנה שגרסה זו משתמשת בהן. נא לעדכן לגרסה האחרונה ולנסות שוב.</value>
+  </data>
 </root>
