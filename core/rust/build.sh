@@ -597,10 +597,20 @@ build_android() {
 
     # Set up Android toolchain
     local host_tag
+    local exe_ext=""
+    local clang_ext=""
     case "$(uname -s)" in
         Darwin) host_tag="darwin-x86_64" ;;
         Linux) host_tag="linux-x86_64" ;;
-        *) host_tag="windows-x86_64" ;;
+        *)
+            host_tag="windows-x86_64"
+            # The NDK ships each clang wrapper twice on Windows: an extensionless shell script for
+            # MSYS-style shells, and a .cmd batch file. Rust and cc launch the linker through the
+            # Windows loader, which cannot execute the shell script -- it fails with "%1 is not a
+            # valid Win32 application" -- so the batch file is the one to name here.
+            exe_ext=".exe"
+            clang_ext=".cmd"
+            ;;
     esac
 
     local toolchain="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$host_tag"
@@ -609,24 +619,24 @@ build_android() {
     # Build for each ABI
     # Note: Use only 'uniffi' feature for library builds (not uniffi-cli which includes heavy bindgen deps)
     echo -e "  Building for arm64-v8a..."
-    AR="$toolchain/bin/llvm-ar" \
-    CC="$toolchain/bin/aarch64-linux-android${api_level}-clang" \
-    CXX="$toolchain/bin/aarch64-linux-android${api_level}-clang++" \
-    CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$toolchain/bin/aarch64-linux-android${api_level}-clang" \
+    AR="$toolchain/bin/llvm-ar$exe_ext" \
+    CC="$toolchain/bin/aarch64-linux-android${api_level}-clang$clang_ext" \
+    CXX="$toolchain/bin/aarch64-linux-android${api_level}-clang++$clang_ext" \
+    CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$toolchain/bin/aarch64-linux-android${api_level}-clang$clang_ext" \
     cargo build $cargo_flags --target aarch64-linux-android --features uniffi
 
     echo -e "  Building for armeabi-v7a..."
-    AR="$toolchain/bin/llvm-ar" \
-    CC="$toolchain/bin/armv7a-linux-androideabi${api_level}-clang" \
-    CXX="$toolchain/bin/armv7a-linux-androideabi${api_level}-clang++" \
-    CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$toolchain/bin/armv7a-linux-androideabi${api_level}-clang" \
+    AR="$toolchain/bin/llvm-ar$exe_ext" \
+    CC="$toolchain/bin/armv7a-linux-androideabi${api_level}-clang$clang_ext" \
+    CXX="$toolchain/bin/armv7a-linux-androideabi${api_level}-clang++$clang_ext" \
+    CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$toolchain/bin/armv7a-linux-androideabi${api_level}-clang$clang_ext" \
     cargo build $cargo_flags --target armv7-linux-androideabi --features uniffi
 
     echo -e "  Building for x86_64..."
-    AR="$toolchain/bin/llvm-ar" \
-    CC="$toolchain/bin/x86_64-linux-android${api_level}-clang" \
-    CXX="$toolchain/bin/x86_64-linux-android${api_level}-clang++" \
-    CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$toolchain/bin/x86_64-linux-android${api_level}-clang" \
+    AR="$toolchain/bin/llvm-ar$exe_ext" \
+    CC="$toolchain/bin/x86_64-linux-android${api_level}-clang$clang_ext" \
+    CXX="$toolchain/bin/x86_64-linux-android${api_level}-clang++$clang_ext" \
+    CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$toolchain/bin/x86_64-linux-android${api_level}-clang$clang_ext" \
     cargo build $cargo_flags --target x86_64-linux-android --features uniffi
 
     # Copy libraries
@@ -638,7 +648,7 @@ build_android() {
     # This removes debug info while keeping symbols needed for JNI
     if ! $FAST_MODE; then
         echo -e "  Stripping debug symbols from libraries..."
-        local llvm_strip="$toolchain/bin/llvm-strip"
+        local llvm_strip="$toolchain/bin/llvm-strip$exe_ext"
         if [ -x "$llvm_strip" ]; then
             "$llvm_strip" --strip-debug "$ANDROID_DIR/arm64-v8a/libaliasvault_core.so" 2>/dev/null || true
             "$llvm_strip" --strip-debug "$ANDROID_DIR/armeabi-v7a/libaliasvault_core.so" 2>/dev/null || true
