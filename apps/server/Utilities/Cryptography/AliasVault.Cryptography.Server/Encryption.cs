@@ -187,8 +187,8 @@ public static class Encryption
     private static void ImportPublicKey(RSA rsa, string jwk)
     {
         var jwkObj = JsonSerializer.Deserialize<JsonElement>(jwk);
-        var n = Base64UrlDecode(jwkObj.GetProperty("n").GetString()!);
-        var e = Base64UrlDecode(jwkObj.GetProperty("e").GetString()!);
+        var n = DecodeMember(jwkObj, "n");
+        var e = DecodeMember(jwkObj, "e");
 
         var rsaParameters = new RSAParameters
         {
@@ -207,14 +207,14 @@ public static class Encryption
     private static void ImportPrivateKey(RSA rsa, string jwk)
     {
         var jwkObj = JsonSerializer.Deserialize<JsonElement>(jwk);
-        var n = Base64UrlDecode(jwkObj.GetProperty("n").GetString()!);
-        var e = Base64UrlDecode(jwkObj.GetProperty("e").GetString()!);
-        var d = Base64UrlDecode(jwkObj.GetProperty("d").GetString()!);
-        var p = Base64UrlDecode(jwkObj.GetProperty("p").GetString()!);
-        var q = Base64UrlDecode(jwkObj.GetProperty("q").GetString()!);
-        var dp = Base64UrlDecode(jwkObj.GetProperty("dp").GetString()!);
-        var dq = Base64UrlDecode(jwkObj.GetProperty("dq").GetString()!);
-        var qi = Base64UrlDecode(jwkObj.GetProperty("qi").GetString()!);
+        var n = DecodeMember(jwkObj, "n");
+        var e = DecodeMember(jwkObj, "e");
+        var d = DecodeMember(jwkObj, "d");
+        var p = DecodeMember(jwkObj, "p");
+        var q = DecodeMember(jwkObj, "q");
+        var dp = DecodeMember(jwkObj, "dp");
+        var dq = DecodeMember(jwkObj, "dq");
+        var qi = DecodeMember(jwkObj, "qi");
 
         var rsaParameters = new RSAParameters
         {
@@ -229,6 +229,26 @@ public static class Encryption
         };
 
         rsa.ImportParameters(rsaParameters);
+    }
+
+    /// <summary>
+    /// Reads a Base64Url-encoded member out of a JWK object and decodes it.
+    /// </summary>
+    /// <remarks>
+    /// A JSON null makes <see cref="JsonElement.GetString"/> return null, which the callers below
+    /// would otherwise hand straight to <see cref="Base64UrlDecode"/> and turn into a
+    /// NullReferenceException. The JWK arrives on an anonymous endpoint, so a member the caller set
+    /// to null has to be a rejected key rather than an unhandled failure.
+    /// </remarks>
+    /// <param name="jwk">The parsed JWK object.</param>
+    /// <param name="memberName">The name of the member to read.</param>
+    /// <returns>The decoded member value.</returns>
+    private static byte[] DecodeMember(JsonElement jwk, string memberName)
+    {
+        var value = jwk.GetProperty(memberName).GetString()
+            ?? throw new JsonException($"JWK member '{memberName}' is null.");
+
+        return Base64UrlDecode(value);
     }
 
     /// <summary>

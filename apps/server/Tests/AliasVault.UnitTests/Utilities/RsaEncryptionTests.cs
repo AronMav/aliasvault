@@ -155,6 +155,8 @@ public class RsaEncryptionTests
     [TestCase("{}")]
     [TestCase("{\"kty\":\"RSA\",\"e\":\"AQAB\"}")]
     [TestCase("{\"kty\":\"RSA\",\"e\":\"AQAB\",\"n\":\"AQAB\"}")]
+    [TestCase("{\"kty\":\"RSA\",\"e\":\"AQAB\",\"n\":null}")]
+    [TestCase("{\"kty\":\"RSA\",\"e\":null,\"n\":\"AQAB\"}")]
     public void IsValidRsaPublicKey_WithUnusableValue_ReturnsFalse(string publicKey)
     {
         Assert.That(Encryption.IsValidRsaPublicKey(publicKey), Is.False);
