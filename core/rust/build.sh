@@ -43,7 +43,19 @@ check_tool() {
     fi
 }
 
-# Portable checksum function (works on macOS and Linux)
+# The SHA-256 tool to checksum sources with. macOS ships shasum, Linux and Git for
+# Windows ship sha256sum, and neither ships both -- so pick whichever is here rather
+# than naming one. Without this the checksum came out empty on hosts missing shasum,
+# and every build re-ran work the incremental check exists to skip.
+if command -v sha256sum >/dev/null 2>&1; then
+    sha256() { sha256sum "$@"; }
+elif command -v shasum >/dev/null 2>&1; then
+    sha256() { shasum -a 256 "$@"; }
+else
+    sha256() { echo "no-sha256-tool"; }
+fi
+
+# Portable checksum function (works on macOS, Linux and Git for Windows)
 # Includes Rust sources AND Cargo.toml/Cargo.lock to detect dependency changes
 # that can cause UniFFI checksum mismatches
 compute_source_checksum() {
@@ -55,11 +67,11 @@ compute_source_checksum() {
         {
             find "$dir" -name "*.rs" -type f -print0 2>/dev/null | \
                 sort -z | \
-                xargs -0 shasum -a 256 2>/dev/null
+                xargs -0 sha256 2>/dev/null
             # Include Cargo files from parent directory (where Cargo.toml lives)
             local cargo_dir="$(dirname "$dir")"
-            shasum -a 256 "$cargo_dir/Cargo.toml" "$cargo_dir/Cargo.lock" 2>/dev/null
-        } | shasum -a 256 | cut -d' ' -f1
+            sha256 "$cargo_dir/Cargo.toml" "$cargo_dir/Cargo.lock" 2>/dev/null
+        } | sha256 | cut -d' ' -f1
     else
         echo "unknown"
     fi
