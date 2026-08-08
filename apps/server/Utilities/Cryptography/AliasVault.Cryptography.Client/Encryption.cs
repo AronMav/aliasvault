@@ -8,7 +8,6 @@
 namespace AliasVault.Cryptography.Client;
 
 using System.Text;
-using System.Text.Json;
 using Konscious.Security.Cryptography;
 
 /// <summary>
@@ -52,39 +51,14 @@ public static class Encryption
     /// <returns>Key derived from plain-text password as byte array.</returns>
     private static async Task<byte[]> Argon2Id(byte[] passwordBytes, byte[] saltBytes, string? encryptionSettings = null)
     {
-        var degreeOfParallelism = Defaults.Argon2IdDegreeOfParallelism;
-        var memorySize = Defaults.Argon2IdMemorySize;
-        var iterations = Defaults.Argon2IdIterations;
-
-        if (encryptionSettings is not null)
-        {
-            // Parse the encryption properties json string.
-            var properties = JsonSerializer.Deserialize<Dictionary<string, int>>(encryptionSettings);
-            if (properties is not null)
-            {
-                if (properties.TryGetValue("DegreeOfParallelism", out int doP))
-                {
-                    degreeOfParallelism = doP;
-                }
-
-                if (properties.TryGetValue("MemorySize", out int memSize))
-                {
-                    memorySize = memSize;
-                }
-
-                if (properties.TryGetValue("Iterations", out int iter))
-                {
-                    iterations = iter;
-                }
-            }
-        }
+        var parameters = EncryptionSettingsPolicy.ParseOrDefaults(encryptionSettings);
 
         var argon2 = new Argon2id(passwordBytes)
         {
             Salt = saltBytes,
-            DegreeOfParallelism = degreeOfParallelism,
-            MemorySize = memorySize,
-            Iterations = iterations,
+            DegreeOfParallelism = parameters.DegreeOfParallelism,
+            MemorySize = parameters.MemorySize,
+            Iterations = parameters.Iterations,
         };
 
         return await argon2.GetBytesAsync(32); // Generate a 256-bit key

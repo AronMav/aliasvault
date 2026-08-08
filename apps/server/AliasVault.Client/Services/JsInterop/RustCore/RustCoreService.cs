@@ -246,8 +246,7 @@ public class RustCoreService : IAsyncDisposable
     /// <param name="salt">The salt recorded against the vault.</param>
     /// <param name="encryptionType">The encryption type recorded against the vault, or null for the default.</param>
     /// <param name="encryptionSettings">The encryption settings recorded against the vault, or null for the defaults.</param>
-    /// <returns>The derived 256-bit key.</returns>
-    /// <exception cref="InvalidOperationException">Thrown if the WASM module is unavailable.</exception>
+    /// <returns>The derived 256-bit key. Falls back to the managed implementation when the WASM module is unavailable.</returns>
     /// <exception cref="NotSupportedException">Thrown if the encryption type is not one this client implements.</exception>
     public async Task<byte[]> DeriveKeyFromPasswordAsync(string password, string salt, string? encryptionType = null, string? encryptionSettings = null)
     {
@@ -257,40 +256,21 @@ public class RustCoreService : IAsyncDisposable
             throw new NotSupportedException($"Encryption type {encryptionType} is not supported.");
         }
 
-        // Fall back to the defaults per parameter, matching how the managed implementation reads
-        // these, so a vault recorded with a partial settings object still opens.
-        var degreeOfParallelism = Defaults.Argon2IdDegreeOfParallelism;
-        var memorySize = Defaults.Argon2IdMemorySize;
-        var iterations = Defaults.Argon2IdIterations;
-
-        if (encryptionSettings is not null)
-        {
-            var properties = JsonSerializer.Deserialize<Dictionary<string, int>>(encryptionSettings);
-            if (properties is not null)
-            {
-                if (properties.TryGetValue("DegreeOfParallelism", out var parsedParallelism))
-                {
-                    degreeOfParallelism = parsedParallelism;
-                }
-
-                if (properties.TryGetValue("MemorySize", out var parsedMemorySize))
-                {
-                    memorySize = parsedMemorySize;
-                }
-
-                if (properties.TryGetValue("Iterations", out var parsedIterations))
-                {
-                    iterations = parsedIterations;
-                }
-            }
-        }
-
         if (!await WaitForAvailabilityAsync())
         {
-            throw new InvalidOperationException("Rust WASM module is not available.");
+            // Derive in managed code rather than failing. Both implementations are held to the same
+            // Argon2id parameters and produce the same key, so the only difference the user sees is
+            // that it takes longer. Refusing instead would leave someone whose browser served a stale
+            // cache staring at a vault they cannot open until they work out that a hard reload fixes it.
+            return await Encryption.DeriveKeyFromPasswordAsync(password, salt, encryptionType, encryptionSettings);
         }
 
-        var hex = await jsRuntime.InvokeAsync<string>("rustCoreArgon2DeriveKey", password, salt, memorySize, iterations, degreeOfParallelism);
+        // Read the parameters the same way the managed implementation does, so a vault recorded with a
+        // partial settings object opens to the same key on either path.
+        var parameters = EncryptionSettingsPolicy.ParseOrDefaults(encryptionSettings);
+
+        var hex = await jsRuntime.InvokeAsync<string>(
+            "rustCoreArgon2DeriveKey", password, salt, parameters.MemorySize, parameters.Iterations, parameters.DegreeOfParallelism);
         return Convert.FromHexString(hex);
     }
 

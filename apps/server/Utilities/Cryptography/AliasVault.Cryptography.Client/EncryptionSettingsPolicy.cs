@@ -109,6 +109,63 @@ public static class EncryptionSettingsPolicy
     }
 
     /// <summary>
+    /// Reads the Argon2id parameters out of a settings JSON string, filling anything absent from the
+    /// current defaults.
+    /// </summary>
+    /// <remarks>
+    /// This is what key derivation uses, as opposed to <see cref="TryParse"/>, which decides whether a
+    /// set of parameters may be recorded and so insists on all three being present. Both read the same
+    /// format from the same place, because two readers of a vault's parameters that disagree derive
+    /// two different keys from one password.
+    /// </remarks>
+    /// <param name="encryptionSettings">The encryption settings JSON string, or null for the defaults.</param>
+    /// <returns>The parameters to derive with.</returns>
+    public static (int DegreeOfParallelism, int MemorySize, int Iterations) ParseOrDefaults(string? encryptionSettings)
+    {
+        var parameters = (
+            DegreeOfParallelism: Defaults.Argon2IdDegreeOfParallelism,
+            MemorySize: Defaults.Argon2IdMemorySize,
+            Iterations: Defaults.Argon2IdIterations);
+
+        if (string.IsNullOrWhiteSpace(encryptionSettings))
+        {
+            return parameters;
+        }
+
+        Dictionary<string, int>? properties;
+        try
+        {
+            properties = JsonSerializer.Deserialize<Dictionary<string, int>>(encryptionSettings);
+        }
+        catch (JsonException)
+        {
+            return parameters;
+        }
+
+        if (properties is null)
+        {
+            return parameters;
+        }
+
+        if (properties.TryGetValue("DegreeOfParallelism", out var degreeOfParallelism))
+        {
+            parameters.DegreeOfParallelism = degreeOfParallelism;
+        }
+
+        if (properties.TryGetValue("MemorySize", out var memorySize))
+        {
+            parameters.MemorySize = memorySize;
+        }
+
+        if (properties.TryGetValue("Iterations", out var iterations))
+        {
+            parameters.Iterations = iterations;
+        }
+
+        return parameters;
+    }
+
+    /// <summary>
     /// Reads the three Argon2id parameters out of a settings JSON string.
     /// </summary>
     /// <remarks>
