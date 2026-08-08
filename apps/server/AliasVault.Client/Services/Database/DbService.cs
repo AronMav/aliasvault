@@ -10,6 +10,7 @@ namespace AliasVault.Client.Services.Database;
 using System.Buffers;
 using System.Buffers.Text;
 using System.Data;
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -352,30 +353,19 @@ public sealed class DbService : IDisposable
     /// Returns the size of the vault as it would be exported, without encrypting it.
     /// </summary>
     /// <remarks>
-    /// Used for size checks only. Encrypting the vault just to measure it would cost as much as
-    /// an actual save, on a path where the user is only being shown a warning.
+    /// Read from the page count rather than by writing the database out. This runs on the import
+    /// preview to decide whether to show a size warning, and the warning matters most on a vault
+    /// heavy with attachments -- exactly when copying the whole database, blobs included, into the
+    /// browser's filesystem is slowest and doubles the space it occupies while it happens.
     /// </remarks>
     /// <returns>Size of the exported database in bytes.</returns>
     public async Task<long> GetVaultSizeBytesAsync()
     {
-        var tempFileName = Path.GetRandomFileName();
+        await using var command = _sqlConnection!.CreateCommand();
+        command.CommandText = "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()";
 
-        try
-        {
-            await using var command = _sqlConnection!.CreateCommand();
-            command.CommandText = "VACUUM main INTO @fileName";
-            command.Parameters.Add(new SqliteParameter("@fileName", tempFileName));
-            await command.ExecuteNonQueryAsync();
-
-            return new FileInfo(tempFileName).Length;
-        }
-        finally
-        {
-            if (File.Exists(tempFileName))
-            {
-                File.Delete(tempFileName);
-            }
-        }
+        var result = await command.ExecuteScalarAsync();
+        return result is null or DBNull ? 0 : Convert.ToInt64(result, CultureInfo.InvariantCulture);
     }
 
     /// <summary>

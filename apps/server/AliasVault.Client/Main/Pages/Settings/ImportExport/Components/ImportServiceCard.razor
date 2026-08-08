@@ -1364,21 +1364,19 @@
     }
 
     /// <summary>
-    /// Gets the size the current vault would occupy once uploaded.
+    /// Gets the size of the current vault, before encoding.
     /// </summary>
     /// <remarks>
-    /// Measures the exported database and applies the base64 growth factor rather than actually
-    /// encrypting the vault: this runs on the preview step purely to decide whether to show a
-    /// warning, and encrypting would cost as much as a real save.
+    /// Measures the database rather than actually encrypting the vault: this runs on the preview step
+    /// purely to decide whether to show a warning, and encrypting would cost as much as a real save.
+    /// Returned unencoded so it is in the same unit as the attachment sizes it is added to; the size
+    /// guard applies the encoding growth where the limit calls for it.
     /// </remarks>
     private async Task<long> GetCurrentVaultSizeBytes()
     {
         try
         {
-            var rawSize = await DbService.GetVaultSizeBytesAsync();
-
-            // Base64 grows the payload by 4/3; the AES-GCM nonce and tag are negligible next to it.
-            return rawSize * 4 / 3;
+            return await DbService.GetVaultSizeBytesAsync();
         }
         catch (Exception ex)
         {

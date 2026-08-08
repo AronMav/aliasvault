@@ -57,8 +57,8 @@ public static class ImportSizeGuard
     /// Runs at the preview step, where the attachment sizes are known. Warning here
     /// keeps the user from ending up with a local vault that can no longer sync.
     /// </remarks>
-    /// <param name="vaultSizeBytes">Size of the current encrypted vault in bytes.</param>
-    /// <param name="attachmentBytes">Total size of the attachments about to be imported.</param>
+    /// <param name="vaultSizeBytes">Size of the current vault in bytes, before encoding.</param>
+    /// <param name="attachmentBytes">Total size of the attachments about to be imported, before encoding.</param>
     /// <param name="maxUploadSizeMb">The server's limit in megabytes, or null when unknown.</param>
     /// <returns>True when the import would push the vault past the limit.</returns>
     public static bool WouldExceedAfterImport(long vaultSizeBytes, long attachmentBytes, int? maxUploadSizeMb)
@@ -68,7 +68,11 @@ public static class ImportSizeGuard
             return false;
         }
 
-        return vaultSizeBytes + attachmentBytes > (long)maxUploadSizeMb.Value * 1024 * 1024;
+        // The server's limit applies to the request body, which carries the vault base64 encoded, so
+        // both parts have to be counted the way they will be sent. Scaling only one of them -- the
+        // vault, while the attachments about to be added to it stay raw -- understates the result by
+        // a third of the import and lets exactly the case this warns about through.
+        return Base64Length(vaultSizeBytes + attachmentBytes) > (long)maxUploadSizeMb.Value * 1024 * 1024;
     }
 
     /// <summary>
@@ -79,11 +83,26 @@ public static class ImportSizeGuard
     /// far larger uploads. Without it the user waits through a long import and is then told
     /// the save failed, with an empty vault and no explanation of why.
     /// </remarks>
-    /// <param name="vaultSizeBytes">Size of the current vault in bytes.</param>
-    /// <param name="attachmentBytes">Total size of the attachments about to be imported.</param>
+    /// <param name="vaultSizeBytes">Size of the current vault in bytes, before encoding.</param>
+    /// <param name="attachmentBytes">Total size of the attachments about to be imported, before encoding.</param>
     /// <returns>True when the resulting vault would be too large for the browser to save.</returns>
     public static bool WouldExceedBrowserLimit(long vaultSizeBytes, long attachmentBytes)
     {
+        // Compared before encoding, because the ceiling was measured against vault sizes.
         return vaultSizeBytes + attachmentBytes > BrowserVaultCeilingBytes;
+    }
+
+    /// <summary>
+    /// Returns how many bytes a payload of the given size occupies once base64 encoded.
+    /// </summary>
+    /// <remarks>
+    /// Base64 grows the payload by four bytes for every three; the AES-GCM nonce and tag that go with
+    /// it are negligible next to that and are not counted.
+    /// </remarks>
+    /// <param name="byteCount">Size of the payload before encoding.</param>
+    /// <returns>Size of the encoded payload in bytes.</returns>
+    private static long Base64Length(long byteCount)
+    {
+        return byteCount / 3 * 4;
     }
 }

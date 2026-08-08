@@ -3015,6 +3015,25 @@ public class ImportExportTests
     }
 
     /// <summary>
+    /// Test that the incoming attachments are counted the way they will be uploaded, not raw.
+    /// </summary>
+    /// <remarks>
+    /// The vault travels base64 encoded, so it arrives a third larger than it is on disk, and the
+    /// attachments being imported into it grow by the same factor. Counting the vault encoded but the
+    /// attachments raw understates the total by a third of the import: 45 MB of vault and 35 MB of
+    /// attachments read as 95 MB against a 100 MB limit and raise no warning, while the upload that
+    /// follows is nearly 107 MB and is refused.
+    /// </remarks>
+    [Test]
+    public void PreviewCountsIncomingAttachmentsAsEncoded()
+    {
+        const long vaultBytes = 45L * 1024 * 1024;
+        const long attachmentBytes = 35L * 1024 * 1024;
+
+        Assert.That(ImportSizeGuard.WouldExceedAfterImport(vaultBytes, attachmentBytes, 100), Is.True);
+    }
+
+    /// <summary>
     /// Test that the browser ceiling is applied independently of the server limit: a vault can
     /// be well within what the server accepts and still be too large for the browser to save.
     /// </summary>
