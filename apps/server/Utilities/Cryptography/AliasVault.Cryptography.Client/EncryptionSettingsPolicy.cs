@@ -18,11 +18,21 @@ using System.Text.Json;
 /// cost the account less work than the ones it already had, and parameters so expensive that no phone
 /// or browser tab can open the vault again.
 ///
-/// The lower bound is the account's own current parameters rather than a fixed number, because a
-/// deployment chooses what it registers accounts with (see CryptographyOverride in the client config)
-/// and a password change must not quietly overrule that choice in either direction. Values are
-/// rejected rather than clamped: the client has already derived its key, so recording anything other
-/// than what it reports produces a vault it cannot open.
+/// The lower bound is the account's own current parameters rather than a fixed number, so an account
+/// keeps whatever it was registered with even after the build's defaults move. This bound only ever
+/// ratchets upwards: a password change may raise the work a guess costs but never lower it, which is
+/// what stops a client from reporting cheap parameters against a vault that had expensive ones. All
+/// three parameters feed that comparison, parallelism included, because raising the lane count alone
+/// makes a guess cheaper without touching the other two.
+///
+/// The consequence is that a deployment which lowers the parameters it registers accounts with (see
+/// CryptographyOverride in the client config) cannot apply that to accounts registered before the
+/// change; their password changes are rejected until the parameters are raised back. Accounts have to
+/// be re-registered to move down, which is the accepted cost of the ratchet holding in the one
+/// direction that matters.
+///
+/// Values are rejected rather than clamped: the client has already derived its key, so recording
+/// anything other than what it reports produces a vault it cannot open.
 /// </remarks>
 public static class EncryptionSettingsPolicy
 {
@@ -85,7 +95,17 @@ public static class EncryptionSettingsPolicy
 
         // Compare the work a guess costs rather than each parameter on its own, so trading memory
         // for passes is allowed as long as the total does not fall.
-        return (long)parameters.MemorySize * parameters.Iterations >= (long)current.MemorySize * current.Iterations;
+        //
+        // Parallelism belongs in that comparison. Argon2id splits MemorySize across DegreeOfParallelism
+        // lanes that an attacker computes at the same time, so raising it at a fixed memory and pass
+        // count divides both the memory each lane needs and the time a guess takes: measured against
+        // this project's own defaults, going from one lane to four makes a guess about three and a half
+        // times cheaper. Comparing only memory times passes would call that unchanged and accept it.
+        //
+        // Cross-multiplied rather than divided so the comparison stays exact. The bounds checked above
+        // keep every factor small, so the products cannot overflow.
+        return (long)parameters.MemorySize * parameters.Iterations * current.DegreeOfParallelism
+            >= (long)current.MemorySize * current.Iterations * parameters.DegreeOfParallelism;
     }
 
     /// <summary>

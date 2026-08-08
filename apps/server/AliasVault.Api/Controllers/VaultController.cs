@@ -10,6 +10,7 @@ namespace AliasVault.Api.Controllers;
 using System.ComponentModel.DataAnnotations;
 using AliasServerDb;
 using AliasVault.Api.Controllers.Abstracts;
+using AliasVault.Api.Headers;
 using AliasVault.Api.Helpers;
 using AliasVault.Api.Services;
 using AliasVault.Api.Vault;
@@ -43,6 +44,16 @@ using Microsoft.Extensions.Caching.Memory;
 [ApiVersion("1")]
 public class VaultController(ILogger<VaultController> logger, IAliasServerDbContextFactory dbContextFactory, UserManager<AliasVaultUser> userManager, ITimeProvider timeProvider, AuthLoggingService authLoggingService, IMemoryCache cache, Config config, RateLimitService rateLimitService) : AuthenticatedRequestController(userManager)
 {
+    /// <summary>
+    /// Client name the Blazor web app identifies itself with, as set in its Program.cs.
+    /// </summary>
+    /// <remarks>
+    /// Only needed to tell which key derivation parameters a client that predates the explicit fields
+    /// on the password change request would have used. Every current client sends those fields, so this
+    /// stops being consulted once no pre-upgrade web app is still cached in someone's browser.
+    /// </remarks>
+    private const string LegacyWebClientName = "web";
+
     /// <summary>
     /// Default retention policy for vaults.
     /// </summary>
@@ -285,14 +296,19 @@ public class VaultController(ILogger<VaultController> logger, IAliasServerDbCont
         // These are handed back to every client at the next login and are the only parameters the
         // new vault can be opened under, so storing anything else here locks the user out of it.
         //
-        // A client that sends nothing predates the fields, and every such client derives with the
-        // parameters the vault already holds: the mobile app reads them from the password change
-        // response, and the web client of that era used its own defaults, which are the ones the
-        // vault was registered under. Carrying the previous parameters forward therefore matches
-        // what those clients did. Substituting the server's current defaults would not, and would
-        // lock out every older client the moment the default moves.
-        var newEncryptionType = model.NewPasswordEncryptionType ?? latestVault.EncryptionType;
-        var newEncryptionSettings = model.NewPasswordEncryptionSettings ?? latestVault.EncryptionSettings;
+        // A client that sends nothing predates the fields, and what it derived with then depends on
+        // which client it is. The mobile app read the parameters out of the password change response,
+        // so it used the ones the vault already holds. The web client of that era passed no parameters
+        // to its key derivation at all, so it used the build's own defaults, which are not the vault's
+        // whenever the account was registered elsewhere or under a deployment override. Recording the
+        // wrong one of the two produces a vault whose stored parameters do not match the key it was
+        // encrypted with, and nothing can open it again -- so pick by which client is asking.
+        var isLegacyWebClient = ClientHeaderInfo.Parse(clientHeader).ClientName == LegacyWebClientName;
+        var carriedEncryptionType = isLegacyWebClient ? Defaults.EncryptionType : latestVault.EncryptionType;
+        var carriedEncryptionSettings = isLegacyWebClient ? Defaults.EncryptionSettings : latestVault.EncryptionSettings;
+
+        var newEncryptionType = model.NewPasswordEncryptionType ?? carriedEncryptionType;
+        var newEncryptionSettings = model.NewPasswordEncryptionSettings ?? carriedEncryptionSettings;
         if (model.NewPasswordEncryptionType is not null || model.NewPasswordEncryptionSettings is not null)
         {
             // Reject rather than fall back: the client has already derived its key, so quietly

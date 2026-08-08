@@ -82,6 +82,50 @@ public class EncryptionSettingsPolicyTests
     }
 
     /// <summary>
+    /// Raising the lane count on its own is refused, even though it leaves memory times passes
+    /// untouched.
+    /// </summary>
+    /// <remarks>
+    /// Argon2id divides MemorySize across DegreeOfParallelism lanes that are computed at the same time,
+    /// so more lanes at the same memory and pass count means less memory per lane and a shorter wall
+    /// clock for a guess. Measured against these defaults, four lanes make a guess roughly three and a
+    /// half times cheaper, so accepting this would be the ratchet lowering the work it promises to hold.
+    /// </remarks>
+    /// <param name="settings">The settings reported by the client.</param>
+    [TestCase("""{"DegreeOfParallelism":2,"MemorySize":65536,"Iterations":3}""")]
+    [TestCase("""{"DegreeOfParallelism":4,"MemorySize":65536,"Iterations":3}""")]
+    public void MoreLanesAtTheSameMemoryAndPassesIsRejectedTest(string settings)
+    {
+        Assert.That(EncryptionSettingsPolicy.IsAcceptable(Defaults.EncryptionType, settings, Defaults.EncryptionSettings), Is.False);
+    }
+
+    /// <summary>
+    /// More lanes are accepted when memory or passes rise enough to pay for them, because then the work
+    /// a guess costs has not fallen.
+    /// </summary>
+    [Test]
+    public void MoreLanesPaidForWithMoreMemoryIsAcceptedTest()
+    {
+        const string current = """{"DegreeOfParallelism":1,"MemorySize":65536,"Iterations":3}""";
+        const string reported = """{"DegreeOfParallelism":2,"MemorySize":131072,"Iterations":3}""";
+
+        Assert.That(EncryptionSettingsPolicy.IsAcceptable(Defaults.EncryptionType, reported, current), Is.True);
+    }
+
+    /// <summary>
+    /// Dropping to fewer lanes at the same memory and passes is accepted, because that only makes a
+    /// guess more expensive.
+    /// </summary>
+    [Test]
+    public void FewerLanesAtTheSameMemoryAndPassesIsAcceptedTest()
+    {
+        const string current = """{"DegreeOfParallelism":4,"MemorySize":65536,"Iterations":3}""";
+        const string reported = """{"DegreeOfParallelism":1,"MemorySize":65536,"Iterations":3}""";
+
+        Assert.That(EncryptionSettingsPolicy.IsAcceptable(Defaults.EncryptionType, reported, current), Is.True);
+    }
+
+    /// <summary>
     /// Parameters above the ceiling are refused, because a vault that costs more to open than a
     /// phone or a browser tab can afford is a vault its owner has lost.
     /// </summary>

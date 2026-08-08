@@ -7,7 +7,7 @@ import Toast from 'react-native-toast-message';
 import type { EncryptionKeyDerivationParams } from '@/utils/dist/core/models/metadata';
 import type { PasswordChangeInitiateResponse, Vault, VaultPasswordChangeRequest } from '@/utils/dist/core/models/webapi';
 import { FieldKey, getFieldValue } from '@/utils/dist/core/models/vault';
-import EncryptionUtility, { DEFAULT_ENCRYPTION } from '@/utils/EncryptionUtility';
+import EncryptionUtility from '@/utils/EncryptionUtility';
 import { SrpUtility } from '@/utils/SrpUtility';
 
 import { useVaultSync } from '@/hooks/useVaultSync';
@@ -213,13 +213,15 @@ export function useVaultMutate() : {
     // Generate salt and verifier for new password using native SRP
     const newSalt = await SrpUtility.generateSalt();
     /**
-     * Derive with this build's defaults rather than the parameters the vault was registered
-     * under, and report them to the server alongside the verifier. A password change is where
-     * an account picks up stronger parameters; the server records what is reported here, so
-     * these two have to be the same values.
+     * Derive with the parameters the server reports for this vault, and report them back alongside
+     * the verifier; the server records what is reported here, so these two have to be the same
+     * values. Substituting this build's defaults would overrule whatever the deployment registers
+     * accounts with, and the web client would then be refused its own parameters as too weak on the
+     * next password change. The app has no view of that deployment setting, so the vault's own
+     * parameters are the only ones it can carry forward without overruling anything.
      */
-    const newEncryptionType = DEFAULT_ENCRYPTION.type;
-    const newEncryptionSettings = DEFAULT_ENCRYPTION.settings;
+    const newEncryptionType = data.encryptionType;
+    const newEncryptionSettings = data.encryptionSettings;
     const newPasswordHash = await EncryptionUtility.deriveKeyFromPassword(newPasswordPlainText, newSalt, newEncryptionType, newEncryptionSettings);
     const newPasswordHashString = Buffer.from(newPasswordHash).toString('hex').toUpperCase();
 

@@ -36,13 +36,15 @@ public class VaultPasswordChangeRequest : Vault
 
     /// <summary>
     /// Gets or sets the encryption type the client derived the new verifier with.
-    /// Null when the client predates this field, in which case the server records its own defaults.
+    /// Null when the client predates this field, in which case the server records what a client of
+    /// that era would have used, worked out from which client is asking.
     /// </summary>
     public string? NewPasswordEncryptionType { get; set; }
 
     /// <summary>
     /// Gets or sets the encryption settings the client derived the new verifier with.
-    /// Null when the client predates this field, in which case the server records its own defaults.
+    /// Null when the client predates this field, in which case the server records what a client of
+    /// that era would have used, worked out from which client is asking.
     /// </summary>
     /// <remarks>
     /// The vault can only be opened again with the parameters its key was derived under, so these
