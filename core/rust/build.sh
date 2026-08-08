@@ -552,15 +552,24 @@ build_android() {
 
     # Check for Android NDK
     if [ -z "${ANDROID_NDK_HOME:-}" ]; then
-        # Try to find NDK in common locations
-        if [ -d "$HOME/Library/Android/sdk/ndk" ]; then
-            # Find the latest NDK version
-            ANDROID_NDK_HOME=$(ls -d "$HOME/Library/Android/sdk/ndk"/*/ 2>/dev/null | sort -V | tail -1)
+        # Where Android Studio puts the SDK on each platform: macOS, Linux, and Windows. On Windows
+        # the location comes from LOCALAPPDATA rather than the home directory.
+        local ndk_roots=(
+            "$HOME/Library/Android/sdk/ndk"
+            "$HOME/Android/Sdk/ndk"
+            "${LOCALAPPDATA:-$HOME/AppData/Local}/Android/Sdk/ndk"
+            "${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}/ndk"
+        )
+
+        local ndk_root
+        for ndk_root in "${ndk_roots[@]}"; do
+            [ -d "$ndk_root" ] || continue
+
+            # Highest installed version wins.
+            ANDROID_NDK_HOME=$(ls -d "$ndk_root"/*/ 2>/dev/null | sort -V | tail -1)
             ANDROID_NDK_HOME="${ANDROID_NDK_HOME%/}"
-        elif [ -d "$HOME/Android/Sdk/ndk" ]; then
-            ANDROID_NDK_HOME=$(ls -d "$HOME/Android/Sdk/ndk"/*/ 2>/dev/null | sort -V | tail -1)
-            ANDROID_NDK_HOME="${ANDROID_NDK_HOME%/}"
-        fi
+            [ -n "$ANDROID_NDK_HOME" ] && break
+        done
 
         if [ -z "${ANDROID_NDK_HOME:-}" ]; then
             echo -e "${RED}Error: Android NDK not found${NC}"
