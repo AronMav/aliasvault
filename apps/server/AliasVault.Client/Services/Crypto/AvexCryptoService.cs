@@ -12,6 +12,7 @@ using System.Text.Json;
 using AliasVault.Client.Services.JsInterop;
 using AliasVault.Client.Services.JsInterop.RustCore;
 using AliasVault.ImportExport.Constants;
+using AliasVault.ImportExport.Exceptions;
 using AliasVault.ImportExport.Models.Exports;
 using AliasVault.Shared.Core;
 
@@ -160,7 +161,10 @@ public class AvexCryptoService
         }
         catch (Exception ex)
         {
-            throw new InvalidOperationException("Failed to decrypt .avex file. The password may be incorrect or the file may be corrupted.", ex);
+            // Typed rather than a message a caller has to recognise by substring: the wrong password is
+            // the case the import flow prompts again for, and it should not depend on this wording.
+            throw new InvalidImportPasswordException(
+                "Failed to decrypt .avex file. The password may be incorrect or the file may be corrupted.", ex);
         }
 
         return avuxBytes;

@@ -11,12 +11,12 @@
     ServiceName="KeePassXC"
     Description="@Localizer["KeePassXCDescription"]"
     LogoUrl="img/importers/keepassxc.svg"
-    AcceptedFileExtensions="AcceptedExtensions"
-    PasswordProtectedFileExtensions="PasswordProtectedExtensions"
+    AcceptedFileExtensions="KdbxImportCard.AcceptedExtensions"
+    PasswordProtectedFileExtensions="KdbxImportCard.PasswordProtectedExtensions"
     PasswordPromptText="@Localizer["KdbxPasswordPrompt"]"
     PasswordHintText="@Localizer["KdbxPasswordHint"]"
     ProcessFileCallback="ProcessFile"
-    DecryptFileCallback="DecryptFile">
+    DecryptFileCallback="@KdbxImportCard.DecryptFile(RustCore)">
     <p class="text-gray-700 dark:text-gray-300 mb-4">@Localizer["KeePassXCInstructionsPart1"]</p>
     <p class="text-gray-700 dark:text-gray-300 mb-4">@Localizer["KeePassXCInstructionsPart2"]</p>
     <p class="text-gray-700 dark:text-gray-300 mb-4">@Localizer["KeePassKdbxInstructions"]</p>
@@ -24,26 +24,10 @@
 
 @code {
     private IStringLocalizer Localizer => LocalizerFactory.Create("Components.Main.Settings.ImportExport.ImportServices", "AliasVault.Client");
-    private static readonly string[] AcceptedExtensions = new[] { ".csv", ".kdbx" };
-    private static readonly string[] PasswordProtectedExtensions = new[] { ".kdbx" };
 
     private static async Task<ImportFileResult> ProcessFile(string filename, byte[] fileBytes)
     {
         var fileContents = System.Text.Encoding.UTF8.GetString(fileBytes);
         return await KeePassXcImporter.ImportFromCsvAsync(fileContents);
-    }
-
-    /// <summary>
-    /// Opens a .kdbx database in the Rust core, pulls its attachments and maps the result.
-    /// The database file is the only export that carries attachments at all: KeePassXC
-    /// omits them from both CSV and XML exports.
-    /// </summary>
-    /// <param name="fileBytes">The .kdbx file bytes.</param>
-    /// <param name="filename">The original filename.</param>
-    /// <param name="password">The master password entered by the user.</param>
-    /// <returns>The parsed import result.</returns>
-    private async Task<ImportFileResult> DecryptFile(byte[] fileBytes, string filename, string password)
-    {
-        return await RustCore.ImportKdbxAsync(fileBytes, password);
     }
 }

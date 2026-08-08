@@ -39,15 +39,9 @@
     /// <returns>The parsed import result.</returns>
     private async Task<ImportFileResult> DecryptFile(byte[] fileBytes, string filename, string password)
     {
-        byte[] avuxBytes;
-        try
-        {
-            avuxBytes = await AvexCrypto.DecryptAvexAsync(fileBytes, password);
-        }
-        catch (InvalidOperationException ex) when (ex.Message.Contains("password may be incorrect"))
-        {
-            throw new InvalidImportPasswordException(ex.Message, ex);
-        }
+        // A wrong password surfaces as InvalidImportPasswordException from the decryption itself, which
+        // the card catches to prompt again.
+        var avuxBytes = await AvexCrypto.DecryptAvexAsync(fileBytes, password);
 
         return await VaultImportService.ImportFromAvuxAsync(avuxBytes);
     }
