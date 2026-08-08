@@ -15,8 +15,13 @@
 const fs = require('fs');
 const path = require('path');
 
+// The values come from the built module rather than being read back out of the TypeScript source.
+// core/models/build.sh compiles the package before running this, and taking the compiled constants
+// means the generated clients cannot disagree with what the TypeScript clients import -- including
+// the key order inside ENCRYPTION_SETTINGS, which is part of the value a vault is compared by.
+const built = require('../dist/defaults');
+
 const REPO_ROOT = path.join(__dirname, '../../..');
-const TS_SOURCE = path.join(REPO_ROOT, 'core/models/src/defaults/EncryptionDefaults.ts');
 const TS_SOURCE_REL = 'core/models/src/defaults/EncryptionDefaults.ts';
 
 const RUST_OUTPUT = path.join(REPO_ROOT, 'core/rust/src/argon2/defaults.rs');
@@ -30,71 +35,60 @@ const KOTLIN_OUTPUT = path.join(
 );
 const SWIFT_OUTPUT = path.join(REPO_ROOT, 'apps/mobile-app/ios/AliasVaultUITests/EncryptionDefaults.swift');
 
-/** Names the generator requires; a partial parse must not produce output. */
-const REQUIRED_NUMBERS = ['ARGON2ID_DEGREE_OF_PARALLELISM', 'ARGON2ID_MEMORY_SIZE', 'ARGON2ID_ITERATIONS'];
-const REQUIRED_STRINGS = ['ENCRYPTION_TYPE'];
+/**
+ * What to emit, in the order it appears in the generated files, with the documentation each
+ * constant carries into every language.
+ *
+ * The documentation lives here rather than being lifted out of the source comments: a generator
+ * that scrapes them silently degrades every generated file to a placeholder the moment a comment
+ * is reworded or wrapped onto a second line, and nothing checks generated documentation.
+ */
+const CONSTANTS = [
+  {
+    name: 'ARGON2ID_DEGREE_OF_PARALLELISM',
+    kind: 'number',
+    doc: 'Degree of parallelism (lanes) for Argon2id.',
+  },
+  {
+    name: 'ARGON2ID_MEMORY_SIZE',
+    kind: 'number',
+    doc: 'Memory cost for Argon2id, in KiB.',
+  },
+  {
+    name: 'ARGON2ID_ITERATIONS',
+    kind: 'number',
+    doc: 'Number of Argon2id passes over memory.',
+  },
+  {
+    name: 'ENCRYPTION_TYPE',
+    kind: 'string',
+    doc: 'Key derivation algorithm recorded against a vault.',
+  },
+  {
+    name: 'ENCRYPTION_SETTINGS',
+    kind: 'string',
+    doc: 'The settings exactly as they are stored against a vault. Key order is part of the value.',
+  },
+];
 
 /**
- * Parse `export const NAME = 123;` and `export const NAME = 'text';` out of the source,
- * each with its leading single-line JSDoc comment, preserving order.
+ * Read the values out of the built module and pair them with the documentation above.
  */
-function parseConstants(source) {
-  const constants = [];
-  const lines = source.split('\n');
-  let pendingDoc = null;
+function collectEntries() {
+  return CONSTANTS.map((constant) => {
+    const value = built[constant.name];
 
-  for (const line of lines) {
-    const trimmed = line.trim();
-
-    if (trimmed.startsWith('/**') && trimmed.endsWith('*/')) {
-      pendingDoc = trimmed.slice(3, -2).trim();
-      continue;
-    }
-
-    const numberMatch = line.match(/^\s*export const ([A-Z0-9_]+)\s*=\s*(\d+)\s*;/);
-    if (numberMatch) {
-      constants.push({ name: numberMatch[1], value: Number(numberMatch[2]), kind: 'number', doc: pendingDoc || `${numberMatch[1]}.` });
-      pendingDoc = null;
-      continue;
-    }
-
-    const stringMatch = line.match(/^\s*export const ([A-Z0-9_]+)\s*=\s*'([^']*)'\s*;/);
-    if (stringMatch) {
-      constants.push({ name: stringMatch[1], value: stringMatch[2], kind: 'string', doc: pendingDoc || `${stringMatch[1]}.` });
-      pendingDoc = null;
-      continue;
-    }
-
-    if (trimmed !== '') {
-      pendingDoc = null;
-    }
-  }
-
-  const found = new Set(constants.map((c) => c.name));
-  const missing = [...REQUIRED_NUMBERS, ...REQUIRED_STRINGS].filter((name) => !found.has(name));
-  if (missing.length > 0) {
     // Emitting a partial set would hand some client a parameter the others never used,
     // which produces a vault only that client can open.
-    throw new Error(`${TS_SOURCE_REL} is missing: ${missing.join(', ')}`);
-  }
+    if (value === undefined) {
+      throw new Error(`${TS_SOURCE_REL} no longer exports ${constant.name}`);
+    }
 
-  return constants;
-}
+    if (typeof value !== (constant.kind === 'number' ? 'number' : 'string')) {
+      throw new Error(`${constant.name} is a ${typeof value}, expected a ${constant.kind}`);
+    }
 
-/** Look a parsed constant up by name. */
-function valueOf(constants, name) {
-  return constants.find((c) => c.name === name).value;
-}
-
-/**
- * Build the settings string in the canonical key order. This order is also written out
- * in the TypeScript source; the .NET consistency test asserts the two agree.
- */
-function buildSettings(constants) {
-  return JSON.stringify({
-    DegreeOfParallelism: valueOf(constants, 'ARGON2ID_DEGREE_OF_PARALLELISM'),
-    MemorySize: valueOf(constants, 'ARGON2ID_MEMORY_SIZE'),
-    Iterations: valueOf(constants, 'ARGON2ID_ITERATIONS'),
+    return { ...constant, value };
   });
 }
 
@@ -111,19 +105,6 @@ function toPascalCase(name) {
 function toCamelCase(name) {
   const pascal = toPascalCase(name);
   return pascal.charAt(0).toLowerCase() + pascal.slice(1);
-}
-
-/** The settings entry is derived rather than parsed, so every emitter appends it the same way. */
-function withSettings(constants, settings) {
-  return [
-    ...constants,
-    {
-      name: 'ENCRYPTION_SETTINGS',
-      value: settings,
-      kind: 'string',
-      doc: 'The settings exactly as they are stored against a vault. Key order is part of the value.',
-    },
-  ];
 }
 
 function generateRust(entries) {
@@ -236,13 +217,10 @@ function writeIfChanged(filePath, contents) {
 }
 
 function main() {
-  const source = fs.readFileSync(TS_SOURCE, 'utf8');
-  const constants = parseConstants(source);
-  const settings = buildSettings(constants);
-  const entries = withSettings(constants, settings);
+  const entries = collectEntries();
 
   console.log(`Generating encryption defaults from ${TS_SOURCE_REL}:`);
-  console.log(`  ${settings}`);
+  console.log(`  ${built.ENCRYPTION_SETTINGS}`);
 
   writeIfChanged(RUST_OUTPUT, generateRust(entries));
   writeIfChanged(CS_OUTPUT, generateCSharp(entries));
