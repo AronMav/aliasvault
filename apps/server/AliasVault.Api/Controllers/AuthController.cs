@@ -79,6 +79,12 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
     /// <remarks>
     /// A client that fires two refreshes at once would otherwise have the second one rejected, because
     /// the first already rotated the token away, and be logged out over a race it cannot avoid.
+    ///
+    /// The issued token is held in this process for the length of the window, because the database
+    /// stores only its hash and so cannot hand it out a second time. That makes the window local to
+    /// one instance, which matches the rest of the authentication path -- the SRP ephemerals a login
+    /// depends on are held the same way, so a second API instance could not complete a login at all.
+    /// A restart is covered without the cache: see RotateWithinWindowAfterCacheLoss.
     /// </remarks>
     private const int TokenReuseWindowSeconds = 30;
 
@@ -93,6 +99,17 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
     /// long to start appearing in responses for unknown usernames.
     /// </summary>
     private const int VaultEncryptionDistributionCacheMinutes = 10;
+
+    /// <summary>
+    /// Lets one request at a time rebuild the key derivation parameter distribution.
+    /// </summary>
+    /// <remarks>
+    /// The query behind it scans every vault revision on the instance, and the only endpoint that
+    /// needs it is reachable without credentials. Without this, a burst of logins for unknown
+    /// usernames arriving after the cache expires each open their own connection and run the same
+    /// scan at the same time -- which is what an enumeration attempt looks like.
+    /// </remarks>
+    private static readonly SemaphoreSlim VaultEncryptionDistributionLock = new(1, 1);
 
     /// <summary>
     /// Semaphore to prevent concurrent access to the database when generating new tokens for a user.
@@ -1238,7 +1255,7 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
             var existingToken = await context.AliasVaultUserRefreshTokens.FirstOrDefaultAsync(t => t.UserId == user.Id && t.Value == existingTokenHash);
             if (existingToken == null || existingToken.ExpireDate < timeProvider.UtcNow)
             {
-                return null;
+                return await RotateWithinWindowAfterCacheLoss(context, user, existingTokenHash);
             }
 
             context.AliasVaultUserRefreshTokens.Remove(existingToken);
@@ -1264,6 +1281,56 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
         {
             Semaphore.Release();
         }
+    }
+
+    /// <summary>
+    /// Handles a refresh with a token that was already rotated away, when the in-memory reuse window
+    /// no longer knows about it.
+    /// </summary>
+    /// <remarks>
+    /// The window above only exists in this process, so restarting the API empties it, and the token
+    /// it would have handed back cannot be recovered from the database, which stores only hashes. The
+    /// rotation it recorded is still there though: the replacement row names the token it replaced.
+    /// Finding that row means the caller is in exactly the race the window exists for, so it gets a
+    /// fresh pair rather than being logged out over a collision it could not have avoided.
+    ///
+    /// The replaced row is deliberately left in place. The request that rotated it away already
+    /// returned that token to the same client, and deleting it here would break whichever of the two
+    /// responses the client ends up keeping.
+    /// </remarks>
+    /// <param name="context">Database context to use.</param>
+    /// <param name="user">The user the refresh is for.</param>
+    /// <param name="existingTokenHash">Hash of the token the client presented.</param>
+    /// <returns>A new token pair when the presented token was rotated inside the window, null otherwise.</returns>
+    private async Task<TokenModel?> RotateWithinWindowAfterCacheLoss(AliasServerDbContext context, AliasVaultUser user, string existingTokenHash)
+    {
+        var now = timeProvider.UtcNow;
+        var windowStart = now.AddSeconds(-TokenReuseWindowSeconds);
+
+        var replacement = await context.AliasVaultUserRefreshTokens
+            .FirstOrDefaultAsync(t => t.UserId == user.Id
+                && t.PreviousTokenValue == existingTokenHash
+                && t.CreatedAt >= windowStart
+                && t.ExpireDate >= now);
+
+        if (replacement is null)
+        {
+            return null;
+        }
+
+        // Issued without naming the token it follows, so the window stays anchored to the rotation
+        // that actually happened. Recording the presented token here instead would move the window's
+        // start forward on every call, and a token someone had taken a copy of would go on minting
+        // new ones for as long as they kept asking. A further request inside the window still finds
+        // the original replacement row, which is what the lookup above matches on.
+        var newRefreshToken = await GenerateRefreshToken(user, replacement.ExpireDate - replacement.CreatedAt);
+
+        cache.Set(
+            AuthHelper.CachePrefixRotatedToken + existingTokenHash,
+            newRefreshToken.RefreshToken,
+            TimeSpan.FromSeconds(TokenReuseWindowSeconds));
+
+        return newRefreshToken;
     }
 
     /// <summary>
@@ -1338,28 +1405,63 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
     /// a plausible value and avoids a per-user aggregate on an unauthenticated request. Cached
     /// because the shape of this only changes when someone registers or changes their password,
     /// and the endpoint that needs it can be reached without credentials.
+    ///
+    /// Only one request rebuilds it at a time. The rest wait and take the value it stores, so an
+    /// expiry cannot turn a burst of unknown-username logins into a burst of identical aggregates
+    /// -- which is what an enumeration attempt paced to land on each expiry would produce.
     /// </remarks>
     /// <returns>The parameter combinations in use with the number of vaults holding each.</returns>
     private async Task<IReadOnlyList<(string EncryptionType, string EncryptionSettings, int Count)>> GetVaultEncryptionSettingsDistribution()
     {
-        if (cache.TryGetValue(VaultEncryptionDistributionCacheKey, out IReadOnlyList<(string EncryptionType, string EncryptionSettings, int Count)>? cached) && cached is not null)
+        if (TryGetCachedVaultEncryptionSettingsDistribution(out var cached))
         {
             return cached;
         }
 
-        await using var context = await dbContextFactory.CreateDbContextAsync();
-        var distribution = await context.Vaults
-            .GroupBy(x => new { x.EncryptionType, x.EncryptionSettings })
-            .Select(g => new { g.Key.EncryptionType, g.Key.EncryptionSettings, Count = g.Count() })
-            .OrderBy(x => x.EncryptionType)
-            .ThenBy(x => x.EncryptionSettings)
-            .ToListAsync();
+        await VaultEncryptionDistributionLock.WaitAsync();
+        try
+        {
+            // Another request may have rebuilt it while this one waited.
+            if (TryGetCachedVaultEncryptionSettingsDistribution(out cached))
+            {
+                return cached;
+            }
 
-        var result = distribution
-            .Select(x => (x.EncryptionType, x.EncryptionSettings, x.Count))
-            .ToList();
+            await using var context = await dbContextFactory.CreateDbContextAsync();
+            var distribution = await context.Vaults
+                .GroupBy(x => new { x.EncryptionType, x.EncryptionSettings })
+                .Select(g => new { g.Key.EncryptionType, g.Key.EncryptionSettings, Count = g.Count() })
+                .OrderBy(x => x.EncryptionType)
+                .ThenBy(x => x.EncryptionSettings)
+                .ToListAsync();
 
-        cache.Set(VaultEncryptionDistributionCacheKey, (IReadOnlyList<(string EncryptionType, string EncryptionSettings, int Count)>)result, TimeSpan.FromMinutes(VaultEncryptionDistributionCacheMinutes));
-        return result;
+            var result = distribution
+                .Select(x => (x.EncryptionType, x.EncryptionSettings, x.Count))
+                .ToList();
+
+            cache.Set(VaultEncryptionDistributionCacheKey, (IReadOnlyList<(string EncryptionType, string EncryptionSettings, int Count)>)result, TimeSpan.FromMinutes(VaultEncryptionDistributionCacheMinutes));
+            return result;
+        }
+        finally
+        {
+            VaultEncryptionDistributionLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Reads the cached key derivation parameter distribution.
+    /// </summary>
+    /// <param name="distribution">The cached distribution when one is held.</param>
+    /// <returns>True when a cached distribution was available.</returns>
+    private bool TryGetCachedVaultEncryptionSettingsDistribution(out IReadOnlyList<(string EncryptionType, string EncryptionSettings, int Count)> distribution)
+    {
+        if (cache.TryGetValue(VaultEncryptionDistributionCacheKey, out IReadOnlyList<(string EncryptionType, string EncryptionSettings, int Count)>? cached) && cached is not null)
+        {
+            distribution = cached;
+            return true;
+        }
+
+        distribution = [];
+        return false;
     }
 }

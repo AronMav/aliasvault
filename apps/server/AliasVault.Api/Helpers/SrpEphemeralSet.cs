@@ -19,9 +19,15 @@ namespace AliasVault.Api.Helpers;
 /// proof verifies.
 ///
 /// The set is bounded because an anonymous caller decides how often it grows. Past the limit the
-/// oldest secret is dropped, which still lets a determined caller push a victim's secret out, but
-/// only with a sustained stream of requests rather than the single one that used to suffice — and
-/// that stream meets the per-IP limit on the login endpoint.
+/// oldest secret is dropped, which still lets a caller who knows a username push a victim's secret
+/// out: five login-initiate requests inside the window the victim spends typing their password are
+/// enough, well under the per-IP limit that endpoint has. That is a smaller opening than the single
+/// request it used to take, but it is not closed.
+///
+/// Closing it needs the secret bound to the exchange it belongs to rather than to the account --
+/// returning an exchange id at login and having the client send it back with its proof, so a
+/// stranger's exchange has nowhere to collide. That changes the shape of the login request, so
+/// every client has to be updated together with the server before the bound here can go away.
 ///
 /// Every member is guarded by the instance lock. Callers reach an instance through IMemoryCache,
 /// which owns its lifetime; this type never expires anything itself.

@@ -64,10 +64,21 @@ public static class AuthHelper
     private const string FakeEncryptionSettingsLabel = "fake-encryption-settings";
 
     /// <summary>
+    /// Number of locks the ephemeral sets are spread across.
+    /// </summary>
+    private const int EphemeralSetLockStripes = 64;
+
+    /// <summary>
     /// Guards creation of an account's ephemeral set so two concurrent logins cannot each create one
     /// and have the first lose its secret.
     /// </summary>
-    private static readonly Lock EphemeralSetCreationLock = new();
+    /// <remarks>
+    /// Striped by account rather than a single lock for the whole instance. Only two logins for the
+    /// same account can race here, so one global lock made every login on the instance queue behind
+    /// every other one for a conflict that can only happen within an account.
+    /// </remarks>
+    private static readonly Lock[] EphemeralSetCreationLocks =
+        [.. Enumerable.Range(0, EphemeralSetLockStripes).Select(_ => new Lock())];
 
     /// <summary>
     /// Helper method that validates the SRP session based on provided SRP identity, ephemeral and proof.
@@ -132,7 +143,7 @@ public static class AuthHelper
         // for the lookup-or-create, never for the SRP work, and a lost race would cost one ephemeral
         // and a retried login rather than anyone else's request.
         SrpEphemeralSet ephemeralSet;
-        lock (EphemeralSetCreationLock)
+        lock (EphemeralSetCreationLocks[(uint)cacheKey.GetHashCode(StringComparison.Ordinal) % EphemeralSetLockStripes])
         {
             if (!cache.TryGetValue(cacheKey, out var cached) || cached is not SrpEphemeralSet existing)
             {
@@ -395,12 +406,12 @@ public static class AuthHelper
     /// <returns>A verifier in the same shape a real one has: 512 lowercase hex characters.</returns>
     private static string DeriveFakeVerifier(string normalizedUsername, string serverSecret)
     {
-        var material = new byte[VerifierByteLength];
-        for (var offset = 0; offset < material.Length; offset += SHA256.HashSizeInBytes)
-        {
-            var block = DeriveFakeBytes(normalizedUsername, serverSecret, FakeVerifierLabel + (offset / SHA256.HashSizeInBytes));
-            block.CopyTo(material, offset);
-        }
+        // HKDF is what stretches one derived block into the length needed here; writing the same
+        // counter-mode expansion by hand would be more crypto to review for no gain.
+        var material = HKDF.Expand(
+            HashAlgorithmName.SHA256,
+            DeriveFakeBytes(normalizedUsername, serverSecret, FakeVerifierLabel),
+            VerifierByteLength);
 
         material[0] &= 0x7F;
 
