@@ -9,7 +9,6 @@ namespace AliasVault.Api.Services;
 
 using System;
 using System.Threading;
-using Microsoft.Extensions.Caching.Memory;
 
 /// <summary>
 /// In-memory per-IP rate limiter for the authentication endpoints an unauthenticated caller can reach.
@@ -24,29 +23,56 @@ using Microsoft.Extensions.Caching.Memory;
 /// costs a fraction of the bookkeeping.
 /// </para>
 /// <para>
+/// Counts live in a fixed array of slots indexed by a hash of the address, not in a dictionary or cache
+/// keyed by it. The address comes from an unauthenticated request, so anything that grows per address
+/// has to decide what to do when it is full, and the obvious answers are both wrong: refusing new
+/// entries hands an attacker a way to lock everyone else out, and dropping them silently -- which is
+/// what a size-limited MemoryCache does -- stops counting the flood entirely, exactly when the limit
+/// matters. A fixed array can never be full, so neither case can arise.
+/// </para>
+/// <para>
+/// The cost is that two addresses hashing to the same slot share one allowance. That errs towards
+/// rejecting rather than admitting, and with <see cref="SlotCount"/> slots against the number of
+/// addresses a real instance sees in a minute it is rare; under a flood large enough to make collisions
+/// common, counting several attackers together is the behaviour you want. String hashing is randomized
+/// per process, so the collisions cannot be chosen from outside.
+/// </para>
+/// <para>
 /// State is held in process and is not shared across instances, matching how the favicon limiter works.
-/// The number of tracked addresses is capped, because the key is an address from an unauthenticated
-/// request: the cache evicts the least recently used entries once the cap is reached, so the limiter
-/// cannot itself become the memory growth it exists to prevent.
 /// </para>
 /// </remarks>
-public sealed class AnonymousAuthRateLimitService : IDisposable
+public sealed class AnonymousAuthRateLimitService
 {
     /// <summary>
-    /// Default maximum requests per IP address per minute. A client sends one request per login it
-    /// starts, so this leaves room for many users behind a single address while bounding what one
-    /// caller can spend.
+    /// Default maximum requests per IP address per minute.
     /// </summary>
+    /// <remarks>
+    /// One completed login spends two of these -- starting the exchange and proving against it -- and
+    /// three when a second factor is involved, so this allows roughly twenty to thirty logins a minute
+    /// from a single address. That is ample for the number of people a self-hosted instance puts behind
+    /// one address; a deployment where far more users share an address, such as a large office behind
+    /// NAT, should raise MAX_AUTH_REQUESTS_PER_IP_PER_MINUTE to match.
+    /// </remarks>
     public const int DefaultMaxPerMinute = 60;
 
     /// <summary>
-    /// Maximum number of addresses tracked at once.
+    /// Number of counter slots. A power of two so the slot index is a mask rather than a division, and
+    /// large enough that collisions stay rare at the number of addresses an instance sees in a minute.
+    /// At 8 bytes per slot the whole table is half a megabyte, allocated once.
     /// </summary>
-    private const int MaxTrackedAddresses = 20000;
+    private const int SlotCount = 1 << 16;
 
-    private static readonly TimeSpan WindowDuration = TimeSpan.FromMinutes(1);
+    /// <summary>
+    /// Length of one counting window, in milliseconds.
+    /// </summary>
+    private const long WindowMilliseconds = 60_000;
 
-    private readonly MemoryCache _windows;
+    /// <summary>
+    /// One slot per hash bucket, each packing the window it belongs to in the high 32 bits and the
+    /// number of requests counted in that window in the low 32 bits, so a slot updates atomically.
+    /// </summary>
+    private readonly long[] _slots = new long[SlotCount];
+
     private readonly int _maxPerMinute;
 
     /// <summary>
@@ -66,7 +92,6 @@ public sealed class AnonymousAuthRateLimitService : IDisposable
     public AnonymousAuthRateLimitService(int maxPerMinute)
     {
         _maxPerMinute = maxPerMinute;
-        _windows = new MemoryCache(new MemoryCacheOptions { SizeLimit = MaxTrackedAddresses });
     }
 
     /// <summary>
@@ -81,20 +106,34 @@ public sealed class AnonymousAuthRateLimitService : IDisposable
             return true;
         }
 
-        var window = _windows.GetOrCreate(ipAddress, entry =>
+        var slot = ipAddress.GetHashCode(StringComparison.Ordinal) & (SlotCount - 1);
+
+        // Wrapping is fine: windows are only ever compared for equality, and a wrap at worst restarts
+        // one window early, which costs a single caller nothing and happens once every few millennia.
+        var window = unchecked((int)(Environment.TickCount64 / WindowMilliseconds));
+
+        while (true)
         {
-            entry.AbsoluteExpirationRelativeToNow = WindowDuration;
-            entry.Size = 1;
-            return new RequestWindow();
-        })!;
+            var current = Volatile.Read(ref _slots[slot]);
+            var currentWindow = (int)(current >> 32);
+            var currentCount = (int)(uint)current;
 
-        return window.Increment() <= _maxPerMinute;
-    }
+            // A slot left over from an earlier window carries no count into this one.
+            var count = currentWindow == window ? currentCount + 1 : 1;
 
-    /// <inheritdoc />
-    public void Dispose()
-    {
-        _windows.Dispose();
+            // Stop climbing once the answer can no longer change, so a flood that lasts a whole window
+            // cannot run the counter over.
+            if (count > _maxPerMinute)
+            {
+                count = _maxPerMinute + 1;
+            }
+
+            var updated = ((long)window << 32) | (uint)count;
+            if (Interlocked.CompareExchange(ref _slots[slot], updated, current) == current)
+            {
+                return count <= _maxPerMinute;
+            }
+        }
     }
 
     /// <summary>
@@ -105,22 +144,5 @@ public sealed class AnonymousAuthRateLimitService : IDisposable
     {
         var configured = Environment.GetEnvironmentVariable("MAX_AUTH_REQUESTS_PER_IP_PER_MINUTE");
         return int.TryParse(configured, out var parsed) ? parsed : DefaultMaxPerMinute;
-    }
-
-    /// <summary>
-    /// The request count for one address within one window.
-    /// </summary>
-    private sealed class RequestWindow
-    {
-        private int _count;
-
-        /// <summary>
-        /// Counts one request against this window.
-        /// </summary>
-        /// <returns>The number of requests counted in this window so far, including this one.</returns>
-        public int Increment()
-        {
-            return Interlocked.Increment(ref _count);
-        }
     }
 }

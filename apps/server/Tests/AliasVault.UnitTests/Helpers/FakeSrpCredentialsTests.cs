@@ -8,6 +8,7 @@
 namespace AliasVault.UnitTests.Helpers;
 
 using AliasVault.Api.Helpers;
+using AliasVault.Cryptography.Client;
 
 /// <summary>
 /// Tests for the fake SRP credentials that the login endpoint returns for a username without an account.
@@ -126,6 +127,26 @@ public class FakeSrpCredentialsTests
         {
             Assert.That(credentials.Verifier, Has.Length.EqualTo(512));
             Assert.That(credentials.Verifier, Does.Match("^[0-9a-f]{512}$"));
+        });
+    }
+
+    /// <summary>
+    /// The derived verifier has to work as the input to the server ephemeral that the login response
+    /// actually returns. It is not a real g^x mod N --- computing one would cost a second modular
+    /// exponentiation and make an unknown username measurably slower to answer than a known one --- so
+    /// this pins that the cheaper value is still accepted by the SRP server.
+    /// </summary>
+    [Test]
+    public void VerifierProducesAServerEphemeralTest()
+    {
+        var credentials = AuthHelper.DeriveFakeSrpCredentials("someone", ServerSecret);
+
+        var ephemeral = Srp.GenerateEphemeralServer(credentials.Verifier);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(ephemeral.Public, Is.Not.Empty);
+            Assert.That(ephemeral.Secret, Is.Not.Empty);
         });
     }
 

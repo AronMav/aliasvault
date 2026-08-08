@@ -38,10 +38,9 @@ public static class AuthHelper
     public static readonly string CachePrefixRotatedToken = "RotatedRefreshToken_";
 
     /// <summary>
-    /// Password the fake verifier for a non-existent user is derived from. Its value is irrelevant as
-    /// long as it is fixed: no client can ever produce a proof that matches the resulting verifier.
+    /// Length of an SRP verifier for the 2048-bit group the clients use, in bytes.
     /// </summary>
-    private const string FakePassword = "fakePassword";
+    private const int VerifierByteLength = 256;
 
     /// <summary>
     /// Domain separation labels so the salt and the SRP identity of a username derive from
@@ -53,6 +52,11 @@ public static class AuthHelper
     /// Domain separation label for the derived SRP identity. See <see cref="FakeSaltLabel"/>.
     /// </summary>
     private const string FakeIdentityLabel = "fake-srp-identity";
+
+    /// <summary>
+    /// Domain separation label for the derived verifier. See <see cref="FakeSaltLabel"/>.
+    /// </summary>
+    private const string FakeVerifierLabel = "fake-srp-verifier";
 
     /// <summary>
     /// Domain separation label for the drawn encryption settings. See <see cref="FakeSaltLabel"/>.
@@ -240,10 +244,7 @@ public static class AuthHelper
 
         var salt = Convert.ToHexString(DeriveFakeBytes(normalizedUsername, serverSecret, FakeSaltLabel));
         var srpIdentity = DeriveFakeSrpIdentity(normalizedUsername, serverSecret);
-
-        // Real verifiers are derived with the SRP identity as identity, not with the username.
-        var privateKey = Srp.DerivePrivateKey(salt, srpIdentity, FakePassword);
-        var verifier = new SrpClient().DeriveVerifier(privateKey);
+        var verifier = DeriveFakeVerifier(normalizedUsername, serverSecret);
 
         return (salt, verifier, srpIdentity);
     }
@@ -373,6 +374,37 @@ public static class AuthHelper
         bytes[8] = (byte)((bytes[8] & 0x3F) | 0x80);
 
         return new Guid(bytes).ToString();
+    }
+
+    /// <summary>
+    /// Derives the SRP verifier used to answer a username that has no account.
+    /// </summary>
+    /// <remarks>
+    /// A real verifier is g^x mod N, and computing one here would cost a modular exponentiation on top
+    /// of the server ephemeral the response also needs. A real account costs one, because its verifier
+    /// is read from its vault, so deriving a genuine verifier makes an unknown username take roughly
+    /// twice as long to answer as a known one --- the enumeration oracle this whole path exists to close.
+    ///
+    /// The value is derived and reduced into the group instead. Nothing outside the server ever sees a
+    /// verifier: it is only fed to the ephemeral generator, whose output B = kv + g^b mod N is uniform
+    /// whichever way v was produced. Clearing the top bit keeps the value below the group's prime, which
+    /// exceeds 2^2047 because its leading byte is 0xAC.
+    /// </remarks>
+    /// <param name="normalizedUsername">The normalized username.</param>
+    /// <param name="serverSecret">Server-side secret the verifier is derived from.</param>
+    /// <returns>A verifier in the same shape a real one has: 512 lowercase hex characters.</returns>
+    private static string DeriveFakeVerifier(string normalizedUsername, string serverSecret)
+    {
+        var material = new byte[VerifierByteLength];
+        for (var offset = 0; offset < material.Length; offset += SHA256.HashSizeInBytes)
+        {
+            var block = DeriveFakeBytes(normalizedUsername, serverSecret, FakeVerifierLabel + (offset / SHA256.HashSizeInBytes));
+            block.CopyTo(material, offset);
+        }
+
+        material[0] &= 0x7F;
+
+        return Convert.ToHexString(material).ToLowerInvariant();
     }
 
     /// <summary>

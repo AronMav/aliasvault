@@ -23,7 +23,7 @@ public class AnonymousAuthRateLimitServiceTests
     [Test]
     public void RequestsWithinLimitAreAllowedTest()
     {
-        using var service = new AnonymousAuthRateLimitService(3);
+        var service = new AnonymousAuthRateLimitService(3);
 
         Assert.Multiple(() =>
         {
@@ -39,7 +39,7 @@ public class AnonymousAuthRateLimitServiceTests
     [Test]
     public void RequestsOverLimitAreRejectedTest()
     {
-        using var service = new AnonymousAuthRateLimitService(2);
+        var service = new AnonymousAuthRateLimitService(2);
 
         service.TryConsume(Address);
         service.TryConsume(Address);
@@ -58,7 +58,7 @@ public class AnonymousAuthRateLimitServiceTests
     [Test]
     public void LimitIsPerAddressTest()
     {
-        using var service = new AnonymousAuthRateLimitService(1);
+        var service = new AnonymousAuthRateLimitService(1);
 
         service.TryConsume(Address);
 
@@ -76,7 +76,7 @@ public class AnonymousAuthRateLimitServiceTests
     [Test]
     public void UnknownAddressIsAllowedTest()
     {
-        using var service = new AnonymousAuthRateLimitService(1);
+        var service = new AnonymousAuthRateLimitService(1);
 
         Assert.Multiple(() =>
         {
@@ -92,11 +92,43 @@ public class AnonymousAuthRateLimitServiceTests
     [Test]
     public void ZeroLimitDisablesLimitingTest()
     {
-        using var service = new AnonymousAuthRateLimitService(0);
+        var service = new AnonymousAuthRateLimitService(0);
 
         for (var i = 0; i < 100; i++)
         {
             Assert.That(service.TryConsume(Address), Is.True);
         }
+    }
+
+    /// <summary>
+    /// The limit still applies after a large number of distinct addresses have been seen.
+    /// </summary>
+    /// <remarks>
+    /// This is the case the limiter exists for: a flood arrives from many source addresses at once. An
+    /// implementation that tracks addresses in a container with a capacity stops counting once that
+    /// capacity is reached and lets every subsequent caller through unmetered, so the limit disappears
+    /// exactly when it is needed. Whatever holds the counts has to keep counting here.
+    /// </remarks>
+    [Test]
+    public void LimitStillAppliesAfterManyDistinctAddressesTest()
+    {
+        const int limit = 5;
+        var service = new AnonymousAuthRateLimitService(limit);
+
+        for (var i = 0; i < 100_000; i++)
+        {
+            service.TryConsume($"10.{(i >> 16) & 0xFF}.{(i >> 8) & 0xFF}.{i & 0xFF}");
+        }
+
+        var allowed = 0;
+        for (var i = 0; i < limit * 20; i++)
+        {
+            if (service.TryConsume(Address))
+            {
+                allowed++;
+            }
+        }
+
+        Assert.That(allowed, Is.LessThanOrEqualTo(limit), "The limiter stopped counting once it had seen many addresses.");
     }
 }

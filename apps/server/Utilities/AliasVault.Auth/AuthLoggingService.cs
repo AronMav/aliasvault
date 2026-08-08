@@ -113,7 +113,7 @@ public class AuthLoggingService(IServiceProvider serviceProvider, IHttpContextAc
     /// <returns>The username, shortened to the maximum length the column accepts.</returns>
     private static string TruncateUsername(string username)
     {
-        return username.Length <= AuthLog.UsernameMaxLength ? username : username[..AuthLog.UsernameMaxLength];
+        return UsernameHelper.Truncate(username, AuthLog.UsernameMaxLength);
     }
 
     /// <summary>
