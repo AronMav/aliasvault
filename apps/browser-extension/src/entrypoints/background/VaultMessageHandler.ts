@@ -56,6 +56,13 @@ let cachedSqliteClient: SqliteClient | null = null;
 let cachedVaultBlob: string | null = null;
 
 /**
+ * One in-flight decrypt+init, shared by concurrent callers (the startup prewarm racing the
+ * first CHECK_AUTH_STATUS / GET_FILTERED_ITEMS, several tabs waking the worker at once).
+ * Keyed by the blob being initialized: a different blob never joins the flight.
+ */
+let pendingVaultInit: { blob: string, promise: Promise<SqliteClient> } | null = null;
+
+/**
  * Global sync queue state.
  * Prevents multiple simultaneous sync operations and ensures pending changes are synced.
  */
@@ -934,21 +941,58 @@ export async function createVaultSqliteClient() : Promise<SqliteClient> {
     return cachedSqliteClient;
   }
 
-  // Decrypt the vault
-  const decryptedVault = await EncryptionUtility.symmetricDecrypt(
-    encryptedVault,
-    encryptionKey
-  );
+  /*
+   * Join an in-flight initialization of this exact blob instead of decrypting it twice.
+   * This happens when the startup prewarm races the first CHECK_AUTH_STATUS /
+   * GET_FILTERED_ITEMS, or when several tabs wake the worker at once.
+   */
+  if (pendingVaultInit && pendingVaultInit.blob === encryptedVault) {
+    return pendingVaultInit.promise;
+  }
 
-  // Initialize the SQLite client with the decrypted vault
-  const sqliteClient = new SqliteClient();
-  await sqliteClient.initializeFromBase64(decryptedVault);
+  const initPromise = (async (): Promise<SqliteClient> => {
+    try {
+      // Decrypt the vault
+      const decryptedVault = await EncryptionUtility.symmetricDecrypt(
+        encryptedVault,
+        encryptionKey
+      );
 
-  // Cache the client and vault blob
-  cachedSqliteClient = sqliteClient;
-  cachedVaultBlob = encryptedVault;
+      // Initialize the SQLite client with the decrypted vault
+      const sqliteClient = new SqliteClient();
+      await sqliteClient.initializeFromBase64(decryptedVault);
 
-  return sqliteClient;
+      // Cache the client and vault blob
+      cachedSqliteClient = sqliteClient;
+      cachedVaultBlob = encryptedVault;
+
+      return sqliteClient;
+    } finally {
+      if (pendingVaultInit && pendingVaultInit.blob === encryptedVault) {
+        pendingVaultInit = null;
+      }
+    }
+  })();
+
+  pendingVaultInit = { blob: encryptedVault, promise: initPromise };
+
+  return initPromise;
+}
+
+/**
+ * Pre-decrypt the stored vault and warm the sqlite client cache.
+ *
+ * Call this once when the background service worker starts (after startup migrations) so the
+ * first autofill popup after a worker wake does not pay the vault decryption and sqlite
+ * initialization cost. When the vault is locked or missing this is a no-op: there is no key
+ * to warm with and the on-demand path already reports the lock.
+ */
+export async function prewarmVaultCache() : Promise<void> {
+  try {
+    await createVaultSqliteClient();
+  } catch {
+    // Vault locked or missing: nothing to warm.
+  }
 }
 
 /**

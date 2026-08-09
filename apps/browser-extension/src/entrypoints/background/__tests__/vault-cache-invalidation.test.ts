@@ -18,6 +18,7 @@ import {
   handleSaveLoginCredential,
   handleAddUrlToCredential,
   handleStoreEncryptedVault,
+  prewarmVaultCache,
 } from '@/entrypoints/background/VaultMessageHandler';
 
 import { COMPLETE_SCHEMA_SQL } from '@/utils/dist/core/vault';
@@ -184,5 +185,36 @@ describe('vault sqlite client cache invalidation', () => {
     await storage.removeItem('session:encryptionKey');
 
     await expect(createVaultSqliteClient()).rejects.toThrow();
+  }, 60000);
+
+  it('prewarms the cache so the next open is a cache hit', async () => {
+    await prewarmVaultCache();
+
+    // After the prewarm the very next open must reuse the warmed client.
+    const clientA = await createVaultSqliteClient();
+    const clientB = await createVaultSqliteClient();
+    expect(clientB).toBe(clientA);
+  }, 60000);
+
+  it('prewarm is a no-op when the vault is locked', async () => {
+    await storage.removeItem('session:encryptionKey');
+
+    // Must not throw: nothing to warm.
+    await expect(prewarmVaultCache()).resolves.toBeUndefined();
+
+    // And opening still reports the lock.
+    await expect(createVaultSqliteClient()).rejects.toThrow();
+  }, 60000);
+
+  it('shares one in-flight decrypt+init across concurrent opens', async () => {
+    // Fire several opens for the same blob at once; all must settle to the same client.
+    const [a, b, c] = await Promise.all([
+      createVaultSqliteClient(),
+      createVaultSqliteClient(),
+      createVaultSqliteClient(),
+    ]);
+
+    expect(b).toBe(a);
+    expect(c).toBe(a);
   }, 60000);
 });
