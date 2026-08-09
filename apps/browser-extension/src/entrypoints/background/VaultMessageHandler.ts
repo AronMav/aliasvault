@@ -41,8 +41,12 @@ import { t } from '@/i18n/StandaloneI18n';
  * The cached instance is the single source of truth for the in-memory vault.
  *
  * Cache Strategy:
- * - Local mutations (createCredential, etc.): Work directly on cachedSqliteClient, no cache clearing
- * - New vault from remote (login, sync): Clear cache by setting both to null
+ * - Local mutations (createCredential, etc.): Work directly on cachedSqliteClient, no cache clearing.
+ *   The persisted blob is the cached client's own export, so the cache is kept and pointed at the
+ *   new blob rather than dropped. Dropping it would make the very next read (the autofill popup
+ *   right after saving a credential) decrypt and re-initialize the whole vault again.
+ * - New vault from remote (login, sync) or from another actor (popup): Clear cache by setting
+ *   both to null
  * - Logout/clear vault: Clear cache by setting both to null
  *
  * The cache is cleared by setting cachedSqliteClient and cachedVaultBlob to null directly
@@ -815,6 +819,18 @@ async function uploadNewVaultToServer(sqliteClient: SqliteClient) : Promise<{ re
   // Store in local: storage for persistence
   await storage.setItem('local:encryptedVault', encryptedVault);
 
+  /*
+   * The blob just persisted is this client's own export (pruned or not). Re-point the cache at
+   * it instead of leaving a stale reference: with the stale reference the next read would find
+   * a different blob in storage and decrypt the whole vault again, even though the in-memory
+   * client already holds exactly what was stored. After a prune the cache was cleared for the
+   * re-initialization below; refilling it here is safe for the same reason.
+   */
+  if (cachedSqliteClient === null || cachedSqliteClient === sqliteClient) {
+    cachedSqliteClient = sqliteClient;
+    cachedVaultBlob = encryptedVault;
+  }
+
   // Get server revision for API
   const serverRevision = await storage.getItem('local:serverRevision') as number | null ?? 0;
 
@@ -869,9 +885,26 @@ async function uploadNewVaultToServer(sqliteClient: SqliteClient) : Promise<{ re
  * This is tolerant to server being offline (in which case the vault state will be stored locally for next sync).
  */
 async function persistLocalVaultMutation(sqliteClient: SqliteClient, encryptionKey: string) : Promise<void> {
+  /*
+   * Remember whether this client is the cached one BEFORE awaiting: the store below clears the
+   * cache, and the blob it persists is this client's own export. When it is the cached client,
+   * the cache is re-pointed at the new blob afterwards instead of being dropped, so the next
+   * read (typically the autofill popup right after saving a credential) does not decrypt and
+   * re-initialize the whole vault again.
+   *
+   * A blob written by anything else (the popup's own SqliteClient, the server) still clears the
+   * cache, because only this instance is known to match the blob it exported.
+   */
+  const isCachedClient = sqliteClient === cachedSqliteClient;
+
   const updatedVaultData = sqliteClient.exportToBase64();
   const encryptedVault = await EncryptionUtility.symmetricEncrypt(updatedVaultData, encryptionKey);
   await handleStoreEncryptedVault({ vaultBlob: encryptedVault, markDirty: true });
+
+  if (isCachedClient) {
+    cachedSqliteClient = sqliteClient;
+    cachedVaultBlob = encryptedVault;
+  }
 
   void handleFullVaultSync().catch(error => {
     console.error('Background sync after local vault mutation failed:', error);
