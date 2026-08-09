@@ -187,6 +187,20 @@ try {
     if (port.name !== 'av-keepalive') {
       return;
     }
+    /*
+     * Answer the content script's periodic pings. Recent Chrome releases only count active
+     * messaging as keep-alive activity, so the ping/pong round trip is what keeps this worker
+     * warm while any vault is unlocked.
+     */
+    port.onMessage.addListener((message: unknown) => {
+      if (message && (message as { type?: string }).type === 'ping') {
+        try {
+          port.postMessage({ type: 'pong' });
+        } catch {
+          // Port already gone; onDisconnect below cleans up.
+        }
+      }
+    });
     port.onDisconnect.addListener(() => {
       /* Nothing to clean up: the port object goes out of scope. */
     });
