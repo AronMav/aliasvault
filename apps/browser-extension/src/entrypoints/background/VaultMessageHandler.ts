@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import * as OTPAuth from 'otpauth';
+import { browser } from 'wxt/browser';
 import { storage } from 'wxt/utils/storage';
 
 import { TRASH_RETENTION_DAYS } from '@/utils/constants/vault';
@@ -70,13 +71,55 @@ let isSyncInProgress = false;
 let hasPendingSync = false;
 
 /**
+ * Cached encryption key — avoids 1-2 storage.getItem IPC calls on every handleGetEncryptionKey
+ * invocation. Cleared when the key is stored/cleared or when storage.onChanged fires for session.
+ */
+let cachedEncryptionKey: string | null | undefined = undefined;
+
+/**
+ * Get the encryption key from cache, falling back to session storage. Once read, the value is
+ * memoised so subsequent calls are synchronous from the cache perspective (no IPC round-trip).
+ */
+async function getCachedEncryptionKey(): Promise<string | null> {
+  if (cachedEncryptionKey !== undefined) {
+    return cachedEncryptionKey;
+  }
+  let key = await storage.getItem('session:encryptionKey') as string | null;
+  if (!key) {
+    key = await storage.getItem('session:derivedKey') as string | null;
+  }
+  cachedEncryptionKey = key;
+  return key;
+}
+
+/** Invalidate the cached encryption key (call when the key is stored, cleared, or changed). */
+function invalidateCachedEncryptionKey(): void {
+  cachedEncryptionKey = undefined;
+}
+
+/*
+ * Auto-invalidate the cached encryption key when session storage changes in any context (popup,
+ * content script, another tab). This catches lock/unlock and key rotation without requiring every
+ * call site to manually invalidate.
+ */
+try {
+  browser.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName === 'session' && ('encryptionKey' in changes || 'derivedKey' in changes)) {
+      invalidateCachedEncryptionKey();
+    }
+  });
+} catch {
+  /* fake-browser (test/build env) may not implement storage.onChanged */
+}
+
+/**
  * Check if the user is logged in and if the vault is locked, and also check for pending migrations.
  */
-export async function handleCheckAuthStatus() : Promise<{ isLoggedIn: boolean, isVaultLocked: boolean, hasPendingMigrations: boolean, error?: string }> {
+export async function handleCheckAuthStatus(options?: { skipMigrationCheck?: boolean }) : Promise<{ isLoggedIn: boolean, isVaultLocked: boolean, hasPendingMigrations: boolean, error?: string }> {
   const username = await storage.getItem('local:username');
   const accessToken = await storage.getItem('local:accessToken');
   const vaultData = await storage.getItem('local:encryptedVault');
-  const encryptionKey = await handleGetEncryptionKey();
+  const encryptionKey = await getCachedEncryptionKey();
 
   const isLoggedIn = username !== null && accessToken !== null;
   const isVaultLocked = isLoggedIn && (vaultData === null || encryptionKey === null);
@@ -92,6 +135,21 @@ export async function handleCheckAuthStatus() : Promise<{ isLoggedIn: boolean, i
 
   // If not logged in, no need to check migrations
   if (!isLoggedIn) {
+    return {
+      isLoggedIn,
+      isVaultLocked,
+      hasPendingMigrations: false
+    };
+  }
+
+  /*
+   * Skip the expensive migration check (which requires a full vault decryption) when the caller
+   * only needs to know whether the vault is locked. The autofill popup path passes
+   * skipMigrationCheck=true because it immediately follows up with GET_FILTERED_ITEMS which
+   * decrypts the vault anyway — checking migrations here would double the decrypt cost on every
+   * click. The popup UI (full-page) calls this without the flag to surface migration prompts.
+   */
+  if (options?.skipMigrationCheck) {
     return {
       isLoggedIn,
       isVaultLocked,
@@ -169,6 +227,7 @@ export async function handleStoreEncryptionKey(
 ) : Promise<messageBoolResponse> {
   try {
     await storage.setItem('session:encryptionKey', encryptionKey);
+    cachedEncryptionKey = encryptionKey;
     return { success: true };
   } catch (error) {
     console.error('Failed to store encryption key:', error);
@@ -287,6 +346,11 @@ export async function handleLockVault(): Promise<messageBoolResponse> {
     'session:persistedFormValues',
   ]);
 
+  // Clear cached client and key since vault is now locked
+  cachedSqliteClient = null;
+  cachedVaultBlob = null;
+  invalidateCachedEncryptionKey();
+
   return { success: true };
 }
 
@@ -315,6 +379,7 @@ export async function handleClearSession(): Promise<messageBoolResponse> {
   // Clear cached client since session ended
   cachedSqliteClient = null;
   cachedVaultBlob = null;
+  invalidateCachedEncryptionKey();
 
   return { success: true };
 }
@@ -640,16 +705,7 @@ export async function handleGeneratePassword(
  */
 export async function handleGetEncryptionKey(
 ) : Promise<string | null> {
-  // Try the current key name first (since 0.22.0)
-  let encryptionKey = await storage.getItem('session:encryptionKey') as string | null;
-
-  // Fall back to the legacy key name if not found
-  if (!encryptionKey) {
-    // TODO: this check can be removed some period of time after 0.22.0 is released.
-    encryptionKey = await storage.getItem('session:derivedKey') as string | null;
-  }
-
-  return encryptionKey;
+  return getCachedEncryptionKey();
 }
 
 /**

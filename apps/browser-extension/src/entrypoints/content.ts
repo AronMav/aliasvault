@@ -820,8 +820,11 @@ export default defineContentScript({
          */
         async function showPopupWithAuthCheck(inputElement: HTMLInputElement, container: HTMLElement, popupType: PopupType = DEFAULT_POPUP_TYPE, forceShow: boolean = false) : Promise<void> {
           try {
-            // Check auth status and pending migrations in a single call
-            const authStatus = await sendMessage('CHECK_AUTH_STATUS');
+            /*
+             * Check auth status. skipMigrationCheck avoids a full vault decrypt here — the popup
+             * path immediately follows with GET_FILTERED_ITEMS which decrypts the vault anyway.
+             */
+            const authStatus = await sendMessage('CHECK_AUTH_STATUS', { skipMigrationCheck: true });
 
             if (authStatus.isVaultLocked) {
               // Check if the user has dismissed the vault locked popup

@@ -251,7 +251,7 @@ export default defineBackground({
     });
 
     // Listen for messages via @webext-core/messaging
-    onMessage('CHECK_AUTH_STATUS', () => handleCheckAuthStatus());
+    onMessage('CHECK_AUTH_STATUS', (data) => handleCheckAuthStatus(data ?? {}));
 
     onMessage('GET_ENCRYPTION_KEY', () => handleGetEncryptionKey());
     onMessage('GET_ENCRYPTION_KEY_DERIVATION_PARAMS', () => handleGetEncryptionKeyDerivationParams());
