@@ -16,6 +16,7 @@ import { onMessage, sendMessage } from "@/utils/messaging/ExtensionMessaging";
 import type { MatchingPasskeysResponse, WebAuthnAssertionResponse, WebAuthnPublicKeyGetPayload } from '@/utils/passkey/types';
 import { isRpIdAllowedForHost, validateWebAuthnRequest } from '@/utils/passkey/WebAuthnRequestValidation';
 import type { WebAuthnBridgeRequest } from '@/utils/passkey/WebAuthnRequestValidation';
+import { initRustCore } from '@/utils/RustCore';
 
 import { runStartupMigrations } from '@/migrations';
 
@@ -172,6 +173,30 @@ function handleValidatedWebAuthnGetAssertion(
  * See: https://developer.chrome.com/docs/extensions/develop/migrate/to-service-workers
  */
 browser.alarms.onAlarm.addListener(handleAutoLockAlarm);
+
+/*
+ * Keepalive port listener (top-level scope, same reason as the alarm listener above).
+ *
+ * While any content script holds an open port to this worker, Chrome will not terminate it.
+ * The content scripts open the port while the vault is unlocked (see ServiceWorkerKeepalive),
+ * so the autofill popup never has to wake a cold worker and the loading spinner never shows.
+ * The listener itself only needs to accept the connection.
+ */
+try {
+  browser.runtime.onConnect.addListener((port) => {
+    if (port.name !== 'av-keepalive') {
+      return;
+    }
+    port.onDisconnect.addListener(() => {
+      /* Nothing to clean up: the port object goes out of scope. */
+    });
+  });
+} catch {
+  /*
+   * fake-browser (wxt build/test environment) does not implement runtime.onConnect.
+   * In the real extension this always succeeds; keepalive only matters there anyway.
+   */
+}
 
 export default defineBackground({
   /**
@@ -341,6 +366,15 @@ export default defineBackground({
       }
 
       try {
+        /*
+         * Pre-warm the Rust core WASM module. URL matching for the autofill popup runs through
+         * it; without this the first popup after a worker wake pays the ~1MB wasm load.
+         * Fire-and-forget: initRustCore is idempotent and failures fall back to lazy init.
+         */
+        void initRustCore().catch(error => {
+          console.error('Error pre-warming Rust core:', error);
+        });
+
         /*
          * Pre-decrypt the vault and warm the sqlite cache so the first autofill popup after a
          * service worker wake (Chrome kills MV3 workers after ~30s idle) does not pay the

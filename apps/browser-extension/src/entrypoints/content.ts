@@ -18,6 +18,7 @@ import { LocalPreferencesService } from '@/utils/LocalPreferencesService';
 import { LoginDetector } from '@/utils/loginDetector';
 import type { CapturedLogin } from '@/utils/loginDetector';
 import { onMessage, sendMessage } from '@/utils/messaging/ExtensionMessaging';
+import { startServiceWorkerKeepalive } from '@/utils/ServiceWorkerKeepalive';
 import { getDeepActiveElement, getDeepElementById, getDeepEventTarget } from '@/utils/ShadowDom';
 
 import { t } from '@/i18n/StandaloneI18n';
@@ -454,6 +455,24 @@ export default defineContentScript({
 
     // Initialize WebAuthn interceptor for passkey support
     await initializeWebAuthnInterceptor(ctx);
+
+    /*
+     * Keep the background service worker warm while the vault is unlocked. Chrome MV3 kills
+     * idle workers after ~30s; without this every autofill popup click would wake the worker
+     * cold and show the loading spinner. The open port is dropped again on vault lock.
+     */
+    try {
+      startServiceWorkerKeepalive((callback) => {
+        ctx.onInvalidated(callback);
+      });
+    } catch (error) {
+      /*
+       * Keepalive is a performance optimization only: it must never break the autofill
+       * functionality itself. If it fails for any reason, fall back to the default worker
+       * lifecycle (popup still works, just pays the wake-up cost after idle timeouts).
+       */
+      console.error('[AliasVault] Failed to start service worker keepalive:', error);
+    }
 
     /*
      * Check for persisted save prompt state immediately (before the 750ms delay).
