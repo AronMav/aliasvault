@@ -249,6 +249,14 @@ export async function handleStoreEncryptionKey(
   try {
     await storage.setItem('session:encryptionKey', encryptionKey);
     cachedEncryptionKey = encryptionKey;
+
+    /*
+     * Vault is now unlocked — prewarm the sqlite client and items cache in the background
+     * so the first field click is instant. This takes 3-8 seconds on some machines due to
+     * sql.js WASM overhead; running it here means the user never waits for it.
+     */
+    void prewarmVaultCache();
+
     return { success: true };
   } catch (error) {
     console.error('Failed to store encryption key:', error);
