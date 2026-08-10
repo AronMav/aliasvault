@@ -547,7 +547,6 @@ export async function handleGetFilteredItems(
   const encryptionKey = await handleGetEncryptionKey();
 
   if (!encryptionKey) {
-    // E-202: Vault is locked
     return { success: false, error: formatErrorWithCode(await t('common.errors.vaultIsLocked'), AppErrorCode.VAULT_LOCKED) };
   }
 
@@ -556,7 +555,6 @@ export async function handleGetFilteredItems(
     const allItems = sqliteClient.items.getAll();
     const filteredItems = await filterItemsByUrl(allItems, message.currentUrl, message.pageTitle, message.matchingMode);
 
-    // Prioritize recently selected item for multi-step login flows (opt-in only)
     if (message.includeRecentlySelected) {
       const rootDomain = await extractRootDomainFromUrl(message.currentUrl);
       const prioritized = await prioritizeRecentlySelectedItem(filteredItems, rootDomain, allItems);
