@@ -210,7 +210,7 @@ async function checkAndRestoreSavePromptEarly(ctx: Parameters<typeof createShado
 
     // Check if vault is still unlocked
     try {
-      const authStatus = await sendMessage('CHECK_AUTH_STATUS');
+      const authStatus = await sendMessage('CHECK_AUTH_STATUS', { skipMigrationCheck: true });
       if (!authStatus.isLoggedIn || authStatus.isVaultLocked) {
         return;
       }
@@ -300,7 +300,7 @@ async function checkAndRestorePersistedSavePrompt(container: HTMLElement): Promi
 
     // Check if vault is still unlocked
     try {
-      const authStatus = await sendMessage('CHECK_AUTH_STATUS');
+      const authStatus = await sendMessage('CHECK_AUTH_STATUS', { skipMigrationCheck: true });
       if (!authStatus.isLoggedIn || authStatus.isVaultLocked) {
         return;
       }
@@ -350,18 +350,17 @@ function initializeLoginDetector(container: HTMLElement): void {
   loginDetector.initialize();
 
   loginDetector.onLoginCapture(async (login: CapturedLogin) => {
-    // Check if the feature is enabled
-    if (!await isLoginSaveEnabled()) {
+    // Check if the feature is enabled AND vault is unlocked — parallel IPC
+    const [saveEnabled, authStatus] = await Promise.all([
+      isLoginSaveEnabled(),
+      sendMessage('CHECK_AUTH_STATUS', { skipMigrationCheck: true }).catch(() => null),
+    ]);
+
+    if (!saveEnabled) {
       return;
     }
 
-    // Check if vault is locked
-    try {
-      const authStatus = await sendMessage('CHECK_AUTH_STATUS');
-      if (!authStatus.isLoggedIn || authStatus.isVaultLocked) {
-        return;
-      }
-    } catch {
+    if (!authStatus || !authStatus.isLoggedIn || authStatus.isVaultLocked) {
       return;
     }
 
@@ -376,20 +375,24 @@ function initializeLoginDetector(container: HTMLElement): void {
       return;
     }
 
-    // Check if the login already exists in the vault (exact URL + username match)
-    if (await isLoginDuplicate(login.domain, login.username)) {
+    // Run duplicate check, settings fetch, and last-autofilled lookup in parallel
+    const [isDuplicate, saveSettings, lastAutofilledResponse] = await Promise.all([
+      isLoginDuplicate(login.domain, login.username),
+      sendMessage('GET_LOGIN_SAVE_SETTINGS').catch(() => null),
+      sendMessage('GET_LAST_AUTOFILLED', {
+        domain: login.domain,
+        username: login.username,
+      }).catch(() => null),
+    ]);
+
+    if (isDuplicate) {
       return;
     }
 
-    // Get auto-dismiss settings
+    // Get auto-dismiss settings (reused from parallel fetch above)
     let autoDismissMs = 15000;
-    try {
-      const settings = await sendMessage('GET_LOGIN_SAVE_SETTINGS');
-      if (settings.success) {
-        autoDismissMs = settings.autoDismissSeconds * 1000;
-      }
-    } catch {
-      // Use default
+    if (saveSettings?.success) {
+      autoDismissMs = saveSettings.autoDismissSeconds * 1000;
     }
 
     /*
@@ -397,12 +400,7 @@ function initializeLoginDetector(container: HTMLElement): void {
      * If so, offer to add the current URL to that credential instead of creating a new one.
      */
     try {
-      const lastAutofilledResponse = await sendMessage('GET_LAST_AUTOFILLED', {
-        domain: login.domain,
-        username: login.username,
-      });
-
-      if (lastAutofilledResponse.success && lastAutofilledResponse.credential) {
+      if (lastAutofilledResponse?.success && lastAutofilledResponse.credential) {
         /*
          * Skip the prompt when the submitted URL is already linked.
          */
