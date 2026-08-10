@@ -313,11 +313,20 @@ export async function handleSyncVault(
     // Clear cached client since we received a new vault blob from server
     cachedSqliteClient = null;
     cachedVaultBlob = null;
+    cachedDecryptedVault = null;
+    cachedDecryptedVaultBlob = null;
     invalidateCachedAllItems();
   }
 
   return { success: true };
 }
+
+/**
+ * Cached decrypted vault blob — avoids re-decrypting on every popup open.
+ * Invalidated when the vault blob changes (sync, mutation, lock, clear).
+ */
+let cachedDecryptedVault: string | null = null;
+let cachedDecryptedVaultBlob: string | null = null;
 
 /**
  * Get the vault from browser storage (local: for persistence).
@@ -346,10 +355,22 @@ export async function handleGetVault(
       return { success: false, error: formatErrorWithCode(await t('common.errors.vaultIsLocked'), AppErrorCode.VAULT_LOCKED) };
     }
 
-    const decryptedVault = await EncryptionUtility.symmetricDecrypt(
-      encryptedVault,
-      encryptionKey
-    );
+    /*
+     * Use cached decrypted vault if the encrypted blob hasn't changed.
+     * symmetricDecrypt is expensive (Web Crypto PBKDF2/AES-GCM) and the popup
+     * calls GET_VAULT on every open.
+     */
+    let decryptedVault: string;
+    if (cachedDecryptedVault !== null && cachedDecryptedVaultBlob === encryptedVault) {
+      decryptedVault = cachedDecryptedVault;
+    } else {
+      decryptedVault = await EncryptionUtility.symmetricDecrypt(
+        encryptedVault,
+        encryptionKey
+      );
+      cachedDecryptedVault = decryptedVault;
+      cachedDecryptedVaultBlob = encryptedVault;
+    }
 
     return {
       success: true,
@@ -379,6 +400,8 @@ export async function handleLockVault(): Promise<messageBoolResponse> {
   // Clear cached client and key since vault is now locked
   cachedSqliteClient = null;
   cachedVaultBlob = null;
+  cachedDecryptedVault = null;
+  cachedDecryptedVaultBlob = null;
   invalidateCachedEncryptionKey();
   invalidateCachedAllItems();
 
@@ -410,6 +433,8 @@ export async function handleClearSession(): Promise<messageBoolResponse> {
   // Clear cached client since session ended
   cachedSqliteClient = null;
   cachedVaultBlob = null;
+  cachedDecryptedVault = null;
+  cachedDecryptedVaultBlob = null;
   invalidateCachedEncryptionKey();
   invalidateCachedAllItems();
 
@@ -896,6 +921,8 @@ async function uploadNewVaultToServer(sqliteClient: SqliteClient) : Promise<{ re
        */
       cachedSqliteClient = null;
       cachedVaultBlob = null;
+      cachedDecryptedVault = null;
+      cachedDecryptedVaultBlob = null;
       invalidateCachedAllItems();
       await sqliteClient.initializeFromBase64(updatedVaultData);
     }
@@ -1156,6 +1183,8 @@ export async function handleStoreEncryptedVault(request: {
   // Clear cache since vault blob changed
   cachedSqliteClient = null;
   cachedVaultBlob = null;
+  cachedDecryptedVault = null;
+  cachedDecryptedVaultBlob = null;
   invalidateCachedAllItems();
 
   return { success: true, mutationSequence };
