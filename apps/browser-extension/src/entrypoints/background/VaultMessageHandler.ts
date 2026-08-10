@@ -55,6 +55,7 @@ import { t } from '@/i18n/StandaloneI18n';
  */
 let cachedSqliteClient: SqliteClient | null = null;
 let cachedVaultBlob: string | null = null;
+let cachedAllItems: Item[] | null = null;
 
 /**
  * One in-flight decrypt+init, shared by concurrent callers (the startup prewarm racing the
@@ -97,6 +98,26 @@ function invalidateCachedEncryptionKey(): void {
   cachedEncryptionKey = undefined;
 }
 
+/**
+ * Get all vault items, using a cache to avoid the expensive sql.js query on every call.
+ * The cache is valid as long as the sqlite client hasn't changed (same vault blob).
+ * On this user's machine, sqliteClient.items.getAll() takes ~7 seconds due to sql.js WASM
+ * overhead; caching reduces it to ~0ms on subsequent calls within the same worker lifecycle.
+ */
+function getCachedAllItems(sqliteClient: SqliteClient): Item[] {
+  if (cachedAllItems !== null && cachedSqliteClient === sqliteClient) {
+    return cachedAllItems;
+  }
+  const items = sqliteClient.items.getAll();
+  cachedAllItems = items;
+  return items;
+}
+
+/** Clear the cached items (call when the vault data changes). */
+function invalidateCachedAllItems(): void {
+  cachedAllItems = null;
+}
+
 /*
  * Auto-invalidate the cached encryption key when session storage changes in any context (popup,
  * content script, another tab). This catches lock/unlock and key rotation without requiring every
@@ -116,6 +137,7 @@ try {
  * Check if the user is logged in and if the vault is locked, and also check for pending migrations.
  */
 export async function handleCheckAuthStatus(options?: { skipMigrationCheck?: boolean }) : Promise<{ isLoggedIn: boolean, isVaultLocked: boolean, hasPendingMigrations: boolean, error?: string }> {
+  const ts = Date.now();
   const username = await storage.getItem('local:username');
   const accessToken = await storage.getItem('local:accessToken');
   const vaultData = await storage.getItem('local:encryptedVault');
@@ -123,6 +145,8 @@ export async function handleCheckAuthStatus(options?: { skipMigrationCheck?: boo
 
   const isLoggedIn = username !== null && accessToken !== null;
   const isVaultLocked = isLoggedIn && (vaultData === null || encryptionKey === null);
+
+  console.info('[AV-PERF] CHECK_AUTH_STATUS ' + (Date.now() - ts) + 'ms locked=' + isVaultLocked + ' skipMig=' + (options?.skipMigrationCheck ?? false));
 
   // If vault is locked, we can't check for pending migrations
   if (isVaultLocked) {
@@ -284,6 +308,7 @@ export async function handleSyncVault(
     // Clear cached client since we received a new vault blob from server
     cachedSqliteClient = null;
     cachedVaultBlob = null;
+    invalidateCachedAllItems();
   }
 
   return { success: true };
@@ -350,6 +375,7 @@ export async function handleLockVault(): Promise<messageBoolResponse> {
   cachedSqliteClient = null;
   cachedVaultBlob = null;
   invalidateCachedEncryptionKey();
+  invalidateCachedAllItems();
 
   return { success: true };
 }
@@ -380,6 +406,7 @@ export async function handleClearSession(): Promise<messageBoolResponse> {
   cachedSqliteClient = null;
   cachedVaultBlob = null;
   invalidateCachedEncryptionKey();
+  invalidateCachedAllItems();
 
   return { success: true };
 }
@@ -544,6 +571,7 @@ function filterItemsBySearchTerm(items: Item[], searchTerm: string): Item[] {
 export async function handleGetFilteredItems(
   message: { currentUrl: string, pageTitle: string, matchingMode?: string, includeRecentlySelected?: boolean }
 ) : Promise<messageItemsResponse> {
+  const ts = Date.now();
   const encryptionKey = await handleGetEncryptionKey();
 
   if (!encryptionKey) {
@@ -552,15 +580,22 @@ export async function handleGetFilteredItems(
 
   try {
     const sqliteClient = await createVaultSqliteClient();
-    const allItems = sqliteClient.items.getAll();
+    const tAfterSqlite = Date.now();
+    const allItems = getCachedAllItems(sqliteClient);
+    const tAfterGetAll = Date.now();
     const filteredItems = await filterItemsByUrl(allItems, message.currentUrl, message.pageTitle, message.matchingMode);
+    const tAfterFilter = Date.now();
 
     if (message.includeRecentlySelected) {
       const rootDomain = await extractRootDomainFromUrl(message.currentUrl);
+      const tRoot = Date.now();
       const prioritized = await prioritizeRecentlySelectedItem(filteredItems, rootDomain, allItems);
+      const tPrio = Date.now();
+      console.info('[AV-PERF] GET_FILTERED_ITEMS total=' + (Date.now() - ts) + 'ms sqlite=' + (tAfterSqlite-ts) + 'ms getAll=' + (tAfterGetAll-tAfterSqlite) + 'ms filter=' + (tAfterFilter-tAfterGetAll) + 'ms rootDomain=' + (tRoot-tAfterFilter) + 'ms prio=' + (tPrio-tRoot) + 'ms cache=' + (cachedSqliteClient ? 'HIT' : 'MISS'));
       return { success: true, items: prioritized.items, recentlySelectedId: prioritized.recentlySelectedId };
     }
 
+    console.info('[AV-PERF] GET_FILTERED_ITEMS total=' + (Date.now() - ts) + 'ms sqlite=' + (tAfterSqlite-ts) + 'ms getAll=' + (tAfterGetAll-tAfterSqlite) + 'ms filter=' + (tAfterFilter-tAfterGetAll) + 'ms cache=' + (cachedSqliteClient ? 'HIT' : 'MISS'));
     return { success: true, items: filteredItems };
   } catch (error) {
     console.error('Error getting filtered items:', error);
@@ -587,7 +622,7 @@ export async function handleGetSearchItems(
 
   try {
     const sqliteClient = await createVaultSqliteClient();
-    const allItems = sqliteClient.items.getAll();
+    const allItems = getCachedAllItems(sqliteClient);
     const searchResults = filterItemsBySearchTerm(allItems, message.searchTerm);
 
     return { success: true, items: searchResults };
@@ -864,6 +899,7 @@ async function uploadNewVaultToServer(sqliteClient: SqliteClient) : Promise<{ re
        */
       cachedSqliteClient = null;
       cachedVaultBlob = null;
+      invalidateCachedAllItems();
       await sqliteClient.initializeFromBase64(updatedVaultData);
     }
   } catch (pruneError) {
@@ -902,7 +938,7 @@ async function uploadNewVaultToServer(sqliteClient: SqliteClient) : Promise<{ re
   const newVault: Vault = {
     blob: encryptedVault,
     createdAt: new Date().toISOString(),
-    credentialsCount: sqliteClient.items.getAll().length,
+    credentialsCount: getCachedAllItems(sqliteClient).length,
     currentRevisionNumber: serverRevision,
     emailAddressList: emailAddresses,
     updatedAt: new Date().toISOString(),
@@ -1118,6 +1154,7 @@ export async function handleStoreEncryptedVault(request: {
   // Clear cache since vault blob changed
   cachedSqliteClient = null;
   cachedVaultBlob = null;
+  invalidateCachedAllItems();
 
   return { success: true, mutationSequence };
 }
@@ -1676,7 +1713,7 @@ export async function handleCheckLoginDuplicate(
 
   try {
     const sqliteClient = await createVaultSqliteClient();
-    const allItems = sqliteClient.items.getAll();
+    const allItems = getCachedAllItems(sqliteClient);
 
     // Find items with matching domain and username
     const normalizedDomain = message.domain.toLowerCase();
@@ -1834,6 +1871,7 @@ export async function handleSaveLoginCredential(
 
     // Add the item to the vault
     await sqliteClient.items.create(newItem, [], []);
+    invalidateCachedAllItems();
 
     // Persist locally and sync in the background (doesn't block when server is offline).
     await persistLocalVaultMutation(sqliteClient, encryptionKey);
@@ -1902,6 +1940,7 @@ export async function handleAddUrlToCredential(message: { itemId: string; url: s
 
     // Update the item in the vault
     await sqliteClient.items.update(item, [], [], [], []);
+    invalidateCachedAllItems();
 
     // Persist locally and sync in the background (doesn't block when server is offline).
     await persistLocalVaultMutation(sqliteClient, encryptionKey);
@@ -2038,7 +2077,7 @@ export async function handleGetItemsWithTotp(
 
   try {
     const sqliteClient = await createVaultSqliteClient();
-    const allItems = sqliteClient.items.getAll();
+    const allItems = getCachedAllItems(sqliteClient);
 
     // Filter to only items with TOTP codes
     const itemsWithTotp = allItems.filter((item: Item) => item.HasTotp === true);
@@ -2074,7 +2113,7 @@ export async function handleSearchItemsWithTotp(
 
   try {
     const sqliteClient = await createVaultSqliteClient();
-    const allItems = sqliteClient.items.getAll();
+    const allItems = getCachedAllItems(sqliteClient);
 
     // Filter to only items with TOTP codes
     const itemsWithTotp = allItems.filter((item: Item) => item.HasTotp === true);
