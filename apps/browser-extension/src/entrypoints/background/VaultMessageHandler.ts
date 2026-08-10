@@ -137,7 +137,6 @@ try {
  * Check if the user is logged in and if the vault is locked, and also check for pending migrations.
  */
 export async function handleCheckAuthStatus(options?: { skipMigrationCheck?: boolean }) : Promise<{ isLoggedIn: boolean, isVaultLocked: boolean, hasPendingMigrations: boolean, error?: string }> {
-  const ts = Date.now();
   const username = await storage.getItem('local:username');
   const accessToken = await storage.getItem('local:accessToken');
   const vaultData = await storage.getItem('local:encryptedVault');
@@ -145,8 +144,6 @@ export async function handleCheckAuthStatus(options?: { skipMigrationCheck?: boo
 
   const isLoggedIn = username !== null && accessToken !== null;
   const isVaultLocked = isLoggedIn && (vaultData === null || encryptionKey === null);
-
-  console.info('[AV-PERF] CHECK_AUTH_STATUS ' + (Date.now() - ts) + 'ms locked=' + isVaultLocked + ' skipMig=' + (options?.skipMigrationCheck ?? false));
 
   // If vault is locked, we can't check for pending migrations
   if (isVaultLocked) {
@@ -571,7 +568,6 @@ function filterItemsBySearchTerm(items: Item[], searchTerm: string): Item[] {
 export async function handleGetFilteredItems(
   message: { currentUrl: string, pageTitle: string, matchingMode?: string, includeRecentlySelected?: boolean }
 ) : Promise<messageItemsResponse> {
-  const ts = Date.now();
   const encryptionKey = await handleGetEncryptionKey();
 
   if (!encryptionKey) {
@@ -580,22 +576,15 @@ export async function handleGetFilteredItems(
 
   try {
     const sqliteClient = await createVaultSqliteClient();
-    const tAfterSqlite = Date.now();
     const allItems = getCachedAllItems(sqliteClient);
-    const tAfterGetAll = Date.now();
     const filteredItems = await filterItemsByUrl(allItems, message.currentUrl, message.pageTitle, message.matchingMode);
-    const tAfterFilter = Date.now();
 
     if (message.includeRecentlySelected) {
       const rootDomain = await extractRootDomainFromUrl(message.currentUrl);
-      const tRoot = Date.now();
       const prioritized = await prioritizeRecentlySelectedItem(filteredItems, rootDomain, allItems);
-      const tPrio = Date.now();
-      console.info('[AV-PERF] GET_FILTERED_ITEMS total=' + (Date.now() - ts) + 'ms sqlite=' + (tAfterSqlite-ts) + 'ms getAll=' + (tAfterGetAll-tAfterSqlite) + 'ms filter=' + (tAfterFilter-tAfterGetAll) + 'ms rootDomain=' + (tRoot-tAfterFilter) + 'ms prio=' + (tPrio-tRoot) + 'ms cache=' + (cachedSqliteClient ? 'HIT' : 'MISS'));
       return { success: true, items: prioritized.items, recentlySelectedId: prioritized.recentlySelectedId };
     }
 
-    console.info('[AV-PERF] GET_FILTERED_ITEMS total=' + (Date.now() - ts) + 'ms sqlite=' + (tAfterSqlite-ts) + 'ms getAll=' + (tAfterGetAll-tAfterSqlite) + 'ms filter=' + (tAfterFilter-tAfterGetAll) + 'ms cache=' + (cachedSqliteClient ? 'HIT' : 'MISS'));
     return { success: true, items: filteredItems };
   } catch (error) {
     console.error('Error getting filtered items:', error);
@@ -1079,7 +1068,12 @@ export async function createVaultSqliteClient() : Promise<SqliteClient> {
  */
 export async function prewarmVaultCache() : Promise<void> {
   try {
-    await createVaultSqliteClient();
+    const client = await createVaultSqliteClient();
+    /*
+     * Also warm the items cache so the first user click doesn't pay the
+     * expensive sql.js getAll() cost (3-8 seconds on some machines).
+     */
+    getCachedAllItems(client);
   } catch {
     // Vault locked or missing: nothing to warm.
   }
