@@ -5,12 +5,13 @@ function downloadFileFromStream(fileName, contentStreamReference) {
     const anchorElement = document.createElement('a');
     anchorElement.href = url;
     anchorElement.download = fileName ?? '';
+    anchorElement.style.display = 'none';
     document.body.appendChild(anchorElement);
     anchorElement.click();
     anchorElement.remove();
-    // Defer revocation: some browsers (Firefox, Safari, and Chrome with large blobs)
-    // need the object URL to remain valid after click() returns, because the download
-    // is queued asynchronously. Revoking immediately causes a silent download failure.
+    // Defer revocation: browsers queue downloads asynchronously — the blob URL
+    // must remain valid after click() returns. Revoking immediately can cause
+    // silent download failures on large files.
     setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 

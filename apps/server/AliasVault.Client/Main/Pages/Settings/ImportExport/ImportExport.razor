@@ -384,14 +384,44 @@
     {
         var context = await DbService.GetDbContextAsync();
 
-        // Load all vault entities with their related data
+        // Split into separate queries instead of one giant Include() join.
+        // The original single query with 4 Include()s caused cartesian explosion
+        // in sql.js WASM (256MB heap limit), triggering SQLite Error 7 'out of memory'.
+        // Separate queries are O(n) instead of O(n*m) rows.
+
+        // 1. Load items WITHOUT related data first
         var items = await context.Items
             .Where(i => !i.IsDeleted && i.DeletedAt == null)
-            .Include(i => i.FieldValues)
-            .Include(i => i.Attachments)
-            .Include(i => i.TotpCodes)
-            .Include(i => i.Passkeys)
             .ToListAsync();
+
+        // 2. Load related data in separate queries
+        var itemIds = items.Select(i => i.Id).ToList();
+
+        var fieldValues = await context.FieldValues
+            .Where(fv => itemIds.Contains(fv.ItemId))
+            .ToListAsync();
+
+        var attachments = await context.Attachments
+            .Where(a => itemIds.Contains(a.ItemId))
+            .ToListAsync();
+
+        var totpCodes = await context.TotpCodes
+            .Where(t => itemIds.Contains(t.ItemId))
+            .ToListAsync();
+
+        var passkeys = await context.Passkeys
+            .Where(p => itemIds.Contains(p.ItemId))
+            .ToListAsync();
+
+        // 3. Attach related data to items (EF change tracker auto-wires navigation properties
+        //    when all entities are from the same context and FKs match)
+        foreach (var item in items)
+        {
+            item.FieldValues = fieldValues.Where(fv => fv.ItemId == item.Id).ToList();
+            item.Attachments = attachments.Where(a => a.ItemId == item.Id).ToList();
+            item.TotpCodes = totpCodes.Where(t => t.ItemId == item.Id).ToList();
+            item.Passkeys = passkeys.Where(p => p.ItemId == item.Id).ToList();
+        }
 
         var folders = await context.Folders
             .Where(f => !f.IsDeleted)
