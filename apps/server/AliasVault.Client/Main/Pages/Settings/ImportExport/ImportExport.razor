@@ -300,6 +300,7 @@
 
     private async Task ExportVaultCsv()
     {
+        GlobalLoadingSpinner.Show(Localizer["ExportingVaultMessage"]);
         try
         {
             var items = await ItemService.LoadAllAsync();
@@ -317,7 +318,14 @@
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Error downloading file");
+            Logger.LogError(ex, "Error exporting vault to CSV format");
+            GlobalNotificationService.AddErrorMessage(
+                SharedLocalizer["ErrorGeneric"],
+                true);
+        }
+        finally
+        {
+            GlobalLoadingSpinner.Hide();
         }
     }
 
