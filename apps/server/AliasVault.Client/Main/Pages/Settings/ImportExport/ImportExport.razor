@@ -300,9 +300,20 @@
 
     private async Task ExportVaultCsv()
     {
+        GlobalLoadingSpinner.Show(Localizer["ExportingVaultMessage"]);
         try
         {
-            var items = await ItemService.LoadAllAsync();
+            // Load items without Attachments — CSV export doesn't use attachment blobs,
+            // and loading them causes SQLite OOM in WASM (256MB heap).
+            var context = await DbService.GetDbContextAsync();
+            var items = await context.Items
+                .Where(i => !i.IsDeleted && i.DeletedAt == null)
+                .Include(i => i.FieldValues.Where(fv => !fv.IsDeleted))
+                    .ThenInclude(fv => fv.FieldDefinition)
+                .Include(i => i.TotpCodes.Where(t => !t.IsDeleted))
+                .Include(i => i.Passkeys.Where(p => !p.IsDeleted))
+                .AsSplitQuery()
+                .ToListAsync();
 
             var csvBytes = ItemCsvService.ExportItemsToCsv(items);
 
@@ -317,7 +328,14 @@
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Error downloading file");
+            Logger.LogError(ex, "Error exporting vault to CSV format");
+            GlobalNotificationService.AddErrorMessage(
+                SharedLocalizer["ErrorGeneric"],
+                true);
+        }
+        finally
+        {
+            GlobalLoadingSpinner.Hide();
         }
     }
 
@@ -376,14 +394,49 @@
     {
         var context = await DbService.GetDbContextAsync();
 
-        // Load all vault entities with their related data
+        // Split into separate queries instead of one giant Include() join.
+        // The original single query with 4 Include()s caused cartesian explosion
+        // in sql.js WASM (256MB heap limit), triggering SQLite Error 7 'out of memory'.
+        // Attachments (Blob column) are loaded separately per-item to avoid loading
+        // all binary blobs into the WASM heap at once.
+
+        // 1. Load items WITHOUT related data first
         var items = await context.Items
             .Where(i => !i.IsDeleted && i.DeletedAt == null)
-            .Include(i => i.FieldValues)
-            .Include(i => i.Attachments)
-            .Include(i => i.TotpCodes)
-            .Include(i => i.Passkeys)
             .ToListAsync();
+
+        // 2. Load related data in separate queries (excluding Attachments - loaded per-item below)
+        var itemIds = items.Select(i => i.Id).ToList();
+
+        var fieldValues = await context.FieldValues
+            .Where(fv => itemIds.Contains(fv.ItemId))
+            .ToListAsync();
+
+        var totpCodes = await context.TotpCodes
+            .Where(t => itemIds.Contains(t.ItemId))
+            .ToListAsync();
+
+        var passkeys = await context.Passkeys
+            .Where(p => itemIds.Contains(p.ItemId))
+            .ToListAsync();
+
+        // 3. Attach non-blob related data to items
+        foreach (var item in items)
+        {
+            item.FieldValues = fieldValues.Where(fv => fv.ItemId == item.Id).ToList();
+            item.TotpCodes = totpCodes.Where(t => t.ItemId == item.Id).ToList();
+            item.Passkeys = passkeys.Where(p => p.ItemId == item.Id).ToList();
+        }
+
+        // 4. Load attachments one item at a time to avoid OOM from loading all blobs at once.
+        //    Each attachment.Blob can be several MB; loading all into the WASM heap simultaneously
+        //    exhausts the 256MB limit. Loading per-item keeps peak memory bounded.
+        foreach (var item in items)
+        {
+            item.Attachments = await context.Attachments
+                .Where(a => a.ItemId == item.Id)
+                .ToListAsync();
+        }
 
         var folders = await context.Folders
             .Where(f => !f.IsDeleted)

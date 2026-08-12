@@ -5,9 +5,14 @@ function downloadFileFromStream(fileName, contentStreamReference) {
     const anchorElement = document.createElement('a');
     anchorElement.href = url;
     anchorElement.download = fileName ?? '';
+    anchorElement.style.display = 'none';
+    document.body.appendChild(anchorElement);
     anchorElement.click();
     anchorElement.remove();
-    URL.revokeObjectURL(url);
+    // Defer revocation: browsers queue downloads asynchronously — the blob URL
+    // must remain valid after click() returns. Revoking immediately can cause
+    // silent download failures on large files.
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
 window.topMenuClickOutsideHandler = (dotNetHelper) => {
