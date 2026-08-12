@@ -9,13 +9,14 @@ import { handleGetWebAuthnSettings, handleWebAuthnCreate, handleWebAuthnGet, han
 import { handleOpenPopup, handlePopupWithItem, handleOpenPopupCreateCredential, handleToggleContextMenu } from '@/entrypoints/background/PopupMessageHandler';
 import { handleStoreSavePromptState, handleGetSavePromptState, handleClearSavePromptState, handleStoreLastAutofilled, handleGetLastAutofilled, handleClearLastAutofilled } from '@/entrypoints/background/SavePromptStateHandler';
 import { handleStoreTwoFactorState, handleGetTwoFactorState, handleClearTwoFactorState } from '@/entrypoints/background/TwoFactorStateHandler';
-import { handleCheckAuthStatus, handleClearPersistedFormValues, handleClearSession, handleClearVaultData, handleLockVault, handleGetFilteredItems, handleGetSearchItems, handleGetDefaultEmailDomain, handleGetDefaultIdentitySettings, handleGetEncryptionKey, handleGetEncryptionKeyDerivationParams, handleGetPasswordSettings, handleGeneratePassword, handleGetPersistedFormValues, handleGetVault, handlePersistFormValues, handleStoreEncryptionKey, handleStoreEncryptionKeyDerivationParams, handleStoreVaultMetadata, handleSyncVault, handleUploadVault, handleGetEncryptedVault, handleStoreEncryptedVault, handleGetSyncState, handleMarkVaultClean, handleGetServerRevision, handleCheckSyncStatus, handleFullVaultSync, handleCheckLoginDuplicate, handleSaveLoginCredential, handleAddUrlToCredential, handleIsUrlLinkedToCredential, handleGetLoginSaveSettings, handleSetLoginSaveEnabled, handleGetItemsWithTotp, handleSearchItemsWithTotp, handleGetTotpSecrets, handleGenerateTotpCode, handleSetRecentlySelected, handleGetRecentlySelected, handleExtractRootDomain } from '@/entrypoints/background/VaultMessageHandler';
+import { handleCheckAuthStatus, handleClearPersistedFormValues, handleClearSession, handleClearVaultData, handleLockVault, handleGetFilteredItems, handleGetSearchItems, handleGetDefaultEmailDomain, handleGetDefaultIdentitySettings, handleGetEncryptionKey, handleGetEncryptionKeyDerivationParams, handleGetPasswordSettings, handleGeneratePassword, handleGetPersistedFormValues, handleGetVault, handlePersistFormValues, handleStoreEncryptionKey, handleStoreEncryptionKeyDerivationParams, handleStoreVaultMetadata, handleSyncVault, handleUploadVault, handleGetEncryptedVault, handleStoreEncryptedVault, handleGetSyncState, handleMarkVaultClean, handleGetServerRevision, handleCheckSyncStatus, handleFullVaultSync, handleCheckLoginDuplicate, handleSaveLoginCredential, handleAddUrlToCredential, handleIsUrlLinkedToCredential, handleGetLoginSaveSettings, handleSetLoginSaveEnabled, handleGetItemsWithTotp, handleSearchItemsWithTotp, handleGetTotpSecrets, handleGenerateTotpCode, handleSetRecentlySelected, handleGetRecentlySelected, handleExtractRootDomain, prewarmVaultCache } from '@/entrypoints/background/VaultMessageHandler';
 
 import { LocalPreferencesService } from '@/utils/LocalPreferencesService';
 import { onMessage, sendMessage } from "@/utils/messaging/ExtensionMessaging";
 import type { MatchingPasskeysResponse, WebAuthnAssertionResponse, WebAuthnPublicKeyGetPayload } from '@/utils/passkey/types';
 import { isRpIdAllowedForHost, validateWebAuthnRequest } from '@/utils/passkey/WebAuthnRequestValidation';
 import type { WebAuthnBridgeRequest } from '@/utils/passkey/WebAuthnRequestValidation';
+import { initRustCore } from '@/utils/RustCore';
 
 import { runStartupMigrations } from '@/migrations';
 
@@ -173,6 +174,44 @@ function handleValidatedWebAuthnGetAssertion(
  */
 browser.alarms.onAlarm.addListener(handleAutoLockAlarm);
 
+/*
+ * Keepalive port listener (top-level scope, same reason as the alarm listener above).
+ *
+ * While any content script holds an open port to this worker, Chrome will not terminate it.
+ * The content scripts open the port while the vault is unlocked (see ServiceWorkerKeepalive),
+ * so the autofill popup never has to wake a cold worker and the loading spinner never shows.
+ * The listener itself only needs to accept the connection.
+ */
+try {
+  browser.runtime.onConnect.addListener((port) => {
+    if (port.name !== 'av-keepalive') {
+      return;
+    }
+    /*
+     * Answer the content script's periodic pings. Recent Chrome releases only count active
+     * messaging as keep-alive activity, so the ping/pong round trip is what keeps this worker
+     * warm while any vault is unlocked.
+     */
+    port.onMessage.addListener((message: unknown) => {
+      if (message && (message as { type?: string }).type === 'ping') {
+        try {
+          port.postMessage({ type: 'pong' });
+        } catch {
+          // Port already gone; onDisconnect below cleans up.
+        }
+      }
+    });
+    port.onDisconnect.addListener(() => {
+      /* Nothing to clean up: the port object goes out of scope. */
+    });
+  });
+} catch {
+  /*
+   * fake-browser (wxt build/test environment) does not implement runtime.onConnect.
+   * In the real extension this always succeeds; keepalive only matters there anyway.
+   */
+}
+
 export default defineBackground({
   /**
    * This is the main entry point for the background script.
@@ -212,7 +251,7 @@ export default defineBackground({
     });
 
     // Listen for messages via @webext-core/messaging
-    onMessage('CHECK_AUTH_STATUS', () => handleCheckAuthStatus());
+    onMessage('CHECK_AUTH_STATUS', (data) => handleCheckAuthStatus(data ?? {}));
 
     onMessage('GET_ENCRYPTION_KEY', () => handleGetEncryptionKey());
     onMessage('GET_ENCRYPTION_KEY_DERIVATION_PARAMS', () => handleGetEncryptionKeyDerivationParams());
@@ -339,6 +378,28 @@ export default defineBackground({
         await runStartupMigrations();
       } catch (error) {
         console.error('Error running startup migrations:', error);
+      }
+
+      try {
+        /*
+         * Pre-warm the Rust core WASM module. URL matching for the autofill popup runs through
+         * it; without this the first popup after a worker wake pays the ~1MB wasm load.
+         * Fire-and-forget: initRustCore is idempotent and failures fall back to lazy init.
+         */
+        void initRustCore().catch(error => {
+          console.error('Error pre-warming Rust core:', error);
+        });
+
+        /*
+         * Pre-decrypt the vault and warm the sqlite cache so the first autofill popup after a
+         * service worker wake (Chrome kills MV3 workers after ~30s idle) does not pay the
+         * decrypt + sqlite init cost while the user stares at the loading spinner. Must run
+         * after the migrations above: the cached database has to be in the latest schema.
+         * No-op when the vault is locked.
+         */
+        await prewarmVaultCache();
+      } catch (error) {
+        console.error('Error pre-warming vault cache:', error);
       }
 
       try {

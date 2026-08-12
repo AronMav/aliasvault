@@ -133,19 +133,36 @@ function isClickInsidePopupUi(event: MouseEvent, popup: Element, input: HTMLInpu
 }
 
 /**
+ * Grace period before the loading spinner becomes visible. When the background worker is warm,
+ * items arrive within a few dozen milliseconds and the spinner never flashes at all; when the
+ * worker has to wake up, the spinner appears after this delay exactly as before.
+ */
+const SPINNER_GRACE_PERIOD_MS = 250;
+
+/**
  * Open (or refresh) the autofill popup including check if vault is locked.
  * @param input - The input element that triggered the popup
  * @param container - The container element
  * @param forceShow - If true, always show the popup even if dismissed (for manual icon clicks)
  */
 export function openAutofillPopup(input: HTMLInputElement, container: HTMLElement, forceShow: boolean = false) : void {
-  createLoadingPopup(input, '', container);
+  const loadingPopup = createLoadingPopup(input, '', container);
+
+  /*
+   * Hide the spinner during the grace period: on a warm worker the response arrives before
+   * this timer fires, so the user sees the credential list without any spinner flash.
+   */
+  loadingPopup.style.visibility = 'hidden';
+  const spinnerTimer = setTimeout(() => {
+    loadingPopup.style.visibility = 'visible';
+  }, SPINNER_GRACE_PERIOD_MS);
 
   /**
    * Handle the Enter key.
    */
   const handleEnterKey = (e: KeyboardEvent) : void => {
     if (e.key === 'Enter') {
+      clearTimeout(spinnerTimer);
       removeExistingPopup(container);
       // Remove the event listener to clean up
       document.body.removeEventListener('keydown', handleEnterKey);
@@ -157,6 +174,7 @@ export function openAutofillPopup(input: HTMLInputElement, container: HTMLElemen
   (async () : Promise<void> => {
     const currentUrl = getCurrentAutofillFrameUrl();
     if (!currentUrl) {
+      clearTimeout(spinnerTimer);
       removeExistingPopup(container);
       document.removeEventListener('keydown', handleEnterKey);
       return;
@@ -171,6 +189,8 @@ export function openAutofillPopup(input: HTMLInputElement, container: HTMLElemen
       matchingMode: matchingMode,
       includeRecentlySelected: true // Enable for multi-step login autofill
     });
+
+    clearTimeout(spinnerTimer);
 
     if (response.success) {
       await createAutofillPopup(input, response.items, container, response.recentlySelectedId);
@@ -198,13 +218,20 @@ export function openAutofillPopup(input: HTMLInputElement, container: HTMLElemen
  * @param forceShow - If true, always show the popup even if dismissed (for manual icon clicks)
  */
 export function openTotpPopup(input: HTMLInputElement, container: HTMLElement, forceShow: boolean = false) : void {
-  createLoadingPopup(input, '', container);
+  const loadingPopup = createLoadingPopup(input, '', container);
+
+  // Same grace period as the credential popup: hide the spinner while the worker is warm.
+  loadingPopup.style.visibility = 'hidden';
+  const spinnerTimer = setTimeout(() => {
+    loadingPopup.style.visibility = 'visible';
+  }, SPINNER_GRACE_PERIOD_MS);
 
   /**
    * Handle the Enter key.
    */
   const handleEnterKey = (e: KeyboardEvent) : void => {
     if (e.key === 'Enter') {
+      clearTimeout(spinnerTimer);
       removeExistingPopup(container);
       document.body.removeEventListener('keydown', handleEnterKey);
     }
@@ -215,6 +242,7 @@ export function openTotpPopup(input: HTMLInputElement, container: HTMLElement, f
   (async () : Promise<void> => {
     const currentUrl = getCurrentAutofillFrameUrl();
     if (!currentUrl) {
+      clearTimeout(spinnerTimer);
       removeExistingPopup(container);
       document.removeEventListener('keydown', handleEnterKey);
       return;
@@ -227,6 +255,8 @@ export function openTotpPopup(input: HTMLInputElement, container: HTMLElement, f
       pageTitle: document.title,
       matchingMode: matchingMode
     });
+
+    clearTimeout(spinnerTimer);
 
     if (response.success) {
       await createTotpPopup(input, response.items, container, response.recentlySelectedId);

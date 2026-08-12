@@ -35,7 +35,7 @@ export interface IExtensionMessageProtocol {
   ADD_URL_TO_CREDENTIAL(data: { itemId: string; url: string }): { success: boolean; error?: string }; 
   AUTOFILL_CREATED_ITEM(data: { item: any; elementIdentifier?: string }): BoolResponse;
   CANCEL_CLIPBOARD_CLEAR(): void;
-  CHECK_AUTH_STATUS(): { isLoggedIn: boolean; isVaultLocked: boolean; hasPendingMigrations: boolean; error?: string };
+  CHECK_AUTH_STATUS(data?: { skipMigrationCheck?: boolean }): { isLoggedIn: boolean, isVaultLocked: boolean, hasPendingMigrations: boolean, error?: string };
   CHECK_LOGIN_DUPLICATE(data: { domain: string; username: string }): DuplicateCheckResponse;
   CHECK_SYNC_STATUS(): SyncStatusCheckResult;
   CLEAR_LAST_AUTOFILLED(): { success: boolean };

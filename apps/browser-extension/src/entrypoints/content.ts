@@ -18,6 +18,7 @@ import { LocalPreferencesService } from '@/utils/LocalPreferencesService';
 import { LoginDetector } from '@/utils/loginDetector';
 import type { CapturedLogin } from '@/utils/loginDetector';
 import { onMessage, sendMessage } from '@/utils/messaging/ExtensionMessaging';
+import { startServiceWorkerKeepalive } from '@/utils/ServiceWorkerKeepalive';
 import { getDeepActiveElement, getDeepElementById, getDeepEventTarget } from '@/utils/ShadowDom';
 
 import { t } from '@/i18n/StandaloneI18n';
@@ -209,7 +210,7 @@ async function checkAndRestoreSavePromptEarly(ctx: Parameters<typeof createShado
 
     // Check if vault is still unlocked
     try {
-      const authStatus = await sendMessage('CHECK_AUTH_STATUS');
+      const authStatus = await sendMessage('CHECK_AUTH_STATUS', { skipMigrationCheck: true });
       if (!authStatus.isLoggedIn || authStatus.isVaultLocked) {
         return;
       }
@@ -299,7 +300,7 @@ async function checkAndRestorePersistedSavePrompt(container: HTMLElement): Promi
 
     // Check if vault is still unlocked
     try {
-      const authStatus = await sendMessage('CHECK_AUTH_STATUS');
+      const authStatus = await sendMessage('CHECK_AUTH_STATUS', { skipMigrationCheck: true });
       if (!authStatus.isLoggedIn || authStatus.isVaultLocked) {
         return;
       }
@@ -349,18 +350,17 @@ function initializeLoginDetector(container: HTMLElement): void {
   loginDetector.initialize();
 
   loginDetector.onLoginCapture(async (login: CapturedLogin) => {
-    // Check if the feature is enabled
-    if (!await isLoginSaveEnabled()) {
+    // Check if the feature is enabled AND vault is unlocked — parallel IPC
+    const [saveEnabled, authStatus] = await Promise.all([
+      isLoginSaveEnabled(),
+      sendMessage('CHECK_AUTH_STATUS', { skipMigrationCheck: true }).catch(() => null),
+    ]);
+
+    if (!saveEnabled) {
       return;
     }
 
-    // Check if vault is locked
-    try {
-      const authStatus = await sendMessage('CHECK_AUTH_STATUS');
-      if (!authStatus.isLoggedIn || authStatus.isVaultLocked) {
-        return;
-      }
-    } catch {
+    if (!authStatus || !authStatus.isLoggedIn || authStatus.isVaultLocked) {
       return;
     }
 
@@ -375,20 +375,24 @@ function initializeLoginDetector(container: HTMLElement): void {
       return;
     }
 
-    // Check if the login already exists in the vault (exact URL + username match)
-    if (await isLoginDuplicate(login.domain, login.username)) {
+    // Run duplicate check, settings fetch, and last-autofilled lookup in parallel
+    const [isDuplicate, saveSettings, lastAutofilledResponse] = await Promise.all([
+      isLoginDuplicate(login.domain, login.username),
+      sendMessage('GET_LOGIN_SAVE_SETTINGS').catch(() => null),
+      sendMessage('GET_LAST_AUTOFILLED', {
+        domain: login.domain,
+        username: login.username,
+      }).catch(() => null),
+    ]);
+
+    if (isDuplicate) {
       return;
     }
 
-    // Get auto-dismiss settings
+    // Get auto-dismiss settings (reused from parallel fetch above)
     let autoDismissMs = 15000;
-    try {
-      const settings = await sendMessage('GET_LOGIN_SAVE_SETTINGS');
-      if (settings.success) {
-        autoDismissMs = settings.autoDismissSeconds * 1000;
-      }
-    } catch {
-      // Use default
+    if (saveSettings?.success) {
+      autoDismissMs = saveSettings.autoDismissSeconds * 1000;
     }
 
     /*
@@ -396,12 +400,7 @@ function initializeLoginDetector(container: HTMLElement): void {
      * If so, offer to add the current URL to that credential instead of creating a new one.
      */
     try {
-      const lastAutofilledResponse = await sendMessage('GET_LAST_AUTOFILLED', {
-        domain: login.domain,
-        username: login.username,
-      });
-
-      if (lastAutofilledResponse.success && lastAutofilledResponse.credential) {
+      if (lastAutofilledResponse?.success && lastAutofilledResponse.credential) {
         /*
          * Skip the prompt when the submitted URL is already linked.
          */
@@ -454,6 +453,24 @@ export default defineContentScript({
 
     // Initialize WebAuthn interceptor for passkey support
     await initializeWebAuthnInterceptor(ctx);
+
+    /*
+     * Keep the background service worker warm while the vault is unlocked. Chrome MV3 kills
+     * idle workers after ~30s; without this every autofill popup click would wake the worker
+     * cold and show the loading spinner. The open port is dropped again on vault lock.
+     */
+    try {
+      startServiceWorkerKeepalive((callback) => {
+        ctx.onInvalidated(callback);
+      });
+    } catch (error) {
+      /*
+       * Keepalive is a performance optimization only: it must never break the autofill
+       * functionality itself. If it fails for any reason, fall back to the default worker
+       * lifecycle (popup still works, just pays the wake-up cost after idle timeouts).
+       */
+      console.error('[AliasVault] Failed to start service worker keepalive:', error);
+    }
 
     /*
      * Check for persisted save prompt state immediately (before the 750ms delay).
@@ -801,8 +818,11 @@ export default defineContentScript({
          */
         async function showPopupWithAuthCheck(inputElement: HTMLInputElement, container: HTMLElement, popupType: PopupType = DEFAULT_POPUP_TYPE, forceShow: boolean = false) : Promise<void> {
           try {
-            // Check auth status and pending migrations in a single call
-            const authStatus = await sendMessage('CHECK_AUTH_STATUS');
+            /*
+             * Check auth status. skipMigrationCheck avoids a full vault decrypt here — the popup
+             * path immediately follows with GET_FILTERED_ITEMS which decrypts the vault anyway.
+             */
+            const authStatus = await sendMessage('CHECK_AUTH_STATUS', { skipMigrationCheck: true });
 
             if (authStatus.isVaultLocked) {
               // Check if the user has dismissed the vault locked popup

@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import * as OTPAuth from 'otpauth';
+import { browser } from 'wxt/browser';
 import { storage } from 'wxt/utils/storage';
 
 import { TRASH_RETENTION_DAYS } from '@/utils/constants/vault';
@@ -41,8 +42,12 @@ import { t } from '@/i18n/StandaloneI18n';
  * The cached instance is the single source of truth for the in-memory vault.
  *
  * Cache Strategy:
- * - Local mutations (createCredential, etc.): Work directly on cachedSqliteClient, no cache clearing
- * - New vault from remote (login, sync): Clear cache by setting both to null
+ * - Local mutations (createCredential, etc.): Work directly on cachedSqliteClient, no cache clearing.
+ *   The persisted blob is the cached client's own export, so the cache is kept and pointed at the
+ *   new blob rather than dropped. Dropping it would make the very next read (the autofill popup
+ *   right after saving a credential) decrypt and re-initialize the whole vault again.
+ * - New vault from remote (login, sync) or from another actor (popup): Clear cache by setting
+ *   both to null
  * - Logout/clear vault: Clear cache by setting both to null
  *
  * The cache is cleared by setting cachedSqliteClient and cachedVaultBlob to null directly
@@ -50,6 +55,14 @@ import { t } from '@/i18n/StandaloneI18n';
  */
 let cachedSqliteClient: SqliteClient | null = null;
 let cachedVaultBlob: string | null = null;
+let cachedAllItems: Item[] | null = null;
+
+/**
+ * One in-flight decrypt+init, shared by concurrent callers (the startup prewarm racing the
+ * first CHECK_AUTH_STATUS / GET_FILTERED_ITEMS, several tabs waking the worker at once).
+ * Keyed by the blob being initialized: a different blob never joins the flight.
+ */
+let pendingVaultInit: { blob: string, promise: Promise<SqliteClient> } | null = null;
 
 /**
  * Global sync queue state.
@@ -59,13 +72,75 @@ let isSyncInProgress = false;
 let hasPendingSync = false;
 
 /**
+ * Cached encryption key — avoids 1-2 storage.getItem IPC calls on every handleGetEncryptionKey
+ * invocation. Cleared when the key is stored/cleared or when storage.onChanged fires for session.
+ */
+let cachedEncryptionKey: string | null | undefined = undefined;
+
+/**
+ * Get the encryption key from cache, falling back to session storage. Once read, the value is
+ * memoised so subsequent calls are synchronous from the cache perspective (no IPC round-trip).
+ */
+async function getCachedEncryptionKey(): Promise<string | null> {
+  if (cachedEncryptionKey !== undefined) {
+    return cachedEncryptionKey;
+  }
+  let key = await storage.getItem('session:encryptionKey') as string | null;
+  if (!key) {
+    key = await storage.getItem('session:derivedKey') as string | null;
+  }
+  cachedEncryptionKey = key;
+  return key;
+}
+
+/** Invalidate the cached encryption key (call when the key is stored, cleared, or changed). */
+function invalidateCachedEncryptionKey(): void {
+  cachedEncryptionKey = undefined;
+}
+
+/**
+ * Get all vault items, using a cache to avoid the expensive sql.js query on every call.
+ * The cache is valid as long as the sqlite client hasn't changed (same vault blob).
+ * On this user's machine, sqliteClient.items.getAll() takes ~7 seconds due to sql.js WASM
+ * overhead; caching reduces it to ~0ms on subsequent calls within the same worker lifecycle.
+ */
+function getCachedAllItems(sqliteClient: SqliteClient): Item[] {
+  if (cachedAllItems !== null && cachedSqliteClient === sqliteClient) {
+    return cachedAllItems;
+  }
+  const items = sqliteClient.items.getAll();
+  cachedAllItems = items;
+  return items;
+}
+
+/** Clear the cached items (call when the vault data changes). */
+function invalidateCachedAllItems(): void {
+  cachedAllItems = null;
+}
+
+/*
+ * Auto-invalidate the cached encryption key when session storage changes in any context (popup,
+ * content script, another tab). This catches lock/unlock and key rotation without requiring every
+ * call site to manually invalidate.
+ */
+try {
+  browser.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName === 'session' && ('encryptionKey' in changes || 'derivedKey' in changes)) {
+      invalidateCachedEncryptionKey();
+    }
+  });
+} catch {
+  /* fake-browser (test/build env) may not implement storage.onChanged */
+}
+
+/**
  * Check if the user is logged in and if the vault is locked, and also check for pending migrations.
  */
-export async function handleCheckAuthStatus() : Promise<{ isLoggedIn: boolean, isVaultLocked: boolean, hasPendingMigrations: boolean, error?: string }> {
+export async function handleCheckAuthStatus(options?: { skipMigrationCheck?: boolean }) : Promise<{ isLoggedIn: boolean, isVaultLocked: boolean, hasPendingMigrations: boolean, error?: string }> {
   const username = await storage.getItem('local:username');
   const accessToken = await storage.getItem('local:accessToken');
   const vaultData = await storage.getItem('local:encryptedVault');
-  const encryptionKey = await handleGetEncryptionKey();
+  const encryptionKey = await getCachedEncryptionKey();
 
   const isLoggedIn = username !== null && accessToken !== null;
   const isVaultLocked = isLoggedIn && (vaultData === null || encryptionKey === null);
@@ -81,6 +156,21 @@ export async function handleCheckAuthStatus() : Promise<{ isLoggedIn: boolean, i
 
   // If not logged in, no need to check migrations
   if (!isLoggedIn) {
+    return {
+      isLoggedIn,
+      isVaultLocked,
+      hasPendingMigrations: false
+    };
+  }
+
+  /*
+   * Skip the expensive migration check (which requires a full vault decryption) when the caller
+   * only needs to know whether the vault is locked. The autofill popup path passes
+   * skipMigrationCheck=true because it immediately follows up with GET_FILTERED_ITEMS which
+   * decrypts the vault anyway — checking migrations here would double the decrypt cost on every
+   * click. The popup UI (full-page) calls this without the flag to surface migration prompts.
+   */
+  if (options?.skipMigrationCheck) {
     return {
       isLoggedIn,
       isVaultLocked,
@@ -158,6 +248,15 @@ export async function handleStoreEncryptionKey(
 ) : Promise<messageBoolResponse> {
   try {
     await storage.setItem('session:encryptionKey', encryptionKey);
+    cachedEncryptionKey = encryptionKey;
+
+    /*
+     * Vault is now unlocked — prewarm the sqlite client and items cache in the background
+     * so the first field click is instant. This takes 3-8 seconds on some machines due to
+     * sql.js WASM overhead; running it here means the user never waits for it.
+     */
+    void prewarmVaultCache();
+
     return { success: true };
   } catch (error) {
     console.error('Failed to store encryption key:', error);
@@ -214,10 +313,29 @@ export async function handleSyncVault(
     // Clear cached client since we received a new vault blob from server
     cachedSqliteClient = null;
     cachedVaultBlob = null;
+    cachedDecryptedVault = null;
+    cachedDecryptedVaultBlob = null;
+    pendingDecrypt = null;
+    invalidateCachedAllItems();
   }
 
   return { success: true };
 }
+
+/**
+ * Cached decrypted vault blob — avoids re-decrypting on every popup open.
+ * Invalidated when the vault blob changes (sync, mutation, lock, clear).
+ */
+let cachedDecryptedVault: string | null = null;
+let cachedDecryptedVaultBlob: string | null = null;
+
+/**
+ * One in-flight symmetricDecrypt for GET_VAULT, shared with prewarmVaultCache.
+ * When prewarm starts decrypting and popup immediately calls GET_VAULT, both
+ * join the same promise instead of running two parallel decryptions (which
+ * caused popup timeout on slow machines).
+ */
+let pendingDecrypt: { blob: string, promise: Promise<string> } | null = null;
 
 /**
  * Get the vault from browser storage (local: for persistence).
@@ -246,10 +364,34 @@ export async function handleGetVault(
       return { success: false, error: formatErrorWithCode(await t('common.errors.vaultIsLocked'), AppErrorCode.VAULT_LOCKED) };
     }
 
-    const decryptedVault = await EncryptionUtility.symmetricDecrypt(
-      encryptedVault,
-      encryptionKey
-    );
+    /*
+     * Use cached decrypted vault if the encrypted blob hasn't changed.
+     * symmetricDecrypt is expensive (Web Crypto PBKDF2/AES-GCM) and the popup
+     * calls GET_VAULT on every open. Uses single-flight to join an in-flight
+     * decryption started by prewarmVaultCache() — avoids two parallel
+     * decryptions racing on cold unlock (which caused popup timeout).
+     */
+    let decryptedVault: string;
+    if (cachedDecryptedVault !== null && cachedDecryptedVaultBlob === encryptedVault) {
+      decryptedVault = cachedDecryptedVault;
+    } else if (pendingDecrypt && pendingDecrypt.blob === encryptedVault) {
+      decryptedVault = await pendingDecrypt.promise;
+    } else {
+      const decryptPromise = (async (): Promise<string> => {
+        try {
+          const result = await EncryptionUtility.symmetricDecrypt(encryptedVault, encryptionKey);
+          cachedDecryptedVault = result;
+          cachedDecryptedVaultBlob = encryptedVault;
+          return result;
+        } finally {
+          if (pendingDecrypt && pendingDecrypt.blob === encryptedVault) {
+            pendingDecrypt = null;
+          }
+        }
+      })();
+      pendingDecrypt = { blob: encryptedVault, promise: decryptPromise };
+      decryptedVault = await decryptPromise;
+    }
 
     return {
       success: true,
@@ -275,6 +417,15 @@ export async function handleLockVault(): Promise<messageBoolResponse> {
     'session:encryptionKey',
     'session:persistedFormValues',
   ]);
+
+  // Clear cached client and key since vault is now locked
+  cachedSqliteClient = null;
+  cachedVaultBlob = null;
+  cachedDecryptedVault = null;
+  cachedDecryptedVaultBlob = null;
+  pendingDecrypt = null;
+  invalidateCachedEncryptionKey();
+  invalidateCachedAllItems();
 
   return { success: true };
 }
@@ -304,6 +455,11 @@ export async function handleClearSession(): Promise<messageBoolResponse> {
   // Clear cached client since session ended
   cachedSqliteClient = null;
   cachedVaultBlob = null;
+  cachedDecryptedVault = null;
+  cachedDecryptedVaultBlob = null;
+  pendingDecrypt = null;
+  invalidateCachedEncryptionKey();
+  invalidateCachedAllItems();
 
   return { success: true };
 }
@@ -471,16 +627,14 @@ export async function handleGetFilteredItems(
   const encryptionKey = await handleGetEncryptionKey();
 
   if (!encryptionKey) {
-    // E-202: Vault is locked
     return { success: false, error: formatErrorWithCode(await t('common.errors.vaultIsLocked'), AppErrorCode.VAULT_LOCKED) };
   }
 
   try {
     const sqliteClient = await createVaultSqliteClient();
-    const allItems = sqliteClient.items.getAll();
+    const allItems = getCachedAllItems(sqliteClient);
     const filteredItems = await filterItemsByUrl(allItems, message.currentUrl, message.pageTitle, message.matchingMode);
 
-    // Prioritize recently selected item for multi-step login flows (opt-in only)
     if (message.includeRecentlySelected) {
       const rootDomain = await extractRootDomainFromUrl(message.currentUrl);
       const prioritized = await prioritizeRecentlySelectedItem(filteredItems, rootDomain, allItems);
@@ -513,7 +667,7 @@ export async function handleGetSearchItems(
 
   try {
     const sqliteClient = await createVaultSqliteClient();
-    const allItems = sqliteClient.items.getAll();
+    const allItems = getCachedAllItems(sqliteClient);
     const searchResults = filterItemsBySearchTerm(allItems, message.searchTerm);
 
     return { success: true, items: searchResults };
@@ -629,16 +783,7 @@ export async function handleGeneratePassword(
  */
 export async function handleGetEncryptionKey(
 ) : Promise<string | null> {
-  // Try the current key name first (since 0.22.0)
-  let encryptionKey = await storage.getItem('session:encryptionKey') as string | null;
-
-  // Fall back to the legacy key name if not found
-  if (!encryptionKey) {
-    // TODO: this check can be removed some period of time after 0.22.0 is released.
-    encryptionKey = await storage.getItem('session:derivedKey') as string | null;
-  }
-
-  return encryptionKey;
+  return getCachedEncryptionKey();
 }
 
 /**
@@ -799,6 +944,10 @@ async function uploadNewVaultToServer(sqliteClient: SqliteClient) : Promise<{ re
        */
       cachedSqliteClient = null;
       cachedVaultBlob = null;
+      cachedDecryptedVault = null;
+      cachedDecryptedVaultBlob = null;
+      pendingDecrypt = null;
+      invalidateCachedAllItems();
       await sqliteClient.initializeFromBase64(updatedVaultData);
     }
   } catch (pruneError) {
@@ -815,6 +964,18 @@ async function uploadNewVaultToServer(sqliteClient: SqliteClient) : Promise<{ re
   // Store in local: storage for persistence
   await storage.setItem('local:encryptedVault', encryptedVault);
 
+  /*
+   * The blob just persisted is this client's own export (pruned or not). Re-point the cache at
+   * it instead of leaving a stale reference: with the stale reference the next read would find
+   * a different blob in storage and decrypt the whole vault again, even though the in-memory
+   * client already holds exactly what was stored. After a prune the cache was cleared for the
+   * re-initialization below; refilling it here is safe for the same reason.
+   */
+  if (cachedSqliteClient === null || cachedSqliteClient === sqliteClient) {
+    cachedSqliteClient = sqliteClient;
+    cachedVaultBlob = encryptedVault;
+  }
+
   // Get server revision for API
   const serverRevision = await storage.getItem('local:serverRevision') as number | null ?? 0;
 
@@ -825,7 +986,7 @@ async function uploadNewVaultToServer(sqliteClient: SqliteClient) : Promise<{ re
   const newVault: Vault = {
     blob: encryptedVault,
     createdAt: new Date().toISOString(),
-    credentialsCount: sqliteClient.items.getAll().length,
+    credentialsCount: getCachedAllItems(sqliteClient).length,
     currentRevisionNumber: serverRevision,
     emailAddressList: emailAddresses,
     updatedAt: new Date().toISOString(),
@@ -869,9 +1030,26 @@ async function uploadNewVaultToServer(sqliteClient: SqliteClient) : Promise<{ re
  * This is tolerant to server being offline (in which case the vault state will be stored locally for next sync).
  */
 async function persistLocalVaultMutation(sqliteClient: SqliteClient, encryptionKey: string) : Promise<void> {
+  /*
+   * Remember whether this client is the cached one BEFORE awaiting: the store below clears the
+   * cache, and the blob it persists is this client's own export. When it is the cached client,
+   * the cache is re-pointed at the new blob afterwards instead of being dropped, so the next
+   * read (typically the autofill popup right after saving a credential) does not decrypt and
+   * re-initialize the whole vault again.
+   *
+   * A blob written by anything else (the popup's own SqliteClient, the server) still clears the
+   * cache, because only this instance is known to match the blob it exported.
+   */
+  const isCachedClient = sqliteClient === cachedSqliteClient;
+
   const updatedVaultData = sqliteClient.exportToBase64();
   const encryptedVault = await EncryptionUtility.symmetricEncrypt(updatedVaultData, encryptionKey);
   await handleStoreEncryptedVault({ vaultBlob: encryptedVault, markDirty: true });
+
+  if (isCachedClient) {
+    cachedSqliteClient = sqliteClient;
+    cachedVaultBlob = encryptedVault;
+  }
 
   void handleFullVaultSync().catch(error => {
     console.error('Background sync after local vault mutation failed:', error);
@@ -901,21 +1079,63 @@ export async function createVaultSqliteClient() : Promise<SqliteClient> {
     return cachedSqliteClient;
   }
 
-  // Decrypt the vault
-  const decryptedVault = await EncryptionUtility.symmetricDecrypt(
-    encryptedVault,
-    encryptionKey
-  );
+  /*
+   * Join an in-flight initialization of this exact blob instead of decrypting it twice.
+   * This happens when the startup prewarm races the first CHECK_AUTH_STATUS /
+   * GET_FILTERED_ITEMS, or when several tabs wake the worker at once.
+   */
+  if (pendingVaultInit && pendingVaultInit.blob === encryptedVault) {
+    return pendingVaultInit.promise;
+  }
 
-  // Initialize the SQLite client with the decrypted vault
-  const sqliteClient = new SqliteClient();
-  await sqliteClient.initializeFromBase64(decryptedVault);
+  const initPromise = (async (): Promise<SqliteClient> => {
+    try {
+      // Decrypt the vault
+      const decryptedVault = await EncryptionUtility.symmetricDecrypt(
+        encryptedVault,
+        encryptionKey
+      );
 
-  // Cache the client and vault blob
-  cachedSqliteClient = sqliteClient;
-  cachedVaultBlob = encryptedVault;
+      // Initialize the SQLite client with the decrypted vault
+      const sqliteClient = new SqliteClient();
+      await sqliteClient.initializeFromBase64(decryptedVault);
 
-  return sqliteClient;
+      // Cache the client and vault blob
+      cachedSqliteClient = sqliteClient;
+      cachedVaultBlob = encryptedVault;
+
+      return sqliteClient;
+    } finally {
+      if (pendingVaultInit && pendingVaultInit.blob === encryptedVault) {
+        pendingVaultInit = null;
+      }
+    }
+  })();
+
+  pendingVaultInit = { blob: encryptedVault, promise: initPromise };
+
+  return initPromise;
+}
+
+/**
+ * Pre-decrypt the stored vault and warm the sqlite client cache.
+ *
+ * Call this once when the background service worker starts (after startup migrations) so the
+ * first autofill popup after a worker wake does not pay the vault decryption and sqlite
+ * initialization cost. When the vault is locked or missing this is a no-op: there is no key
+ * to warm with and the on-demand path already reports the lock.
+ */
+export async function prewarmVaultCache() : Promise<void> {
+  try {
+    const client = await createVaultSqliteClient();
+    /*
+     * Also warm the items cache so the first user click doesn't pay the
+     * expensive sql.js getAll() cost (3-8 seconds on some machines).
+     */
+    getCachedAllItems(client);
+  } catch {
+    // Vault locked or missing: nothing to warm.
+  }
 }
 
 /**
@@ -987,6 +1207,10 @@ export async function handleStoreEncryptedVault(request: {
   // Clear cache since vault blob changed
   cachedSqliteClient = null;
   cachedVaultBlob = null;
+  cachedDecryptedVault = null;
+  cachedDecryptedVaultBlob = null;
+  pendingDecrypt = null;
+  invalidateCachedAllItems();
 
   return { success: true, mutationSequence };
 }
@@ -1545,7 +1769,7 @@ export async function handleCheckLoginDuplicate(
 
   try {
     const sqliteClient = await createVaultSqliteClient();
-    const allItems = sqliteClient.items.getAll();
+    const allItems = getCachedAllItems(sqliteClient);
 
     // Find items with matching domain and username
     const normalizedDomain = message.domain.toLowerCase();
@@ -1703,6 +1927,7 @@ export async function handleSaveLoginCredential(
 
     // Add the item to the vault
     await sqliteClient.items.create(newItem, [], []);
+    invalidateCachedAllItems();
 
     // Persist locally and sync in the background (doesn't block when server is offline).
     await persistLocalVaultMutation(sqliteClient, encryptionKey);
@@ -1771,6 +1996,7 @@ export async function handleAddUrlToCredential(message: { itemId: string; url: s
 
     // Update the item in the vault
     await sqliteClient.items.update(item, [], [], [], []);
+    invalidateCachedAllItems();
 
     // Persist locally and sync in the background (doesn't block when server is offline).
     await persistLocalVaultMutation(sqliteClient, encryptionKey);
@@ -1907,7 +2133,7 @@ export async function handleGetItemsWithTotp(
 
   try {
     const sqliteClient = await createVaultSqliteClient();
-    const allItems = sqliteClient.items.getAll();
+    const allItems = getCachedAllItems(sqliteClient);
 
     // Filter to only items with TOTP codes
     const itemsWithTotp = allItems.filter((item: Item) => item.HasTotp === true);
@@ -1943,7 +2169,7 @@ export async function handleSearchItemsWithTotp(
 
   try {
     const sqliteClient = await createVaultSqliteClient();
-    const allItems = sqliteClient.items.getAll();
+    const allItems = getCachedAllItems(sqliteClient);
 
     // Filter to only items with TOTP codes
     const itemsWithTotp = allItems.filter((item: Item) => item.HasTotp === true);
