@@ -315,6 +315,7 @@ export async function handleSyncVault(
     cachedVaultBlob = null;
     cachedDecryptedVault = null;
     cachedDecryptedVaultBlob = null;
+    pendingDecrypt = null;
     invalidateCachedAllItems();
   }
 
@@ -327,6 +328,14 @@ export async function handleSyncVault(
  */
 let cachedDecryptedVault: string | null = null;
 let cachedDecryptedVaultBlob: string | null = null;
+
+/**
+ * One in-flight symmetricDecrypt for GET_VAULT, shared with prewarmVaultCache.
+ * When prewarm starts decrypting and popup immediately calls GET_VAULT, both
+ * join the same promise instead of running two parallel decryptions (which
+ * caused popup timeout on slow machines).
+ */
+let pendingDecrypt: { blob: string, promise: Promise<string> } | null = null;
 
 /**
  * Get the vault from browser storage (local: for persistence).
@@ -358,18 +367,30 @@ export async function handleGetVault(
     /*
      * Use cached decrypted vault if the encrypted blob hasn't changed.
      * symmetricDecrypt is expensive (Web Crypto PBKDF2/AES-GCM) and the popup
-     * calls GET_VAULT on every open.
+     * calls GET_VAULT on every open. Uses single-flight to join an in-flight
+     * decryption started by prewarmVaultCache() — avoids two parallel
+     * decryptions racing on cold unlock (which caused popup timeout).
      */
     let decryptedVault: string;
     if (cachedDecryptedVault !== null && cachedDecryptedVaultBlob === encryptedVault) {
       decryptedVault = cachedDecryptedVault;
+    } else if (pendingDecrypt && pendingDecrypt.blob === encryptedVault) {
+      decryptedVault = await pendingDecrypt.promise;
     } else {
-      decryptedVault = await EncryptionUtility.symmetricDecrypt(
-        encryptedVault,
-        encryptionKey
-      );
-      cachedDecryptedVault = decryptedVault;
-      cachedDecryptedVaultBlob = encryptedVault;
+      const decryptPromise = (async (): Promise<string> => {
+        try {
+          const result = await EncryptionUtility.symmetricDecrypt(encryptedVault, encryptionKey);
+          cachedDecryptedVault = result;
+          cachedDecryptedVaultBlob = encryptedVault;
+          return result;
+        } finally {
+          if (pendingDecrypt && pendingDecrypt.blob === encryptedVault) {
+            pendingDecrypt = null;
+          }
+        }
+      })();
+      pendingDecrypt = { blob: encryptedVault, promise: decryptPromise };
+      decryptedVault = await decryptPromise;
     }
 
     return {
@@ -402,6 +423,7 @@ export async function handleLockVault(): Promise<messageBoolResponse> {
   cachedVaultBlob = null;
   cachedDecryptedVault = null;
   cachedDecryptedVaultBlob = null;
+  pendingDecrypt = null;
   invalidateCachedEncryptionKey();
   invalidateCachedAllItems();
 
@@ -435,6 +457,7 @@ export async function handleClearSession(): Promise<messageBoolResponse> {
   cachedVaultBlob = null;
   cachedDecryptedVault = null;
   cachedDecryptedVaultBlob = null;
+  pendingDecrypt = null;
   invalidateCachedEncryptionKey();
   invalidateCachedAllItems();
 
@@ -923,6 +946,7 @@ async function uploadNewVaultToServer(sqliteClient: SqliteClient) : Promise<{ re
       cachedVaultBlob = null;
       cachedDecryptedVault = null;
       cachedDecryptedVaultBlob = null;
+      pendingDecrypt = null;
       invalidateCachedAllItems();
       await sqliteClient.initializeFromBase64(updatedVaultData);
     }
@@ -1185,6 +1209,7 @@ export async function handleStoreEncryptedVault(request: {
   cachedVaultBlob = null;
   cachedDecryptedVault = null;
   cachedDecryptedVaultBlob = null;
+  pendingDecrypt = null;
   invalidateCachedAllItems();
 
   return { success: true, mutationSequence };
