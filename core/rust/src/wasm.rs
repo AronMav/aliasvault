@@ -32,6 +32,36 @@ pub fn get_core_version_js() -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Argon2id WASM Bindings
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Derive a key from a password using Argon2id.
+///
+/// Exposed to the browser clients because a managed Argon2 implementation running on the
+/// WebAssembly runtime costs seconds per derivation, which is paid on every unlock and login.
+///
+/// # Arguments
+/// * `password` - The password to derive from
+/// * `salt` - Salt as a string (UTF-8 encoded, minimum 8 bytes)
+/// * `memory_kib` - Memory cost in KiB, as recorded against the vault
+/// * `iterations` - Iteration count, as recorded against the vault
+/// * `parallelism` - Degree of parallelism, as recorded against the vault
+///
+/// # Returns
+/// Derived key as an uppercase hex string (64 characters = 32 bytes)
+#[wasm_bindgen(js_name = argon2DeriveKey)]
+pub fn argon2_derive_key_js(
+    password: &str,
+    salt: &str,
+    memory_kib: u32,
+    iterations: u32,
+    parallelism: u32,
+) -> Result<String, JsValue> {
+    crate::argon2::argon2_derive_key(password, salt, memory_kib, iterations, parallelism)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Vault Merge WASM Bindings
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -374,4 +404,53 @@ pub fn srp_verify_session_wasm(
 ) -> Result<bool, JsValue> {
     crate::srp::srp_verify_session(client_public, client_proof, session_key, server_proof)
         .map_err(|e| JsValue::from_str(&format!("SRP error: {}", e)))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// KDBX Import WASM Bindings
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Opens a KDBX database and returns the mapped items as JSON.
+///
+/// Errors are thrown rather than encoded into the result: the caller has to be
+/// able to tell a wrong password from a successful parse.
+///
+/// # Arguments
+/// * `file_bytes` - The raw .kdbx file contents
+/// * `password` - The master password
+///
+/// # Returns
+/// JSON string containing KdbxImportResult
+#[cfg(feature = "kdbx")]
+#[wasm_bindgen(js_name = kdbxOpen)]
+pub fn kdbx_open_js(file_bytes: &[u8], password: &str) -> Result<String, JsValue> {
+    let result = crate::kdbx::open_session(file_bytes, password)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    serde_json::to_string(&result)
+        .map_err(|e| JsValue::from_str(&format!("Failed to serialize result: {}", e)))
+}
+
+/// Hands out one attachment blob and releases it from the session.
+///
+/// # Arguments
+/// * `session_id` - Session returned by kdbxOpen
+/// * `attachment_id` - Attachment id from the item metadata
+///
+/// # Returns
+/// The blob, or undefined when it was already taken or is unknown
+#[cfg(feature = "kdbx")]
+#[wasm_bindgen(js_name = kdbxTakeAttachment)]
+pub fn kdbx_take_attachment_js(session_id: &str, attachment_id: &str) -> Option<Vec<u8>> {
+    crate::kdbx::take_attachment(session_id, attachment_id)
+}
+
+/// Drops a session and every blob it still holds.
+///
+/// # Arguments
+/// * `session_id` - Session returned by kdbxOpen
+#[cfg(feature = "kdbx")]
+#[wasm_bindgen(js_name = kdbxClose)]
+pub fn kdbx_close_js(session_id: &str) {
+    crate::kdbx::close_session(session_id);
 }

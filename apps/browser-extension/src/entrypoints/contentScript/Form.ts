@@ -282,7 +282,7 @@ export function injectIcon(input: HTMLInputElement, container: HTMLElement, fiel
     e.stopPropagation();
 
     // Validate the click for security
-    if (!await clickValidator.validateClick(e)) {
+    if (!await clickValidator.validateUserClick(e)) {
       console.warn('[AliasVault Security] Blocked autofill popup opening due to security validation failure');
       return;
     }

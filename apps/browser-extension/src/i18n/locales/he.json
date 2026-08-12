@@ -142,7 +142,13 @@
       "USERNAME_INVALID_CHARACTERS": "שם המשתמש שגוי, יכול להכיל רק תווים או ספרות.",
       "VAULT_NOT_UP_TO_DATE": "הכספת שלך אינה עדכנית. נא לסנכרן את הכספת שלך ולנסות שוב.",
       "INTERNAL_SERVER_ERROR": "שגיאת שרת פנימית.",
-      "VAULT_ERROR": "הכספת המקומית אינה עדכנית. נא לסנכרן את הכספת שלך על ידי ריענון העמוד ולנסות שוב."
+      "VAULT_ERROR": "הכספת המקומית אינה עדכנית. נא לסנכרן את הכספת שלך על ידי ריענון העמוד ולנסות שוב.",
+      "AUTH_RATE_LIMIT_EXCEEDED": "יותר מדי ניסיונות מהרשת שלך. נא להמתין כמה דקות ולנסות שוב.",
+      "MOBILE_LOGIN_REQUEST_NOT_FOUND": "בקשת ההתחברות הזו כבר לא קיימת. ייתכן שפג תוקפה. נא להתחיל בקשה חדשה ולנסות שוב.",
+      "MOBILE_LOGIN_INVALID_PUBLIC_KEY": "לא ניתן היה להתחיל את בקשת ההתחברות הזו. נא לעדכן לגרסה האחרונה ולנסות שוב.",
+      "REGISTRATION_RATE_LIMIT_EXCEEDED": "נוצרו יותר מדי חשבונות מהרשת שלך. נא להמתין זמן מה ולנסות שוב.",
+      "REGISTRATION_FAILED": "Could not create the account. Please try again in a few minutes. If this problem persists, please contact support.",
+      "UNSUPPORTED_ENCRYPTION_SETTINGS": "השרת אינו מקבל את הגדרות ההצפנה שגרסה זו משתמשת בהן. נא לעדכן לגרסה האחרונה ולנסות שוב."
     }
   },
   "content": {

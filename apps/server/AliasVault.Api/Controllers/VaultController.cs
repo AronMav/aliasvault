@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------
 // <copyright file="VaultController.cs" company="aliasvault">
 // Copyright (c) aliasvault. All rights reserved.
 // Licensed under the AGPLv3 license. See LICENSE.md file in the project root for full license information.
@@ -10,6 +10,7 @@ namespace AliasVault.Api.Controllers;
 using System.ComponentModel.DataAnnotations;
 using AliasServerDb;
 using AliasVault.Api.Controllers.Abstracts;
+using AliasVault.Api.Headers;
 using AliasVault.Api.Helpers;
 using AliasVault.Api.Services;
 using AliasVault.Api.Vault;
@@ -43,6 +44,16 @@ using Microsoft.Extensions.Caching.Memory;
 [ApiVersion("1")]
 public class VaultController(ILogger<VaultController> logger, IAliasServerDbContextFactory dbContextFactory, UserManager<AliasVaultUser> userManager, ITimeProvider timeProvider, AuthLoggingService authLoggingService, IMemoryCache cache, Config config, RateLimitService rateLimitService) : AuthenticatedRequestController(userManager)
 {
+    /// <summary>
+    /// Client name the Blazor web app identifies itself with, as set in its Program.cs.
+    /// </summary>
+    /// <remarks>
+    /// Only needed to tell which key derivation parameters a client that predates the explicit fields
+    /// on the password change request would have used. Every current client sends those fields, so this
+    /// stops being consulted once no pre-upgrade web app is still cached in someone's browser.
+    /// </remarks>
+    private const string LegacyWebClientName = "web";
+
     /// <summary>
     /// Default retention policy for vaults.
     /// </summary>
@@ -87,6 +98,7 @@ public class VaultController(ILogger<VaultController> logger, IAliasServerDbCont
             return Ok(new Shared.Models.WebApi.Vault.VaultGetResponse
             {
                 Status = VaultStatus.Ok,
+                MaxUploadSizeMb = UploadLimits.MaxUploadSizeMb,
                 Vault = new Shared.Models.WebApi.Vault.Vault
                 {
                     Username = user.UserName!,
@@ -111,6 +123,7 @@ public class VaultController(ILogger<VaultController> logger, IAliasServerDbCont
         return Ok(new Shared.Models.WebApi.Vault.VaultGetResponse
         {
             Status = VaultStatus.Ok,
+            MaxUploadSizeMb = UploadLimits.MaxUploadSizeMb,
             Vault = new Shared.Models.WebApi.Vault.Vault
             {
                 Username = user.UserName!,
@@ -262,7 +275,7 @@ public class VaultController(ILogger<VaultController> logger, IAliasServerDbCont
         var latestVault = await context.Vaults
             .Where(x => x.UserId == user.Id)
             .OrderByDescending(x => x.RevisionNumber)
-            .Select(x => new { x.RevisionNumber, x.Version })
+            .Select(x => new { x.RevisionNumber, x.Version, x.EncryptionType, x.EncryptionSettings })
             .FirstAsync();
         if (VersionHelper.IsVersionOlder(model.Version, latestVault.Version))
         {
@@ -279,6 +292,33 @@ public class VaultController(ILogger<VaultController> logger, IAliasServerDbCont
             return Ok(new VaultUpdateResponse { Status = VaultStatus.Outdated, NewRevisionNumber = latestVault.RevisionNumber });
         }
 
+        // Record the key derivation parameters the client actually derived the new verifier with.
+        // These are handed back to every client at the next login and are the only parameters the
+        // new vault can be opened under, so storing anything else here locks the user out of it.
+        //
+        // A client that sends nothing predates the fields, and what it derived with then depends on
+        // which client it is. The mobile app read the parameters out of the password change response,
+        // so it used the ones the vault already holds. The web client of that era passed no parameters
+        // to its key derivation at all, so it used the build's own defaults, which are not the vault's
+        // whenever the account was registered elsewhere or under a deployment override. Recording the
+        // wrong one of the two produces a vault whose stored parameters do not match the key it was
+        // encrypted with, and nothing can open it again -- so pick by which client is asking.
+        var isLegacyWebClient = ClientHeaderInfo.Parse(clientHeader).ClientName == LegacyWebClientName;
+        var carriedEncryptionType = isLegacyWebClient ? Defaults.EncryptionType : latestVault.EncryptionType;
+        var carriedEncryptionSettings = isLegacyWebClient ? Defaults.EncryptionSettings : latestVault.EncryptionSettings;
+
+        var newEncryptionType = model.NewPasswordEncryptionType ?? carriedEncryptionType;
+        var newEncryptionSettings = model.NewPasswordEncryptionSettings ?? carriedEncryptionSettings;
+        if (model.NewPasswordEncryptionType is not null || model.NewPasswordEncryptionSettings is not null)
+        {
+            // Reject rather than fall back: the client has already derived its key, so quietly
+            // substituting different parameters would produce a vault it cannot open again.
+            if (!EncryptionSettingsPolicy.IsAcceptable(newEncryptionType, newEncryptionSettings, latestVault.EncryptionSettings))
+            {
+                return BadRequest(ApiErrorCodeHelper.CreateValidationErrorResponse(ApiErrorCode.UNSUPPORTED_ENCRYPTION_SETTINGS, 400));
+            }
+        }
+
         // Create new vault entry with salt and verifier of current vault.
         var newVault = new AliasServerDb.Vault
         {
@@ -291,8 +331,8 @@ public class VaultController(ILogger<VaultController> logger, IAliasServerDbCont
             FileSize = FileHelper.Base64StringToKilobytes(model.Blob),
             Salt = model.NewPasswordSalt,
             Verifier = model.NewPasswordVerifier,
-            EncryptionType = Defaults.EncryptionType,
-            EncryptionSettings = Defaults.EncryptionSettings,
+            EncryptionType = newEncryptionType,
+            EncryptionSettings = newEncryptionSettings,
             Client = clientHeader,
             CreatedAt = timeProvider.UtcNow,
             UpdatedAt = timeProvider.UtcNow,
@@ -310,6 +350,9 @@ public class VaultController(ILogger<VaultController> logger, IAliasServerDbCont
         await GetUserManager().UpdateAsync(user);
 
         await authLoggingService.LogAuthEventSuccessAsync(user.UserName!, AuthEventType.PasswordChange);
+
+        // The password change is complete, so the ephemeral this proof was checked against is spent.
+        AuthHelper.InvalidateSrpSession(cache, user);
 
         // Force revoke all user logged in sessions except current one.
         // This means that other clients which have not already updated to the new password will be logged out.

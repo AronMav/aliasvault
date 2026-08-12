@@ -55,7 +55,7 @@ function base64ToBytes(base64) {
 
 /**
  * AES (symmetric) encryption and decryption functions.
- * @type {{encrypt: (function(*, *): Promise<string>), decrypt: (function(*, *): Promise<string>), decryptBytes: (function(*, *): Promise<Uint8Array>)}}
+ * @type {{encrypt: (function(*, *): Promise<string>), encryptBytesToBase64: (function(Uint8Array, string): Promise<string>), decrypt: (function(*, *): Promise<string>), decryptBytes: (function(*, *): Promise<Uint8Array>), encryptBytes: (function(Uint8Array, Uint8Array): Promise<Uint8Array>), decryptBytesRaw: (function(Uint8Array, Uint8Array): Promise<Uint8Array>)}}
  */
 window.cryptoInterop = {
     encrypt: async function (plaintext, base64Key) {
@@ -80,6 +80,48 @@ window.cryptoInterop = {
             { name: "AES-GCM", iv: iv },
             key,
             encoded
+        );
+
+        const combined = new Uint8Array(iv.length + ciphertext.byteLength);
+        combined.set(iv, 0);
+        combined.set(new Uint8Array(ciphertext), iv.length);
+
+        return bytesToBase64(combined);
+    },
+    /**
+     * Encrypts already-encoded bytes using AES-256-GCM and returns base64 of nonce + ciphertext.
+     *
+     * Identical in construction and output to encrypt(), but takes the plaintext as bytes.
+     * encrypt() runs TextEncoder.encode() on a string, so passing the UTF-8 bytes of that same
+     * string here produces byte-identical ciphertext - the vault format does not change.
+     *
+     * The reason this exists: passing a large plaintext as a string forces Blazor to serialize
+     * it as a JSON interop argument, and the escape buffer for a ~100 MB string exhausts the
+     * 32-bit browser heap. Byte arrays are marshalled directly instead.
+     *
+     * @param {Uint8Array} plainBytes - The plaintext bytes to encrypt
+     * @param {string} base64Key - The 32-byte encryption key, base64 encoded
+     * @returns {Promise<string>} Base64 of nonce + ciphertext + tag
+     */
+    encryptBytesToBase64: async function (plainBytes, base64Key) {
+        checkCryptoAvailable();
+
+        const key = await window.crypto.subtle.importKey(
+            "raw",
+            base64ToBytes(base64Key),
+            {
+                name: "AES-GCM",
+                length: 256,
+            },
+            false,
+            ["encrypt"]
+        );
+
+        const iv = window.crypto.getRandomValues(new Uint8Array(12));
+        const ciphertext = await window.crypto.subtle.encrypt(
+            { name: "AES-GCM", iv: iv },
+            key,
+            plainBytes
         );
 
         const combined = new Uint8Array(iv.length + ciphertext.byteLength);

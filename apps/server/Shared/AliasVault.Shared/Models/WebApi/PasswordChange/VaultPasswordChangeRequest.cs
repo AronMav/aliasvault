@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------
 // <copyright file="VaultPasswordChangeRequest.cs" company="aliasvault">
 // Copyright (c) aliasvault. All rights reserved.
 // Licensed under the AGPLv3 license. See LICENSE.md file in the project root for full license information.
@@ -33,4 +33,22 @@ public class VaultPasswordChangeRequest : Vault
     /// Gets or sets the new password verifier.
     /// </summary>
     public required string NewPasswordVerifier { get; set; }
+
+    /// <summary>
+    /// Gets or sets the encryption type the client derived the new verifier with.
+    /// Null when the client predates this field, in which case the server records what a client of
+    /// that era would have used, worked out from which client is asking.
+    /// </summary>
+    public string? NewPasswordEncryptionType { get; set; }
+
+    /// <summary>
+    /// Gets or sets the encryption settings the client derived the new verifier with.
+    /// Null when the client predates this field, in which case the server records what a client of
+    /// that era would have used, worked out from which client is asking.
+    /// </summary>
+    /// <remarks>
+    /// The vault can only be opened again with the parameters its key was derived under, so these
+    /// have to be what the client actually used rather than what the server would have chosen.
+    /// </remarks>
+    public string? NewPasswordEncryptionSettings { get; set; }
 }

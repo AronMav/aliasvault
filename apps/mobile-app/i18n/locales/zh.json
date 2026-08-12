@@ -646,7 +646,11 @@
     "USERNAME_INVALID_CHARACTERS": "用户名无效，用户名只能包含字母或数字。",
     "VAULT_NOT_UP_TO_DATE": "您的密码库不是最新的。请同步您的密码库后重试。",
     "INTERNAL_SERVER_ERROR": "服务器内部错误。",
-    "VAULT_ERROR": "本地密码库不是最新的。请刷新页面同步密码库后重试。"
+    "VAULT_ERROR": "本地密码库不是最新的。请刷新页面同步密码库后重试。",
+    "AUTH_RATE_LIMIT_EXCEEDED": "您的网络尝试次数过多。请稍等几分钟后重试。",
+    "MOBILE_LOGIN_REQUEST_NOT_FOUND": "此登录请求已不存在，可能已过期。请重新发起一个请求后重试。",
+    "MOBILE_LOGIN_REQUEST_ALREADY_FULFILLED": "此登录请求已被批准。请重新发起一个请求后重试。",
+    "UNSUPPORTED_ENCRYPTION_SETTINGS": "服务器不接受此版本使用的加密设置。请更新到最新版本后重试。"
   },
   "sync": {
     "offline": "离线",

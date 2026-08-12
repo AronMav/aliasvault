@@ -212,14 +212,24 @@ export function useVaultMutate() : {
 
     // Generate salt and verifier for new password using native SRP
     const newSalt = await SrpUtility.generateSalt();
-    const newPasswordHash = await EncryptionUtility.deriveKeyFromPassword(newPasswordPlainText, newSalt, data.encryptionType, data.encryptionSettings);
+    /**
+     * Derive with the parameters the server reports for this vault, and report them back alongside
+     * the verifier; the server records what is reported here, so these two have to be the same
+     * values. Substituting this build's defaults would overrule whatever the deployment registers
+     * accounts with, and the web client would then be refused its own parameters as too weak on the
+     * next password change. The app has no view of that deployment setting, so the vault's own
+     * parameters are the only ones it can carry forward without overruling anything.
+     */
+    const newEncryptionType = data.encryptionType;
+    const newEncryptionSettings = data.encryptionSettings;
+    const newPasswordHash = await EncryptionUtility.deriveKeyFromPassword(newPasswordPlainText, newSalt, newEncryptionType, newEncryptionSettings);
     const newPasswordHashString = Buffer.from(newPasswordHash).toString('hex').toUpperCase();
 
     // Store the new encryption key and derivation parameters locally
     try {
       const newEncryptionKeyDerivationParams : EncryptionKeyDerivationParams = {
-        encryptionType: data.encryptionType,
-        encryptionSettings: data.encryptionSettings,
+        encryptionType: newEncryptionType,
+        encryptionSettings: newEncryptionSettings,
         salt: newSalt,
       };
 
@@ -254,7 +264,9 @@ export function useVaultMutate() : {
       currentClientPublicEphemeral: currentClientProof.clientPublicEphemeral,
       currentClientSessionProof: currentClientProof.clientSessionProof,
       newPasswordSalt: newSalt,
-      newPasswordVerifier: newVerifier
+      newPasswordVerifier: newVerifier,
+      newPasswordEncryptionType: newEncryptionType,
+      newPasswordEncryptionSettings: newEncryptionSettings
     };
 
     try {

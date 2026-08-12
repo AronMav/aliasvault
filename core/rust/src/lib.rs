@@ -24,6 +24,9 @@ pub mod identity_generator;
 pub mod srp;
 pub mod argon2;
 
+#[cfg(feature = "kdbx")]
+pub mod kdbx;
+
 pub use error::VaultError;
 pub use vault_merge::{
     merge_vaults, MergeInput, MergeOutput, MergeStats, SqlStatement, TableData,
@@ -44,7 +47,7 @@ pub use srp::{
     srp_generate_ephemeral_server, srp_derive_session_server,
     SrpEphemeral, SrpSession, SrpError,
 };
-pub use crate::argon2::{argon2_hash_password, Argon2Error};
+pub use crate::argon2::{argon2_derive_key, argon2_hash_password, Argon2Error};
 
 // WASM bindings
 #[cfg(feature = "wasm")]

@@ -63,6 +63,9 @@ public static class DashlaneImporter
             notes.Add($"Alternative username 2: {record.Username3}");
         }
 
-        return notes.Count > 0 ? string.Join(Environment.NewLine, notes) : null;
+        // Joined with a literal newline rather than Environment.NewLine: the same export must
+        // produce the same notes on every platform, since the vault syncs between them and a
+        // Windows import would otherwise differ from a mobile or Linux one.
+        return notes.Count > 0 ? string.Join('\n', notes) : null;
     }
 }

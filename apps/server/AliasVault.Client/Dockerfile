@@ -59,10 +59,12 @@ COPY apps/server /src
 # Copy built core libraries from core-builder stage
 COPY --from=core-builder /src/core/ /src-core/
 
-# Copy Rust WASM output to wwwroot/wasm/
+# Copy Rust WASM output to wwwroot/wasm/. The web client takes the wasm-web build, which is the
+# one compiled with the kdbx feature; dist/wasm is the smaller browser-extension build and has no
+# kdbxOpen, so importing a KeePass database would fail in the released image.
 RUN mkdir -p /src/AliasVault.Client/wwwroot/wasm && \
-    cp /src-core/rust/dist/wasm/aliasvault_core_bg.wasm /src/AliasVault.Client/wwwroot/wasm/ && \
-    cp /src-core/rust/dist/wasm/aliasvault_core.js /src/AliasVault.Client/wwwroot/wasm/
+    cp /src-core/rust/dist/wasm-web/aliasvault_core_bg.wasm /src/AliasVault.Client/wwwroot/wasm/ && \
+    cp /src-core/rust/dist/wasm-web/aliasvault_core.js /src/AliasVault.Client/wwwroot/wasm/
 
 # Copy TypeScript core packages to wwwroot/js/dist/core/
 RUN mkdir -p /src/AliasVault.Client/wwwroot/js/dist/core/vault && \

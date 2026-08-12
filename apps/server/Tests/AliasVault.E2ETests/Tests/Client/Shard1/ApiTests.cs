@@ -32,6 +32,23 @@ public class ApiTests : ClientPlaywrightTest
     }
 
     /// <summary>
+    /// Put the IP logging setting back the way the rest of the suite expects it.
+    /// </summary>
+    /// <remarks>
+    /// The variable is process-wide, so leaving it set leaks into every fixture that runs after this
+    /// one in the same test host -- AuthTests.RegistrationAuthLog asserts the opposite and fails.
+    /// Sharding the suite across separate runs, the way CI does, hides that; running it in one go
+    /// does not.
+    /// </remarks>
+    /// <returns>Async task.</returns>
+    [OneTimeTearDown]
+    public override async Task OneTimeTearDown()
+    {
+        Environment.SetEnvironmentVariable("IP_LOGGING_ENABLED", null);
+        await base.OneTimeTearDown();
+    }
+
+    /// <summary>
     /// Test if an error in the API is logged to the database.
     /// </summary>
     /// <returns>Async task.</returns>

@@ -191,4 +191,22 @@
   <data name="ACCOUNT_LOCKED" xml:space="preserve">
     <value>您输入错误密码的次数过多，账户已被锁定。您可以在 30 分钟后重试。</value>
   </data>
+  <data name="AUTH_RATE_LIMIT_EXCEEDED" xml:space="preserve">
+    <value>您的网络尝试次数过多。请稍等几分钟后重试。</value>
+  </data>
+  <data name="REGISTRATION_RATE_LIMIT_EXCEEDED" xml:space="preserve">
+    <value>您的网络创建的账户过多。请稍后重试。</value>
+  </data>
+  <data name="MOBILE_LOGIN_REQUEST_NOT_FOUND" xml:space="preserve">
+    <value>此登录请求已不存在，可能已过期。请重新发起一个请求后重试。</value>
+  </data>
+  <data name="MOBILE_LOGIN_REQUEST_ALREADY_FULFILLED" xml:space="preserve">
+    <value>此登录请求已被批准。请重新发起一个请求后重试。</value>
+  </data>
+  <data name="MOBILE_LOGIN_INVALID_PUBLIC_KEY" xml:space="preserve">
+    <value>无法发起此登录请求。请更新到最新版本后重试。</value>
+  </data>
+  <data name="UNSUPPORTED_ENCRYPTION_SETTINGS" xml:space="preserve">
+    <value>服务器不接受此版本使用的加密设置。请更新到最新版本后重试。</value>
+  </data>
 </root>

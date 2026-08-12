@@ -191,4 +191,22 @@
   <data name="ACCOUNT_LOCKED" xml:space="preserve">
     <value>You have entered an incorrect password too many times and your account has now been locked out. You can try again in 30 minutes.</value>
   </data>
+  <data name="AUTH_RATE_LIMIT_EXCEEDED" xml:space="preserve">
+    <value>Забагато спроб із вашої мережі. Зачекайте кілька хвилин і повторіть спробу.</value>
+  </data>
+  <data name="REGISTRATION_RATE_LIMIT_EXCEEDED" xml:space="preserve">
+    <value>З вашої мережі створено забагато облікових записів. Зачекайте деякий час і повторіть спробу.</value>
+  </data>
+  <data name="MOBILE_LOGIN_REQUEST_NOT_FOUND" xml:space="preserve">
+    <value>Цей запит на вхід більше не існує. Можливо, його термін дії минув. Створіть новий і повторіть спробу.</value>
+  </data>
+  <data name="MOBILE_LOGIN_REQUEST_ALREADY_FULFILLED" xml:space="preserve">
+    <value>Цей запит на вхід уже підтверджено. Створіть новий і повторіть спробу.</value>
+  </data>
+  <data name="MOBILE_LOGIN_INVALID_PUBLIC_KEY" xml:space="preserve">
+    <value>Не вдалося розпочати цей запит на вхід. Оновіться до найновішої версії та повторіть спробу.</value>
+  </data>
+  <data name="UNSUPPORTED_ENCRYPTION_SETTINGS" xml:space="preserve">
+    <value>Сервер не приймає налаштування шифрування, які використовує ця версія. Оновіться до найновішої версії та повторіть спробу.</value>
+  </data>
 </root>

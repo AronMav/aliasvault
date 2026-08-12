@@ -6,7 +6,6 @@
 @inject GlobalNotificationService GlobalNotificationService
 @inject FaviconService FaviconService
 @inject IStringLocalizerFactory LocalizerFactory
-@inject AliasVault.Client.Services.Crypto.AvexCryptoService AvexCrypto
 @inject JsInteropService JsInteropService
 @using Microsoft.Extensions.Localization
 @using AliasVault.ImportExport
@@ -42,7 +41,7 @@
 
 @if (IsModalOpen)
 {
-    <ClickOutsideHandler OnClose="CloseModal" ContentId="importServiceModal">
+    <ClickOutsideHandler OnClose="CloseModalFromOutsideClick" ContentId="importServiceModal">
         <ModalWrapper OnEnter="HandleModalConfirm">
             <div id="importServiceModal" class="relative top-20 mx-auto p-5 shadow-lg rounded-md bg-white dark:bg-gray-800 border-2 border-gray-300 dark:border-gray-400 md:min-w-[32rem]">
                 <div class="bg-white dark:bg-gray-800 rounded-lg p-4 w-full mx-auto">
@@ -106,7 +105,7 @@
                                 else
                                 {
                                     <div class="mb-4">
-                                        <p class="mb-4 text-gray-700 dark:text-gray-300">@Localizer["EncryptedFilePasswordPrompt"]</p>
+                                        <p class="mb-4 text-gray-700 dark:text-gray-300">@(PasswordPromptText ?? Localizer["EncryptedFilePasswordPrompt"])</p>
                                         <label for="decryptionPassword" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                                             @Localizer["DecryptionPasswordLabel"]
                                         </label>
@@ -120,7 +119,7 @@
 
                                     <div class="mb-4 p-3 bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800 rounded-lg">
                                         <p class="text-xs text-orange-800 dark:text-orange-200">
-                                            @Localizer["DecryptionPasswordHint"]
+                                            @(PasswordHintText ?? Localizer["DecryptionPasswordHint"])
                                         </p>
                                     </div>
 
@@ -182,6 +181,18 @@
                                     </div>
                                 }
 
+                                @if (_importNotes.Count > 0)
+                                {
+                                    <div class="p-4 mb-4 rounded-lg bg-blue-50 dark:bg-blue-900/20">
+                                        <ul class="list-disc list-inside text-sm text-blue-800 dark:text-blue-200 space-y-0.5">
+                                            @foreach (var note in _importNotes)
+                                            {
+                                                <li>@note</li>
+                                            }
+                                        </ul>
+                                    </div>
+                                }
+
                                 @if (ImportedCredentials.Count == 0)
                                 {
                                     <div class="p-4 mb-4 text-amber-700 bg-amber-100 rounded-lg dark:bg-amber-800/30 dark:text-amber-300" role="alert">
@@ -238,6 +249,18 @@
                                             <span class="ml-2 text-gray-700 dark:text-gray-300">@Localizer["ImportAttachmentsLabel"]</span>
                                             <span class="ml-2 text-sm text-gray-500 dark:text-gray-400">(@string.Format(Localizer["AttachmentsDetected"], DetectedAttachmentCount, FormatBytes(DetectedAttachmentsTotalSize)))</span>
                                         </label>
+                                        @if (AttachmentsExceedBrowserLimit && ImportAttachments)
+                                        {
+                                            <div class="mt-3 p-3 text-sm text-red-800 bg-red-100 rounded-lg dark:bg-red-800/30 dark:text-red-200" role="alert">
+                                                @string.Format(Localizer["ImportWarningAttachmentsExceedBrowserLimit"], ImportSizeGuard.BrowserVaultCeilingBytes / 1024 / 1024)
+                                            </div>
+                                        }
+                                        else if (AttachmentsExceedServerLimit && ImportAttachments)
+                                        {
+                                            <div class="mt-3 p-3 text-sm text-amber-800 bg-amber-100 rounded-lg dark:bg-amber-800/30 dark:text-amber-200" role="alert">
+                                                @string.Format(Localizer["ImportWarningAttachmentsExceedServerLimit"], DbService.MaxUploadSizeMb)
+                                            </div>
+                                        }
                                     }
                                 </div>
                             }
@@ -359,6 +382,36 @@
     public string[] AcceptedFileExtensions { get; set; } = Array.Empty<string>();
 
     /// <summary>
+    /// Gets or sets the file extensions that require a password before they can be parsed
+    /// (e.g. [".avex"] or [".kdbx"]). Uploading one of these moves the modal to the password step.
+    /// </summary>
+    [Parameter]
+    public string[] PasswordProtectedFileExtensions { get; set; } = Array.Empty<string>();
+
+    /// <summary>
+    /// Gets or sets the callback that decrypts and parses a password protected file.
+    /// Receives the file bytes, the filename and the password entered by the user.
+    /// Required whenever <see cref="PasswordProtectedFileExtensions"/> is non-empty.
+    /// </summary>
+    [Parameter]
+    public Func<byte[], string, string, Task<ImportFileResult>>? DecryptFileCallback { get; set; }
+
+    /// <summary>
+    /// Gets or sets the text shown above the password field. Defaults to the wording for
+    /// AliasVault's own encrypted exports, which is wrong for other formats: a KeePass
+    /// database asks for its master password, not for a password chosen while exporting.
+    /// </summary>
+    [Parameter]
+    public string? PasswordPromptText { get; set; }
+
+    /// <summary>
+    /// Gets or sets the hint shown below the password field. Defaults to the wording for
+    /// AliasVault's own encrypted exports.
+    /// </summary>
+    [Parameter]
+    public string? PasswordHintText { get; set; }
+
+    /// <summary>
     /// The effective accept attribute for the file input. Includes application/octet-stream as a fallback
     /// so that iOS and other mobile platforms allow selecting files with custom extensions (e.g. .avex, .avux, .1pux)
     /// that don't have a registered MIME type.
@@ -389,6 +442,8 @@
     private bool ImportAttachments { get; set; } = true;
     private int DetectedAttachmentCount { get; set; } = 0;
     private long DetectedAttachmentsTotalSize { get; set; } = 0;
+    private bool AttachmentsExceedServerLimit { get; set; }
+    private bool AttachmentsExceedBrowserLimit { get; set; }
     private bool IsExtractingFavicons { get; set; }
     private int FaviconExtractionProgress { get; set; }
     private int TotalFaviconsToExtract { get; set; }
@@ -403,10 +458,10 @@
 
     private int DuplicateCredentialsCount { get; set; } = 0;
 
-    // Fields for .avex encrypted file handling
+    // Fields for password protected file handling (.avex, .kdbx)
     private string _decryptionPassword = string.Empty;
-    private byte[]? _pendingAvexBytes;
-    private string? _pendingAvexFilename;
+    private byte[]? _pendingEncryptedBytes;
+    private string? _pendingEncryptedFilename;
     private bool _requiresPassword = false;
 
     // Fields for structured error reporting.
@@ -416,6 +471,10 @@
     // when the failure happens later (decrypt, DB save) than the original file upload.
     private string? _errorPayload;
     private List<ImportFailure> _parseFailures = new();
+
+    // Informational messages from the importer, such as content that was deliberately
+    // skipped. Not failures, so they must not be mixed into _parseFailures.
+    private List<string> _importNotes = new();
     private string? _uploadedFilename;
     private long _uploadedFileSize;
 
@@ -447,8 +506,8 @@
     /// <param name="filename">The filename.</param>
     public void SetPendingEncryptedFile(byte[] encryptedBytes, string filename)
     {
-        _pendingAvexBytes = encryptedBytes;
-        _pendingAvexFilename = filename;
+        _pendingEncryptedBytes = encryptedBytes;
+        _pendingEncryptedFilename = filename;
         _decryptionPassword = string.Empty;
         _requiresPassword = true;
         ImportError = null;
@@ -477,6 +536,24 @@
     }
 
     /// <summary>
+    /// Handles a click outside the modal.
+    /// </summary>
+    /// <remarks>
+    /// Only dismisses the modal while nothing would be lost by doing so. Past the first step
+    /// the user has picked a file, typed a database password or is waiting on an import, and
+    /// a stray click on the page behind the modal used to throw all of that away without a word.
+    /// </remarks>
+    private void CloseModalFromOutsideClick()
+    {
+        if (IsImporting || CurrentStep != ImportStep.FileUpload)
+        {
+            return;
+        }
+
+        CloseModal();
+    }
+
+    /// <summary>
     /// Closes the import modal.
     /// </summary>
     protected virtual void CloseModal()
@@ -488,10 +565,11 @@
         ImportedCredentials.Clear();
         _requiresPassword = false;
         _decryptionPassword = string.Empty;
-        _pendingAvexBytes = null;
-        _pendingAvexFilename = null;
+        _pendingEncryptedBytes = null;
+        _pendingEncryptedFilename = null;
         _errorPayload = null;
         _parseFailures = new();
+        _importNotes = new();
         _showFailureDetails = false;
         _uploadedFilename = null;
         _uploadedFileSize = 0;
@@ -522,14 +600,14 @@
         {
             CurrentStep = ImportStep.FileUpload;
             _decryptionPassword = string.Empty;
-            _pendingAvexBytes = null;
-            _pendingAvexFilename = null;
+            _pendingEncryptedBytes = null;
+            _pendingEncryptedFilename = null;
             _requiresPassword = false;
         }
         else if (CurrentStep == ImportStep.Preview)
         {
             // If we came from password input (encrypted file), go back to password
-            if (_pendingAvexBytes != null)
+            if (_pendingEncryptedBytes != null)
             {
                 CurrentStep = ImportStep.PasswordInput;
             }
@@ -560,11 +638,13 @@
     }
 
     /// <summary>
-    /// Handles decrypting the .avex file with the provided password.
+    /// Handles decrypting the password protected file with the provided password.
+    /// The card stays format agnostic: decryption and parsing belong to the service
+    /// specific card that supplied <see cref="DecryptFileCallback"/>.
     /// </summary>
     private async Task HandleDecryptFile()
     {
-        if (_pendingAvexBytes == null)
+        if (_pendingEncryptedBytes == null || DecryptFileCallback == null)
         {
             return;
         }
@@ -576,19 +656,18 @@
             StateHasChanged();
             await Task.Delay(50);
 
-            // Decrypt the file to .avux bytes using AvexCryptoService
-            var avuxBytes = await AvexCrypto.DecryptAvexAsync(_pendingAvexBytes, _decryptionPassword);
-
-            // Process via the normal file handler as if it was an .avux upload
-            // This ensures consistent handling and avoids EF tracking issues
-            var decryptResult = await ProcessFileCallback!("decrypted.avux", avuxBytes);
+            var decryptResult = await DecryptFileCallback(
+                _pendingEncryptedBytes,
+                _pendingEncryptedFilename ?? string.Empty,
+                _decryptionPassword);
             ImportedCredentials = decryptResult.Credentials;
             _parseFailures = decryptResult.FailedItems;
+            _importNotes = decryptResult.Notes;
 
             // Clear password and encrypted data
             _decryptionPassword = string.Empty;
-            _pendingAvexBytes = null;
-            _pendingAvexFilename = null;
+            _pendingEncryptedBytes = null;
+            _pendingEncryptedFilename = null;
             _requiresPassword = false;
 
             IsImporting = false;
@@ -598,7 +677,7 @@
             CurrentStep = ImportStep.Preview;
             StateHasChanged();
         }
-        catch (InvalidOperationException ex) when (ex.Message.Contains("password may be incorrect"))
+        catch (InvalidImportPasswordException)
         {
             IsImporting = false;
             ImportError = Localizer["IncorrectPasswordError"];
@@ -607,12 +686,12 @@
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Error decrypting .avex file");
+            Logger.LogError(ex, "Error decrypting import file");
             IsImporting = false;
             SetImportErrorFromException(
                 ex,
-                _pendingAvexFilename ?? "decrypted.avux",
-                _pendingAvexBytes?.LongLength ?? 0,
+                _pendingEncryptedFilename ?? string.Empty,
+                _pendingEncryptedBytes?.LongLength ?? 0,
                 defaultStage: ImportStage.Parse,
                 fallbackMessage: Localizer["DecryptionErrorGeneric"]);
             StateHasChanged();
@@ -1152,6 +1231,15 @@
                 return;
             }
 
+            // A source file that already exceeds the server's upload limit can never fit
+            // into the vault. Say so before spending Argon2 on it and before loading it
+            // into the browser's 32 bit heap.
+            if (ImportSizeGuard.ExceedsUploadLimit(e.File.Size, DbService.MaxUploadSizeMb))
+            {
+                ImportError = Localizer["ImportErrorDatabaseExceedsServerLimit", DbService.MaxUploadSizeMb!];
+                return;
+            }
+
             await using var stream = e.File.OpenReadStream(maxAllowedSize: maxFileSize);
 
             if (ProcessFileCallback == null)
@@ -1165,8 +1253,8 @@
             await stream.CopyToAsync(memoryStream);
             var fileBytes = memoryStream.ToArray();
 
-            // Check if this is an encrypted .avex file
-            if (e.File.Name.EndsWith(".avex", StringComparison.OrdinalIgnoreCase))
+            // Check if this file format needs a password before it can be parsed
+            if (PasswordProtectedFileExtensions.Any(ext => e.File.Name.EndsWith(ext, StringComparison.OrdinalIgnoreCase)))
             {
                 // Encrypted file - trigger password input step
                 SetPendingEncryptedFile(fileBytes, e.File.Name);
@@ -1181,6 +1269,7 @@
             var result = await processingTask;
             ImportedCredentials = result.Credentials;
             _parseFailures = result.FailedItems;
+            _importNotes = result.Notes;
 
             // If password is required, the callback will handle setting the step to PasswordInput
             // So we only proceed to preview if no password is required
@@ -1258,6 +1347,42 @@
                 DetectedAttachmentCount++;
                 DetectedAttachmentsTotalSize += attachment.Blob?.LongLength ?? 0;
             }
+        }
+
+        // Warn before the import rather than after: once the attachments are saved the
+        // user would be left with a local vault that cannot be stored.
+        var vaultSize = await GetCurrentVaultSizeBytes();
+
+        AttachmentsExceedServerLimit = ImportSizeGuard.WouldExceedAfterImport(
+            vaultSize,
+            DetectedAttachmentsTotalSize,
+            DbService.MaxUploadSizeMb);
+
+        AttachmentsExceedBrowserLimit = ImportSizeGuard.WouldExceedBrowserLimit(
+            vaultSize,
+            DetectedAttachmentsTotalSize);
+    }
+
+    /// <summary>
+    /// Gets the size of the current vault, before encoding.
+    /// </summary>
+    /// <remarks>
+    /// Measures the database rather than actually encrypting the vault: this runs on the preview step
+    /// purely to decide whether to show a warning, and encrypting would cost as much as a real save.
+    /// Returned unencoded so it is in the same unit as the attachment sizes it is added to; the size
+    /// guard applies the encoding growth where the limit calls for it.
+    /// </remarks>
+    private async Task<long> GetCurrentVaultSizeBytes()
+    {
+        try
+        {
+            return await DbService.GetVaultSizeBytesAsync();
+        }
+        catch (Exception ex)
+        {
+            // Never block an import because the size could not be determined.
+            Logger.LogWarning(ex, "Could not determine current vault size for the import limit check");
+            return 0;
         }
     }
 

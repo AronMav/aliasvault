@@ -646,7 +646,11 @@
     "USERNAME_INVALID_CHARACTERS": "Användarnamnet är ogiltigt, kan endast innehålla bokstäver eller siffror.",
     "VAULT_NOT_UP_TO_DATE": "Ditt valv är inte uppdaterat. Synkronisera ditt valv och försök igen.",
     "INTERNAL_SERVER_ERROR": "Internt serverfel.",
-    "VAULT_ERROR": "Det lokala valvet är inte uppdaterat. Synkronisera valvet genom att uppdatera sidan och försök igen."
+    "VAULT_ERROR": "Det lokala valvet är inte uppdaterat. Synkronisera valvet genom att uppdatera sidan och försök igen.",
+    "AUTH_RATE_LIMIT_EXCEEDED": "För många försök från ditt nätverk. Vänta några minuter och försök igen.",
+    "MOBILE_LOGIN_REQUEST_NOT_FOUND": "Den här inloggningsbegäran finns inte längre. Den kan ha upphört att gälla. Starta en ny och försök igen.",
+    "MOBILE_LOGIN_REQUEST_ALREADY_FULFILLED": "Den här inloggningsbegäran har redan godkänts. Starta en ny och försök igen.",
+    "UNSUPPORTED_ENCRYPTION_SETTINGS": "Servern accepterar inte krypteringsinställningarna som den här versionen använder. Uppdatera till den senaste versionen och försök igen."
   },
   "sync": {
     "offline": "Offline",

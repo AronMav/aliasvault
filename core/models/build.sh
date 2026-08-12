@@ -23,6 +23,9 @@ node scripts/generate-field-keys.cjs
 echo "🔄 Generating password-generator defaults (Rust, C#)..."
 node scripts/generate-password-defaults.cjs
 
+echo "🔄 Generating encryption defaults (Rust, C#, Kotlin, Swift)..."
+node scripts/generate-encryption-defaults.cjs
+
 echo "🔄 Generating language reference (C#)..."
 node scripts/generate-languages.cjs
 

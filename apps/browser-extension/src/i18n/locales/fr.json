@@ -142,7 +142,13 @@
       "USERNAME_INVALID_CHARACTERS": "Le nom d'utilisateur est invalide : il ne peut contenir que des lettres ou des chiffres.",
       "VAULT_NOT_UP_TO_DATE": "Votre coffre-fort n'est pas à jour. Veuillez synchroniser votre coffre et réessayer.",
       "INTERNAL_SERVER_ERROR": "Erreur interne du serveur.",
-      "VAULT_ERROR": "Le coffre-fort local n'est pas à jour. Veuillez synchroniser votre coffre en rafraîchissant la page et réessayez."
+      "VAULT_ERROR": "Le coffre-fort local n'est pas à jour. Veuillez synchroniser votre coffre en rafraîchissant la page et réessayez.",
+      "AUTH_RATE_LIMIT_EXCEEDED": "Trop de tentatives depuis votre réseau. Veuillez patienter quelques minutes et réessayer.",
+      "MOBILE_LOGIN_REQUEST_NOT_FOUND": "Cette demande de connexion n'existe plus. Elle a peut-être expiré. Veuillez en démarrer une nouvelle et réessayer.",
+      "MOBILE_LOGIN_INVALID_PUBLIC_KEY": "Impossible de démarrer cette demande de connexion. Veuillez mettre à jour vers la dernière version et réessayer.",
+      "REGISTRATION_RATE_LIMIT_EXCEEDED": "Trop de comptes ont été créés depuis votre réseau. Veuillez patienter un moment et réessayer.",
+      "REGISTRATION_FAILED": "Impossible de créer le compte. Veuillez réessayer dans quelques minutes. Si le problème persiste, veuillez contacter le support.",
+      "UNSUPPORTED_ENCRYPTION_SETTINGS": "Le serveur n'accepte pas les paramètres de chiffrement utilisés par cette version. Veuillez mettre à jour vers la dernière version et réessayer."
     }
   },
   "content": {

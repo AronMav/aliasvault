@@ -47,9 +47,11 @@ public static class NordPassImporter
             var notes = record.Note;
             if (!string.IsNullOrWhiteSpace(record.CustomFields))
             {
+                // Literal newline, not Environment.NewLine: the same export must produce the
+                // same notes on every platform, since the vault syncs between them.
                 notes = string.IsNullOrWhiteSpace(notes)
                     ? record.CustomFields
-                    : notes + Environment.NewLine + record.CustomFields;
+                    : notes + '\n' + record.CustomFields;
             }
 
             var credential = new ImportedCredential

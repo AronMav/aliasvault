@@ -2,6 +2,7 @@ import { Buffer } from 'buffer';
 
 import argon2 from 'argon2-browser/dist/argon2-bundled.min.js';
 
+import { ENCRYPTION_SETTINGS, ENCRYPTION_TYPE } from '@/utils/dist/core/models/defaults';
 import type { EncryptionKey } from '@/utils/dist/core/models/vault';
 import type { Email, MailboxEmail } from '@/utils/dist/core/models/webapi';
 
@@ -20,8 +21,8 @@ export class EncryptionUtility {
   public static async deriveKeyFromPassword(
     password: string,
     salt: string,
-    encryptionType: string = 'Argon2Id',
-    encryptionSettings: string = '{"Iterations":2,"MemorySize":19456,"DegreeOfParallelism":1}'
+    encryptionType: string = ENCRYPTION_TYPE,
+    encryptionSettings: string = ENCRYPTION_SETTINGS
   ): Promise<Uint8Array> {
     const settings = JSON.parse(encryptionSettings);
 
@@ -340,9 +341,32 @@ export class EncryptionUtility {
         decryptedEmail.messageSource = await EncryptionUtility.symmetricDecrypt(email.messageSource, symmetricKeyBase64);
       }
 
+      if (email.attachments?.length) {
+        decryptedEmail.attachments = await Promise.all(email.attachments.map(async attachment => ({
+          ...attachment,
+          filename: await EncryptionUtility.decryptMetadataLegacyAware(attachment.filename, symmetricKeyBase64),
+          mimeType: await EncryptionUtility.decryptMetadataLegacyAware(attachment.mimeType, symmetricKeyBase64),
+        })));
+      }
+
       return decryptedEmail;
     } catch (err) {
       throw new Error(err instanceof Error ? err.message : 'Failed to decrypt email');
+    }
+  }
+
+  /**
+   * Decrypts attachment metadata, tolerating values that predate metadata encryption.
+   *
+   * Emails received before attachment filenames were encrypted still hold plaintext, and they
+   * cannot be migrated: the server has no way back to the per-email symmetric key. AES-GCM
+   * verifies an authentication tag, so plaintext cannot be mistaken for valid ciphertext.
+   */
+  private static async decryptMetadataLegacyAware(value: string, symmetricKeyBase64: string): Promise<string> {
+    try {
+      return await EncryptionUtility.symmetricDecrypt(value, symmetricKeyBase64);
+    } catch {
+      return value;
     }
   }
 

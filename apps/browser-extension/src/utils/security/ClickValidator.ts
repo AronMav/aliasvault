@@ -19,6 +19,25 @@ export class ClickValidator {
   }
 
   /**
+   * Validate a click that is about to release credentials.
+   *
+   * Requires the event to have come from the browser rather than from the page. A page can
+   * dispatch a MouseEvent carrying any coordinates and button it likes, but it cannot set
+   * isTrusted, so this is what separates a real user action from a scripted one.
+   *
+   * Use this for anything a user must actually click. Page-wide checks that run without a user
+   * gesture, such as FormFiller's opacity detection, use validateClick instead.
+   */
+  public async validateUserClick(event: MouseEvent): Promise<boolean> {
+    if (!event.isTrusted) {
+      console.warn('[AliasVault Security] Blocked a click that did not originate from the user');
+      return false;
+    }
+
+    return this.validateClick(event);
+  }
+
+  /**
    * Validate a click event (simplified for content scripts)
    */
   public async validateClick(event: MouseEvent): Promise<boolean> {

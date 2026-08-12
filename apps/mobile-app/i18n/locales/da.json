@@ -646,7 +646,11 @@
     "USERNAME_INVALID_CHARACTERS": "Brugernavnet er ugyldigt; det må kun indeholde bogstaver eller tal.",
     "VAULT_NOT_UP_TO_DATE": "Din boks er ikke opdateret. Synkroniser venligst din boks og prøv igen.",
     "INTERNAL_SERVER_ERROR": "Intern serverfejl.",
-    "VAULT_ERROR": "Den lokale boks er ikke opdateret. Synkroniser venligst din boks ved at opdatere siden og prøv igen."
+    "VAULT_ERROR": "Den lokale boks er ikke opdateret. Synkroniser venligst din boks ved at opdatere siden og prøv igen.",
+    "AUTH_RATE_LIMIT_EXCEEDED": "For mange forsøg fra dit netværk. Vent et par minutter, og prøv igen.",
+    "MOBILE_LOGIN_REQUEST_NOT_FOUND": "Denne loginanmodning findes ikke længere. Den er muligvis udløbet. Start en ny, og prøv igen.",
+    "MOBILE_LOGIN_REQUEST_ALREADY_FULFILLED": "Denne loginanmodning er allerede godkendt. Start en ny, og prøv igen.",
+    "UNSUPPORTED_ENCRYPTION_SETTINGS": "Serveren accepterer ikke de krypteringsindstillinger, denne version bruger. Opdatér til den nyeste version, og prøv igen."
   },
   "sync": {
     "offline": "Offline",

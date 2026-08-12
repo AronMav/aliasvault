@@ -191,4 +191,22 @@
   <data name="ACCOUNT_LOCKED" xml:space="preserve">
     <value>Wpisałeś nieprawidłowe hasło zbyt wiele razy i Twoje konto zostało zablokowane. Możesz spróbować ponownie za 30 minut.</value>
   </data>
+  <data name="AUTH_RATE_LIMIT_EXCEEDED" xml:space="preserve">
+    <value>Zbyt wiele prób z Twojej sieci. Odczekaj kilka minut i spróbuj ponownie.</value>
+  </data>
+  <data name="REGISTRATION_RATE_LIMIT_EXCEEDED" xml:space="preserve">
+    <value>Z Twojej sieci utworzono zbyt wiele kont. Odczekaj chwilę i spróbuj ponownie.</value>
+  </data>
+  <data name="MOBILE_LOGIN_REQUEST_NOT_FOUND" xml:space="preserve">
+    <value>To żądanie logowania już nie istnieje. Mogło wygasnąć. Rozpocznij nowe i spróbuj ponownie.</value>
+  </data>
+  <data name="MOBILE_LOGIN_REQUEST_ALREADY_FULFILLED" xml:space="preserve">
+    <value>To żądanie logowania zostało już zatwierdzone. Rozpocznij nowe i spróbuj ponownie.</value>
+  </data>
+  <data name="MOBILE_LOGIN_INVALID_PUBLIC_KEY" xml:space="preserve">
+    <value>Nie udało się rozpocząć tego żądania logowania. Zaktualizuj do najnowszej wersji i spróbuj ponownie.</value>
+  </data>
+  <data name="UNSUPPORTED_ENCRYPTION_SETTINGS" xml:space="preserve">
+    <value>Serwer nie akceptuje ustawień szyfrowania używanych przez tę wersję. Zaktualizuj do najnowszej wersji i spróbuj ponownie.</value>
+  </data>
 </root>

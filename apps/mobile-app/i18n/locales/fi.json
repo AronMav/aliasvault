@@ -646,7 +646,11 @@
     "USERNAME_INVALID_CHARACTERS": "Käyttäjänimi on vihreellinen - voi sisältää vain kirjaimia tai numeroita.",
     "VAULT_NOT_UP_TO_DATE": "Holvisi ei ole ajan tasalla. Synkronoi holvisi ja yritä uudelleen.",
     "INTERNAL_SERVER_ERROR": "Sisäinen palvelinvirhe.",
-    "VAULT_ERROR": "Paikallinen holvi ei ole ajan tasalla. Synkronoi holvisi päivittämällä sivu ja yritä uudelleen."
+    "VAULT_ERROR": "Paikallinen holvi ei ole ajan tasalla. Synkronoi holvisi päivittämällä sivu ja yritä uudelleen.",
+    "AUTH_RATE_LIMIT_EXCEEDED": "Liian monta yritystä verkostasi. Odota muutama minuutti ja yritä uudelleen.",
+    "MOBILE_LOGIN_REQUEST_NOT_FOUND": "Tätä kirjautumispyyntöä ei ole enää olemassa. Se on saattanut vanhentua. Aloita uusi ja yritä uudelleen.",
+    "MOBILE_LOGIN_REQUEST_ALREADY_FULFILLED": "Tämä kirjautumispyyntö on jo hyväksytty. Aloita uusi ja yritä uudelleen.",
+    "UNSUPPORTED_ENCRYPTION_SETTINGS": "Palvelin ei hyväksy tämän version käyttämiä salausasetuksia. Päivitä uusimpaan versioon ja yritä uudelleen."
   },
   "sync": {
     "offline": "Offline",

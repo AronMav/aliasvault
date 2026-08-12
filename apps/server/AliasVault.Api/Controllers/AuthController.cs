@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------
 // <copyright file="AuthController.cs" company="aliasvault">
 // Copyright (c) aliasvault. All rights reserved.
 // Licensed under the AGPLv3 license. See LICENSE.md file in the project root for full license information.
@@ -14,6 +14,7 @@ using System.Text;
 using AliasServerDb;
 using AliasVault.Api.Headers;
 using AliasVault.Api.Helpers;
+using AliasVault.Api.Services;
 using AliasVault.Auth;
 using AliasVault.Auth.IpAddress;
 using AliasVault.Cryptography.Client;
@@ -49,10 +50,11 @@ using SecureRemotePassword;
 /// <param name="settingsService">ServerSettingsService instance.</param>
 /// <param name="registrationRateLimitService">RegistrationRateLimitService instance.</param>
 /// <param name="ipBlockListService">IpBlockListService instance.</param>
+/// <param name="anonymousAuthRateLimitService">AnonymousAuthRateLimitService instance.</param>
 [Route("v{version:apiVersion}/[controller]")]
 [ApiController]
 [ApiVersion("1")]
-public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserManager<AliasVaultUser> userManager, SignInManager<AliasVaultUser> signInManager, IConfiguration configuration, IMemoryCache cache, ITimeProvider timeProvider, AuthLoggingService authLoggingService, Config config, ServerSettingsService settingsService, RegistrationRateLimitService registrationRateLimitService, IpBlockListService ipBlockListService) : ControllerBase
+public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserManager<AliasVaultUser> userManager, SignInManager<AliasVaultUser> signInManager, IConfiguration configuration, IMemoryCache cache, ITimeProvider timeProvider, AuthLoggingService authLoggingService, Config config, ServerSettingsService settingsService, RegistrationRateLimitService registrationRateLimitService, IpBlockListService ipBlockListService, AnonymousAuthRateLimitService anonymousAuthRateLimitService) : ControllerBase
 {
     /// <summary>
     /// Timeout in minutes for mobile login requests. Clients use 2 minutes for countdown, we use 3 here to give a bit of extra buffer time.
@@ -70,6 +72,44 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
     /// when this access token expires.
     /// </remarks>
     private const int AccessTokenValiditySeconds = 600;
+
+    /// <summary>
+    /// How long a rotated refresh token keeps returning the token that replaced it.
+    /// </summary>
+    /// <remarks>
+    /// A client that fires two refreshes at once would otherwise have the second one rejected, because
+    /// the first already rotated the token away, and be logged out over a race it cannot avoid.
+    ///
+    /// The issued token is held in this process for the length of the window, because the database
+    /// stores only its hash and so cannot hand it out a second time. That makes the window local to
+    /// one instance, which matches the rest of the authentication path -- the SRP ephemerals a login
+    /// depends on are held the same way, so a second API instance could not complete a login at all.
+    /// A restart is covered without the cache: see RotateWithinWindowAfterCacheLoss.
+    /// </remarks>
+    private const int TokenReuseWindowSeconds = 30;
+
+    /// <summary>
+    /// Cache key under which the spread of key derivation parameters across this instance's vaults is held.
+    /// </summary>
+    private const string VaultEncryptionDistributionCacheKey = "VaultEncryptionSettingsDistribution";
+
+    /// <summary>
+    /// How long that spread is cached. It only shifts when an account is registered or a password
+    /// is changed, so a stale reading costs nothing beyond a newly used parameter set taking this
+    /// long to start appearing in responses for unknown usernames.
+    /// </summary>
+    private const int VaultEncryptionDistributionCacheMinutes = 10;
+
+    /// <summary>
+    /// Lets one request at a time rebuild the key derivation parameter distribution.
+    /// </summary>
+    /// <remarks>
+    /// The query behind it scans every vault revision on the instance, and the only endpoint that
+    /// needs it is reachable without credentials. Without this, a burst of logins for unknown
+    /// usernames arriving after the cache expires each open their own connection and run the same
+    /// scan at the same time -- which is what an enumeration attempt looks like.
+    /// </remarks>
+    private static readonly SemaphoreSlim VaultEncryptionDistributionLock = new(1, 1);
 
     /// <summary>
     /// Semaphore to prevent concurrent access to the database when generating new tokens for a user.
@@ -140,27 +180,39 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
             return BadRequest(ApiErrorCodeHelper.CreateValidationErrorResponse(ApiErrorCode.ACCOUNT_BLOCKED, 400));
         }
 
-        var user = await userManager.FindByNameAsync(model.Username);
+        // This endpoint is reachable without authentication and derives an SRP ephemeral per call,
+        // whether or not the account exists, so cap what a single address can ask for.
+        if (!TryConsumeAnonymousAuthAllowance(out var rateLimitError))
+        {
+            return rateLimitError!;
+        }
 
-        // If user doesn't exist, generate or retrieve fake data to prevent user enumeration attacks.
+        // Bound the username before anything reads it. It is unauthenticated input and the work below
+        // hashes it, derives SRP values from it and writes it to the auth log, all of which would
+        // otherwise scale with whatever the caller put in the request body.
+        var username = TruncateUsername(model.Username);
+
+        var user = await userManager.FindByNameAsync(username);
+
+        // If user doesn't exist, derive fake data to prevent user enumeration attacks.
         if (user == null)
         {
             // Log the attempt internally
-            await authLoggingService.LogAuthEventFailAsync(model.Username, AuthEventType.Login, AuthFailureReason.InvalidUsername);
-            return FakeLoginResponse(model);
+            await authLoggingService.LogAuthEventFailAsync(username, AuthEventType.Login, AuthFailureReason.InvalidUsername);
+            return await FakeLoginResponse(username);
         }
 
         // Check if the account is locked out.
         if (await userManager.IsLockedOutAsync(user))
         {
-            await authLoggingService.LogAuthEventFailAsync(model.Username, AuthEventType.TwoFactorAuthentication, AuthFailureReason.AccountLocked);
+            await authLoggingService.LogAuthEventFailAsync(username, AuthEventType.TwoFactorAuthentication, AuthFailureReason.AccountLocked);
             return BadRequest(ApiErrorCodeHelper.CreateValidationErrorResponse(ApiErrorCode.ACCOUNT_LOCKED, 400));
         }
 
         // Check if the account is blocked.
         if (user.Blocked)
         {
-            await authLoggingService.LogAuthEventFailAsync(model.Username, AuthEventType.Login, AuthFailureReason.AccountBlocked);
+            await authLoggingService.LogAuthEventFailAsync(username, AuthEventType.Login, AuthFailureReason.AccountBlocked);
             return BadRequest(ApiErrorCodeHelper.CreateValidationErrorResponse(ApiErrorCode.ACCOUNT_BLOCKED, 400));
         }
 
@@ -175,7 +227,7 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
 
         // Store the server ephemeral in memory cache for Validate() endpoint to use.
         // Use SrpIdentity as the cache key to ensure consistency.
-        cache.Set(AuthHelper.CachePrefixEphemeral + srpIdentity, ephemeral.Secret, TimeSpan.FromMinutes(5));
+        AuthHelper.StoreSrpEphemeral(cache, srpIdentity, ephemeral.Secret);
 
         return Ok(new LoginInitiateResponse(latestVaultEncryptionSettings.Salt, ephemeral.Public, latestVaultEncryptionSettings.EncryptionType, latestVaultEncryptionSettings.EncryptionSettings, srpIdentity));
     }
@@ -197,11 +249,15 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
 
         await authLoggingService.LogAuthEventSuccessAsync(model.Username, AuthEventType.Login);
 
-        // If 2FA is required, return that status and no JWT token yet.
+        // If 2FA is required, return that status and no JWT token yet. The server ephemeral has to stay
+        // cached in that case: the second factor step validates the same proof again.
         if (user!.TwoFactorEnabled)
         {
             return Ok(new ValidateLoginResponse(true, string.Empty, null));
         }
+
+        // The login is complete, so the ephemeral this proof was checked against is spent.
+        AuthHelper.InvalidateSrpSession(cache, user);
 
         // Reset failed login attempts.
         await userManager.ResetAccessFailedCountAsync(user);
@@ -244,6 +300,9 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
 
         // Validation of 2-FA token is successful, user is authenticated.
         await authLoggingService.LogAuthEventSuccessAsync(model.Username, AuthEventType.TwoFactorAuthentication);
+
+        // The login is complete, so the ephemeral this proof was checked against is spent.
+        AuthHelper.InvalidateSrpSession(cache, user);
 
         // Reset failed login attempts.
         await userManager.ResetAccessFailedCountAsync(user);
@@ -291,6 +350,9 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
 
         // Recovery code is valid, user is authenticated.
         await authLoggingService.LogAuthEventSuccessAsync(model.Username, AuthEventType.TwoFactorAuthentication);
+
+        // The login is complete, so the ephemeral this proof was checked against is spent.
+        AuthHelper.InvalidateSrpSession(cache, user);
 
         // Reset failed login attempts.
         await userManager.ResetAccessFailedCountAsync(user);
@@ -385,7 +447,8 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
 
         // Look up the refresh token directly - we don't need to validate the access token
         // since the refresh token itself contains the user information we need.
-        var refreshTokenEntry = await context.AliasVaultUserRefreshTokens.Include(t => t.User).FirstOrDefaultAsync(t => t.Value == model.RefreshToken);
+        var refreshTokenHash = AuthHelper.HashRefreshToken(model.RefreshToken);
+        var refreshTokenEntry = await context.AliasVaultUserRefreshTokens.Include(t => t.User).FirstOrDefaultAsync(t => t.Value == refreshTokenHash);
 
         if (refreshTokenEntry == null)
         {
@@ -399,7 +462,7 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
         // Remove the provided refresh token and any other existing refresh tokens that are issued to the current device ID.
         // This to make sure all tokens are revoked for this device that user is "logging out" from.
         var deviceIdentifier = AuthHelper.GenerateDeviceIdentifier(Request);
-        var allDeviceTokens = await context.AliasVaultUserRefreshTokens.Where(t => t.UserId == user.Id && (t.Value == model.RefreshToken || t.DeviceIdentifier == deviceIdentifier)).ToListAsync();
+        var allDeviceTokens = await context.AliasVaultUserRefreshTokens.Where(t => t.UserId == user.Id && (t.Value == refreshTokenHash || t.DeviceIdentifier == deviceIdentifier)).ToListAsync();
         context.AliasVaultUserRefreshTokens.RemoveRange(allDeviceTokens);
         await context.SaveChangesAsync();
 
@@ -426,7 +489,8 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
         }
 
         // Look up the refresh token directly.
-        var refreshTokenEntry = await context.AliasVaultUserRefreshTokens.Include(t => t.User).FirstOrDefaultAsync(t => t.Value == model.RefreshToken);
+        var refreshTokenHash = AuthHelper.HashRefreshToken(model.RefreshToken);
+        var refreshTokenEntry = await context.AliasVaultUserRefreshTokens.Include(t => t.User).FirstOrDefaultAsync(t => t.Value == refreshTokenHash);
 
         if (refreshTokenEntry == null)
         {
@@ -478,6 +542,17 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
         if (!isValid)
         {
             return BadRequest(ApiErrorCodeHelper.CreateValidationErrorResponse(apiErrorCode, 400));
+        }
+
+        // Check the key derivation parameters the client says it registered with. Registration is the
+        // other write path for these, and until now only the password change checked them: values that
+        // the policy would refuse could be introduced here and then live in the vault, which hands them
+        // straight back at every login and feeds them to the parameter distribution that unknown-username
+        // responses are drawn from. There is nothing to ratchet against on a new account, so only the
+        // absolute bounds apply.
+        if (!EncryptionSettingsPolicy.IsAcceptable(model.EncryptionType, model.EncryptionSettings, null))
+        {
+            return BadRequest(ApiErrorCodeHelper.CreateValidationErrorResponse(ApiErrorCode.UNSUPPORTED_ENCRYPTION_SETTINGS, 400));
         }
 
         // Use the SrpIdentity from the request if provided (typically a GUID generated by the client),
@@ -553,7 +628,7 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
 
         // Store the server ephemeral in memory cache for the Vault update (and set new password) endpoint to use.
         // Use SrpIdentity as the cache key to ensure consistency.
-        cache.Set(AuthHelper.CachePrefixEphemeral + srpIdentity, ephemeral.Secret, TimeSpan.FromMinutes(5));
+        AuthHelper.StoreSrpEphemeral(cache, srpIdentity, ephemeral.Secret);
 
         return Ok(new PasswordChangeInitiateResponse(latestVaultEncryptionSettings.Salt, ephemeral.Public, latestVaultEncryptionSettings.EncryptionType, latestVaultEncryptionSettings.EncryptionSettings, srpIdentity));
     }
@@ -630,7 +705,7 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
 
         // Store the server ephemeral in memory cache for confirmation endpoint.
         // Use SrpIdentity as the cache key to ensure consistency.
-        cache.Set(AuthHelper.CachePrefixEphemeral + srpIdentity, ephemeral.Secret, TimeSpan.FromMinutes(5));
+        AuthHelper.StoreSrpEphemeral(cache, srpIdentity, ephemeral.Secret);
 
         return Ok(new LoginInitiateResponse(
             latestVaultEncryptionSettings.Salt,
@@ -649,6 +724,20 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
     [AllowAnonymous]
     public async Task<IActionResult> InitiateMobileLogin([FromBody] MobileLoginInitiateRequest model)
     {
+        // Each call to this endpoint stores a row that stays until the retention task removes it, and it
+        // needs no authentication to reach, so cap what a single address can create.
+        if (!TryConsumeAnonymousAuthAllowance(out var rateLimitError))
+        {
+            return rateLimitError!;
+        }
+
+        // Reject a key that could never complete the exchange instead of storing it. The column holds
+        // unbounded text, so an unusable value is only ever a way to spend storage.
+        if (!Cryptography.Server.Encryption.IsValidRsaPublicKey(model.ClientPublicKey))
+        {
+            return BadRequest(ApiErrorCodeHelper.CreateValidationErrorResponse(ApiErrorCode.MOBILE_LOGIN_INVALID_PUBLIC_KEY, 400));
+        }
+
         await using var context = await dbContextFactory.CreateDbContextAsync();
 
         // Check the IP blocklist.
@@ -877,12 +966,27 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
         // Log the successful account deletion.
         await authLoggingService.LogAuthEventSuccessAsync(user.UserName!, AuthEventType.AccountDeletion);
 
+        // The confirmation is complete, so the ephemeral this proof was checked against is spent.
+        AuthHelper.InvalidateSrpSession(cache, user);
+
         // Delete the user and their data.
         await using var context = await dbContextFactory.CreateDbContextAsync();
         context.AliasVaultUsers.Remove(user);
         await context.SaveChangesAsync();
 
         return Ok(ApiErrorCodeHelper.CreateErrorResponse(ApiErrorCode.ACCOUNT_SUCCESSFULLY_DELETED, 200));
+    }
+
+    /// <summary>
+    /// Truncates a username to the longest value that can belong to an account, so unauthenticated input
+    /// cannot drive work proportional to its length. Registration caps usernames far below this limit, so
+    /// no existing account can be shortened by it.
+    /// </summary>
+    /// <param name="username">The username as submitted.</param>
+    /// <returns>The username, shortened if it exceeds the maximum length.</returns>
+    private static string TruncateUsername(string username)
+    {
+        return UsernameHelper.Truncate(username, AuthLog.UsernameMaxLength);
     }
 
     /// <summary>
@@ -1001,6 +1105,24 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
     }
 
     /// <summary>
+    /// Counts one request against the caller's allowance for the endpoints that need no authentication
+    /// to reach, and produces the response to return when that allowance is used up.
+    /// </summary>
+    /// <param name="error">The response to return when the request is over the allowance, otherwise null.</param>
+    /// <returns>True when the request is within the allowance and may proceed.</returns>
+    private bool TryConsumeAnonymousAuthAllowance(out IActionResult? error)
+    {
+        if (anonymousAuthRateLimitService.TryConsume(IpAddressUtility.GetRawIpAddressFromContext(HttpContext)?.ToString()))
+        {
+            error = null;
+            return true;
+        }
+
+        error = StatusCode(429, ApiErrorCodeHelper.CreateValidationErrorResponse(ApiErrorCode.AUTH_RATE_LIMIT_EXCEEDED, 429));
+        return false;
+    }
+
+    /// <summary>
     /// Validates the user and SRP session (password). If the user is not found or the password is invalid an
     /// action result is returned with the appropriate error message. If everything is valid nothing is returned.
     /// </summary>
@@ -1008,6 +1130,15 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
     /// <returns>User and SrpSession object if validation succeeded, IActionResult as error on error.</returns>
     private async Task<(AliasVaultUser? User, SrpSession? ServerSession, IActionResult? Error)> ValidateUserAndPassword(ValidateLoginRequest model)
     {
+        // Every endpoint that reaches this is anonymous, and each call is more expensive than the login
+        // it follows: the proof is checked against every ephemeral the account has in flight, so one
+        // request can cost several modular exponentiations, and a failure writes an auth log row. Charge
+        // it to the caller's allowance the same way starting a login is charged.
+        if (!TryConsumeAnonymousAuthAllowance(out var rateLimitError))
+        {
+            return (null, null, rateLimitError);
+        }
+
         var user = await userManager.FindByNameAsync(model.Username);
         if (user == null)
         {
@@ -1113,28 +1244,39 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
 
         try
         {
+            var existingTokenHash = AuthHelper.HashRefreshToken(existingTokenValue);
+
             // Token reuse window:
             // Check if a new refresh token was already generated for the current token in the last 30 seconds.
             // If yes, then return the already generated new token. This is to prevent client-side race conditions.
-            var existingTokenReuseWindow = timeProvider.UtcNow.AddSeconds(-30);
-            var existingTokenReuse = await context.AliasVaultUserRefreshTokens
-                .FirstOrDefaultAsync(t => t.UserId == user.Id &&
-                                            t.PreviousTokenValue == existingTokenValue &&
-                                            t.CreatedAt > existingTokenReuseWindow);
-
-            if (existingTokenReuse is not null)
+            // The issued token is held in memory for the length of the window rather than read back from
+            // the database, which stores only its hash and so cannot hand it out a second time.
+            if (cache.TryGetValue(AuthHelper.CachePrefixRotatedToken + existingTokenHash, out string? rotatedToken) && rotatedToken is not null)
             {
-                // A new token was already generated for the current token in the last 30 seconds.
-                // Return the already generated new token.
-                var accessToken = GenerateJwtToken(user);
-                return new TokenModel { Token = accessToken, RefreshToken = existingTokenReuse.Value };
+                // The window only holds while the session it points at is still live. Logging out deletes
+                // that row, and the database stays the authority on that: without this check the window
+                // would keep handing out ten-minute access tokens for up to 30 seconds after a logout.
+                var rotatedTokenHash = AuthHelper.HashRefreshToken(rotatedToken);
+                var now = timeProvider.UtcNow;
+                var rotatedTokenIsLive = await context.AliasVaultUserRefreshTokens
+                    .AnyAsync(t => t.UserId == user.Id && t.Value == rotatedTokenHash && t.ExpireDate >= now);
+
+                if (rotatedTokenIsLive)
+                {
+                    var accessToken = GenerateJwtToken(user);
+                    return new TokenModel { Token = accessToken, RefreshToken = rotatedToken };
+                }
+
+                // Drop the entry so the rest of this window costs nothing, then fall through to the
+                // lookup below, which finds no row for an already rotated token and refuses the refresh.
+                cache.Remove(AuthHelper.CachePrefixRotatedToken + existingTokenHash);
             }
 
             // Check if the refresh token still exists and is not expired.
-            var existingToken = await context.AliasVaultUserRefreshTokens.FirstOrDefaultAsync(t => t.UserId == user.Id && t.Value == existingTokenValue);
+            var existingToken = await context.AliasVaultUserRefreshTokens.FirstOrDefaultAsync(t => t.UserId == user.Id && t.Value == existingTokenHash);
             if (existingToken == null || existingToken.ExpireDate < timeProvider.UtcNow)
             {
-                return null;
+                return await RotateWithinWindowAfterCacheLoss(context, user, existingTokenHash);
             }
 
             context.AliasVaultUserRefreshTokens.Remove(existingToken);
@@ -1143,10 +1285,15 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
             var existingTokenLifetime = existingToken.ExpireDate - existingToken.CreatedAt;
 
             // Retrieve new refresh token.
-            var newRefreshToken = await GenerateRefreshToken(user, existingTokenLifetime, existingToken.Value);
+            var newRefreshToken = await GenerateRefreshToken(user, existingTokenLifetime, existingTokenHash);
 
             // After successfully retrieving new refresh token, remove the existing one by saving changes.
             await context.SaveChangesAsync();
+
+            cache.Set(
+                AuthHelper.CachePrefixRotatedToken + existingTokenHash,
+                newRefreshToken.RefreshToken,
+                TimeSpan.FromSeconds(TokenReuseWindowSeconds));
 
             // Return new refresh token.
             return newRefreshToken;
@@ -1158,14 +1305,64 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
     }
 
     /// <summary>
+    /// Handles a refresh with a token that was already rotated away, when the in-memory reuse window
+    /// no longer knows about it.
+    /// </summary>
+    /// <remarks>
+    /// The window above only exists in this process, so restarting the API empties it, and the token
+    /// it would have handed back cannot be recovered from the database, which stores only hashes. The
+    /// rotation it recorded is still there though: the replacement row names the token it replaced.
+    /// Finding that row means the caller is in exactly the race the window exists for, so it gets a
+    /// fresh pair rather than being logged out over a collision it could not have avoided.
+    ///
+    /// The replaced row is deliberately left in place. The request that rotated it away already
+    /// returned that token to the same client, and deleting it here would break whichever of the two
+    /// responses the client ends up keeping.
+    /// </remarks>
+    /// <param name="context">Database context to use.</param>
+    /// <param name="user">The user the refresh is for.</param>
+    /// <param name="existingTokenHash">Hash of the token the client presented.</param>
+    /// <returns>A new token pair when the presented token was rotated inside the window, null otherwise.</returns>
+    private async Task<TokenModel?> RotateWithinWindowAfterCacheLoss(AliasServerDbContext context, AliasVaultUser user, string existingTokenHash)
+    {
+        var now = timeProvider.UtcNow;
+        var windowStart = now.AddSeconds(-TokenReuseWindowSeconds);
+
+        var replacement = await context.AliasVaultUserRefreshTokens
+            .FirstOrDefaultAsync(t => t.UserId == user.Id
+                && t.PreviousTokenValue == existingTokenHash
+                && t.CreatedAt >= windowStart
+                && t.ExpireDate >= now);
+
+        if (replacement is null)
+        {
+            return null;
+        }
+
+        // Issued without naming the token it follows, so the window stays anchored to the rotation
+        // that actually happened. Recording the presented token here instead would move the window's
+        // start forward on every call, and a token someone had taken a copy of would go on minting
+        // new ones for as long as they kept asking. A further request inside the window still finds
+        // the original replacement row, which is what the lookup above matches on.
+        var newRefreshToken = await GenerateRefreshToken(user, replacement.ExpireDate - replacement.CreatedAt);
+
+        cache.Set(
+            AuthHelper.CachePrefixRotatedToken + existingTokenHash,
+            newRefreshToken.RefreshToken,
+            TimeSpan.FromSeconds(TokenReuseWindowSeconds));
+
+        return newRefreshToken;
+    }
+
+    /// <summary>
     /// Generates a new access and refresh token for a user and persists the refresh token
     /// to the database.
     /// </summary>
     /// <param name="user">The user to generate the tokens for.</param>
     /// <param name="newTokenLifetime">The lifetime of the new token.</param>
-    /// <param name="existingTokenValue">The existing token value that is being replaced (optional).</param>
+    /// <param name="existingTokenHash">The hash of the token that is being replaced (optional).</param>
     /// <returns>TokenModel which includes new access and refresh token.</returns>
-    private async Task<TokenModel> GenerateRefreshToken(AliasVaultUser user, TimeSpan newTokenLifetime, string? existingTokenValue = null)
+    private async Task<TokenModel> GenerateRefreshToken(AliasVaultUser user, TimeSpan newTokenLifetime, string? existingTokenHash = null)
     {
         await using var context = await dbContextFactory.CreateDbContextAsync();
 
@@ -1180,8 +1377,8 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
             UserId = user.Id,
             DeviceIdentifier = deviceIdentifier,
             IpAddress = IpAddressUtility.GetAnonymizedIpFromContext(HttpContext, config.IpLoggingEnabled),
-            Value = refreshToken,
-            PreviousTokenValue = existingTokenValue,
+            Value = AuthHelper.HashRefreshToken(refreshToken),
+            PreviousTokenValue = existingTokenHash,
             ExpireDate = timeProvider.UtcNow.Add(newTokenLifetime),
             CreatedAt = timeProvider.UtcNow,
         });
@@ -1193,35 +1390,99 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
     /// <summary>
     /// Generate a fake login response for a user that does not exist to prevent user enumeration attacks.
     /// </summary>
-    /// <param name="model">The login initiate request model.</param>
+    /// <param name="username">The username that was submitted, already bounded in length.</param>
     /// <returns>IActionResult.</returns>
-    private OkObjectResult FakeLoginResponse(LoginInitiateRequest model)
+    private async Task<OkObjectResult> FakeLoginResponse(string username)
     {
-        // Generate a cache key for fake data
-        var fakeDataCacheKey = AuthHelper.CachePrefixFakeData + model.Username;
-
-        // Try to get cached fake data first
-        if (!cache.TryGetValue(fakeDataCacheKey, out (string Salt, string Verifier) fakeData))
-        {
-            // Generate new fake data if not cached
-            var client = new SrpClient();
-            var fakeSalt = client.GenerateSalt();
-            var fakePrivateKey = client.DerivePrivateKey(fakeSalt, model.Username, "fakePassword");
-            var fakeVerifier = client.DeriveVerifier(fakePrivateKey);
-            fakeData = (fakeSalt, fakeVerifier);
-
-            // Cache the fake data for 4 hours
-            cache.Set(fakeDataCacheKey, fakeData, TimeSpan.FromHours(4));
-        }
+        var serverSecret = GetJwtKey();
+        var fakeCredentials = AuthHelper.DeriveFakeSrpCredentials(username, serverSecret);
 
         // Always generate a new ephemeral for the fake data, as this is also done for existing users.
-        var fakeEphemeral = Srp.GenerateEphemeralServer(fakeData.Verifier);
+        var fakeEphemeral = Srp.GenerateEphemeralServer(fakeCredentials.Verifier);
 
-        // Return the same response format as for real users
+        // Draw the key derivation parameters from the ones this instance actually holds. Reporting
+        // the current defaults would name every account registered under an older default.
+        var fakeEncryption = AuthHelper.DeriveFakeEncryptionSettings(
+            username,
+            serverSecret,
+            await GetVaultEncryptionSettingsDistribution());
+
+        // Return the same response format as for real users. The SRP identity has to be filled in too:
+        // a real account always resolves to one, so leaving it null here would tell the caller that the
+        // account does not exist regardless of how well the other values are faked.
         return Ok(new LoginInitiateResponse(
-            fakeData.Salt,
+            fakeCredentials.Salt,
             fakeEphemeral.Public,
-            Defaults.EncryptionType,
-            Defaults.EncryptionSettings));
+            fakeEncryption.EncryptionType,
+            fakeEncryption.EncryptionSettings,
+            fakeCredentials.SrpIdentity));
+    }
+
+    /// <summary>
+    /// Returns how many vaults on this instance hold each combination of key derivation parameters.
+    /// </summary>
+    /// <remarks>
+    /// Counted over all vault revisions rather than one per user, which is close enough for drawing
+    /// a plausible value and avoids a per-user aggregate on an unauthenticated request. Cached
+    /// because the shape of this only changes when someone registers or changes their password,
+    /// and the endpoint that needs it can be reached without credentials.
+    ///
+    /// Only one request rebuilds it at a time. The rest wait and take the value it stores, so an
+    /// expiry cannot turn a burst of unknown-username logins into a burst of identical aggregates
+    /// -- which is what an enumeration attempt paced to land on each expiry would produce.
+    /// </remarks>
+    /// <returns>The parameter combinations in use with the number of vaults holding each.</returns>
+    private async Task<IReadOnlyList<(string EncryptionType, string EncryptionSettings, int Count)>> GetVaultEncryptionSettingsDistribution()
+    {
+        if (TryGetCachedVaultEncryptionSettingsDistribution(out var cached))
+        {
+            return cached;
+        }
+
+        await VaultEncryptionDistributionLock.WaitAsync();
+        try
+        {
+            // Another request may have rebuilt it while this one waited.
+            if (TryGetCachedVaultEncryptionSettingsDistribution(out cached))
+            {
+                return cached;
+            }
+
+            await using var context = await dbContextFactory.CreateDbContextAsync();
+            var distribution = await context.Vaults
+                .GroupBy(x => new { x.EncryptionType, x.EncryptionSettings })
+                .Select(g => new { g.Key.EncryptionType, g.Key.EncryptionSettings, Count = g.Count() })
+                .OrderBy(x => x.EncryptionType)
+                .ThenBy(x => x.EncryptionSettings)
+                .ToListAsync();
+
+            var result = distribution
+                .Select(x => (x.EncryptionType, x.EncryptionSettings, x.Count))
+                .ToList();
+
+            cache.Set(VaultEncryptionDistributionCacheKey, (IReadOnlyList<(string EncryptionType, string EncryptionSettings, int Count)>)result, TimeSpan.FromMinutes(VaultEncryptionDistributionCacheMinutes));
+            return result;
+        }
+        finally
+        {
+            VaultEncryptionDistributionLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Reads the cached key derivation parameter distribution.
+    /// </summary>
+    /// <param name="distribution">The cached distribution when one is held.</param>
+    /// <returns>True when a cached distribution was available.</returns>
+    private bool TryGetCachedVaultEncryptionSettingsDistribution(out IReadOnlyList<(string EncryptionType, string EncryptionSettings, int Count)> distribution)
+    {
+        if (cache.TryGetValue(VaultEncryptionDistributionCacheKey, out IReadOnlyList<(string EncryptionType, string EncryptionSettings, int Count)>? cached) && cached is not null)
+        {
+            distribution = cached;
+            return true;
+        }
+
+        distribution = [];
+        return false;
     }
 }

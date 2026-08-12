@@ -646,7 +646,11 @@
     "USERNAME_INVALID_CHARACTERS": "Nama pengguna tidak valid, hanya boleh berisi huruf atau angka.",
     "VAULT_NOT_UP_TO_DATE": "Vault Anda bukan yang terkini. Harap sinkronkan vault Anda dan coba lagi.",
     "INTERNAL_SERVER_ERROR": "Kesalahan server internal.",
-    "VAULT_ERROR": "Vault lokal Anda belum diperbarui. Harap sinkronkan vault Anda dengan menyegarkan halaman dan coba lagi."
+    "VAULT_ERROR": "Vault lokal Anda belum diperbarui. Harap sinkronkan vault Anda dengan menyegarkan halaman dan coba lagi.",
+    "AUTH_RATE_LIMIT_EXCEEDED": "Terlalu banyak percobaan dari jaringan Anda. Silakan tunggu beberapa menit dan coba lagi.",
+    "MOBILE_LOGIN_REQUEST_NOT_FOUND": "Permintaan masuk ini sudah tidak ada. Mungkin sudah kedaluwarsa. Silakan mulai yang baru dan coba lagi.",
+    "MOBILE_LOGIN_REQUEST_ALREADY_FULFILLED": "Permintaan masuk ini sudah disetujui. Silakan mulai yang baru dan coba lagi.",
+    "UNSUPPORTED_ENCRYPTION_SETTINGS": "Server tidak menerima pengaturan enkripsi yang digunakan versi ini. Silakan perbarui ke versi terbaru dan coba lagi."
   },
   "sync": {
     "offline": "Offline",

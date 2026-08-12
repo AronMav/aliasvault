@@ -13,11 +13,14 @@
 #
 # Adding a new task:
 #   1. Define a function named `task_<name>` that fetches the upstream payload
-#      and writes the result into the relevant source file. Use the
-#      `replace_generated_block` helper to swap content between
-#      `// BEGIN_GENERATED: <id>` and `// END_GENERATED: <id>` markers (any
-#      comment syntax works — the helper matches both line- and block-style).
-#   2. Register the task in TASK_ORDER + TASK_DESCRIPTIONS below.
+#      and writes the result into the relevant source file.
+#      - When the payload lands inside a file that also holds hand-written
+#        content, use the `replace_generated_block` helper to swap content
+#        between `// BEGIN_GENERATED: <id>` and `// END_GENERATED: <id>`
+#        markers (any comment syntax works — the helper matches both line-
+#        and block-style).
+#      - When the target file is generated in its entirety, write it directly.
+#   2. Register the task in TASKS below.
 
 set -euo pipefail
 
@@ -140,6 +143,50 @@ task_passkeys_allowlist() {
     echo -e "  ${GREEN}✓${RESET} updated ${target#$REPO_ROOT/}"
 }
 
+task_public_suffix_list() {
+    local url="https://publicsuffix.org/list/public_suffix_list.dat"
+    local target="$REPO_ROOT/core/rust/src/credential_matcher/public_suffix_list.dat"
+
+    echo -e "  ${BLUE}↓${RESET} fetching $url"
+    local raw="$WORK_DIR/public_suffix_list.dat"
+    download "$url" "$raw"
+
+    # Keep only the rules. The upstream prose is more than half the file and the
+    # Rust core embeds this verbatim into the WASM and mobile binaries. Rule
+    # order is preserved; the matcher does not depend on it, but keeping it
+    # makes diffs against upstream readable.
+    local rules="$WORK_DIR/public-suffix-list.rules"
+    python3 - "$raw" "$rules" <<'PY'
+import sys
+
+raw_path, out_path = sys.argv[1:3]
+
+with open(raw_path, encoding="utf-8") as f:
+    rules = [line.strip() for line in f]
+rules = [r for r in rules if r and not r.startswith("//")]
+
+# Guard against a truncated or redirected download silently emptying the list,
+# which would disable public-suffix awareness in credential matching.
+if len(rules) < 5000:
+    sys.stderr.write(f"ERROR: parsed only {len(rules)} rules, refusing to write\n")
+    sys.exit(1)
+if not any(r == "github.io" for r in rules):
+    sys.stderr.write("ERROR: expected rule 'github.io' missing, refusing to write\n")
+    sys.exit(1)
+
+with open(out_path, "w", encoding="utf-8", newline="\n") as f:
+    f.write("\n".join(rules) + "\n")
+PY
+
+    {
+        echo "// Source: $url"
+        echo "// Last refreshed: $TODAY"
+        cat "$rules"
+    } > "$target"
+
+    echo -e "  ${GREEN}✓${RESET} updated ${target#$REPO_ROOT/} ($(grep -cv '^//' "$target") rules)"
+}
+
 # ----------------------------------------------------------------------
 # Registry
 # ----------------------------------------------------------------------
@@ -148,6 +195,7 @@ task_passkeys_allowlist() {
 # tasks run when no specific task argument is given.
 TASKS=(
     "passkeys-allowlist:Android privileged-apps allowlist for WebAuthn (gstatic.com/gpm-passkeys-privileged-apps/apps.json)"
+    "public-suffix-list:Public Suffix List used for credential domain matching (publicsuffix.org)"
 )
 
 # ----------------------------------------------------------------------

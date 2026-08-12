@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------
 // <copyright file="ClientPlaywrightTest.cs" company="aliasvault">
 // Copyright (c) aliasvault. All rights reserved.
 // Licensed under the AGPLv3 license. See LICENSE.md file in the project root for full license information.
@@ -17,6 +17,13 @@ using Microsoft.Playwright;
 /// </summary>
 public abstract class ClientPlaywrightTest : PlaywrightTest
 {
+    /// <summary>
+    /// The key derivation parameters this test deployment registers accounts with, deliberately
+    /// cheap so the tests are not spent on Argon2. Handed to the client through appsettings.json
+    /// below, which is how a real deployment overrides them too.
+    /// </summary>
+    protected const string TestEncryptionSettings = "{\"DegreeOfParallelism\":1,\"MemorySize\":1024,\"Iterations\":1}";
+
     private const int BasePort = 5600;
     private static int _currentPort = BasePort;
 
@@ -118,7 +125,7 @@ public abstract class ClientPlaywrightTest : PlaywrightTest
             PrivateEmailDomains = privateEmailDomains,
             PublicRegistrationEnabled = "true",
             CryptographyOverrideType = "Argon2Id",
-            CryptographyOverrideSettings = "{\"DegreeOfParallelism\":1,\"MemorySize\":1024,\"Iterations\":1}",
+            CryptographyOverrideSettings = TestEncryptionSettings,
         };
 
         await Context.RouteAsync(

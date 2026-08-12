@@ -191,4 +191,22 @@
   <data name="ACCOUNT_LOCKED" xml:space="preserve">
     <value>You have entered an incorrect password too many times and your account has now been locked out. You can try again in 30 minutes.</value>
   </data>
+  <data name="MOBILE_LOGIN_REQUEST_NOT_FOUND" xml:space="preserve">
+    <value>This login request no longer exists. It may have expired. Please start a new one and try again.</value>
+  </data>
+  <data name="MOBILE_LOGIN_REQUEST_ALREADY_FULFILLED" xml:space="preserve">
+    <value>This login request has already been approved. Please start a new one and try again.</value>
+  </data>
+  <data name="REGISTRATION_RATE_LIMIT_EXCEEDED" xml:space="preserve">
+    <value>Too many accounts have been created from your network. Please wait a while and try again.</value>
+  </data>
+  <data name="AUTH_RATE_LIMIT_EXCEEDED" xml:space="preserve">
+    <value>Too many attempts from your network. Please wait a few minutes and try again.</value>
+  </data>
+  <data name="MOBILE_LOGIN_INVALID_PUBLIC_KEY" xml:space="preserve">
+    <value>This login request could not be started. Please update to the latest version and try again.</value>
+  </data>
+  <data name="UNSUPPORTED_ENCRYPTION_SETTINGS" xml:space="preserve">
+    <value>The server does not accept the encryption settings this version uses. Please update to the latest version and try again.</value>
+  </data>
 </root>

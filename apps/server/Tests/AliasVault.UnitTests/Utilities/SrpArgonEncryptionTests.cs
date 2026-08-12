@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------
 // <copyright file="SrpArgonEncryptionTests.cs" company="aliasvault">
 // Copyright (c) aliasvault. All rights reserved.
 // Licensed under the AGPLv3 license. See LICENSE.md file in the project root for full license information.
@@ -16,6 +16,36 @@ using SecureRemotePassword;
 /// </summary>
 public class SrpArgonEncryptionTests
 {
+    /// <summary>
+    /// Test basic encryption and decryption using default encryption logic (Argon2id and AES-256).
+    /// </summary>
+    /// <summary>
+    /// Pins the derived key for the current and the previous default parameters against the same
+    /// vectors the Rust core asserts (core/rust/src/argon2/mod.rs).
+    /// </summary>
+    /// <remarks>
+    /// The web client derives keys in the Rust core while this library derives them with Konscious,
+    /// and both have to reproduce the key a vault was encrypted under. Two implementations of the
+    /// same specification agreeing is not something to assume, so it is asserted: if these ever
+    /// diverge, vaults stop opening on one of the clients.
+    /// </remarks>
+    /// <param name="memorySize">Memory size in KiB.</param>
+    /// <param name="iterations">Iteration count.</param>
+    /// <param name="expectedHex">The key the Rust core derives for these parameters.</param>
+    /// <returns>Task.</returns>
+    [TestCase(19456, 2, "608B39E3CD889D3FADA5857D4AEA0DBEB3AFBA963DEEB0EA0D0911D68E7CA5E7")]
+    [TestCase(65536, 3, "B0168741041AA4390DD51D7FFDD2DDAF4D45DA508CC88C844CA3AFCF07BC8F0D")]
+    public async Task DerivedKeyMatchesTheRustCoreTest(int memorySize, int iterations, string expectedHex)
+    {
+        const string password = "correct horse battery staple";
+        const string salt = "0123456789ABCDEF";
+        var settings = $"{{\"DegreeOfParallelism\":1,\"MemorySize\":{memorySize},\"Iterations\":{iterations}}}";
+
+        var derived = await Encryption.DeriveKeyFromPasswordAsync(password, salt, Defaults.EncryptionType, settings);
+
+        Assert.That(Convert.ToHexString(derived), Is.EqualTo(expectedHex));
+    }
+
     /// <summary>
     /// Test basic encryption and decryption using default encryption logic (Argon2id and AES-256).
     /// </summary>

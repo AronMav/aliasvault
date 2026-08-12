@@ -142,7 +142,13 @@
       "USERNAME_INVALID_CHARACTERS": "Tá ainm úsáideora neamhbhailí, ní féidir ach litreacha nó digití a bheith ann.",
       "VAULT_NOT_UP_TO_DATE": "Níl do chruinneachán cothrom le dáta. Sioncrónaigh do chruinneachán agus déan iarracht arís.",
       "INTERNAL_SERVER_ERROR": "Earráid inmheánach freastalaí.",
-      "VAULT_ERROR": "Níl an cruinneachán áitiúil cothrom le dáta. Sioncrónaigh do chruinneachán tríd an leathanach a athnuachan agus déan iarracht arís."
+      "VAULT_ERROR": "Níl an cruinneachán áitiúil cothrom le dáta. Sioncrónaigh do chruinneachán tríd an leathanach a athnuachan agus déan iarracht arís.",
+      "AUTH_RATE_LIMIT_EXCEEDED": "An iomarca iarrachtaí ó do líonra. Fan cúpla nóiméad agus bain triail eile as.",
+      "MOBILE_LOGIN_REQUEST_NOT_FOUND": "Níl an t-iarratas logála isteach seo ann a thuilleadh. Seans gur imigh sé in éag. Tosaigh ceann nua agus bain triail eile as.",
+      "MOBILE_LOGIN_INVALID_PUBLIC_KEY": "Níorbh fhéidir an t-iarratas logála isteach seo a thosú. Nuashonraigh go dtí an leagan is déanaí agus bain triail eile as.",
+      "REGISTRATION_RATE_LIMIT_EXCEEDED": "Cruthaíodh an iomarca cuntas ó do líonra. Fan tamall agus bain triail eile as.",
+      "REGISTRATION_FAILED": "Níorbh fhéidir an cuntas a chruthú. Déan iarracht arís i gceann cúpla nóiméad. Má leanann an fhadhb seo, déan teagmháil leis an bhfoireann tacaíochta.",
+      "UNSUPPORTED_ENCRYPTION_SETTINGS": "Ní ghlacann an freastalaí leis na socruithe criptithe a úsáideann an leagan seo. Nuashonraigh go dtí an leagan is déanaí agus bain triail eile as."
     }
   },
   "content": {

@@ -1,9 +1,44 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-  <base-config cleartextTrafficPermitted="true">
+  <!--
+    Release builds require TLS and trust only the system CA store.
+
+    Trusting user-installed CAs means anyone who can get a certificate into that store - a
+    social-engineered "install this profile", an MDM profile, someone with the unlocked device
+    for a minute - can read every request the app makes, including the session tokens and the
+    encrypted vault. The master password is never sent, so it stays safe either way, but the
+    tokens alone are enough to reach the account.
+
+    Self-hosting on a private CA or over plain HTTP therefore no longer works out of the box.
+    A publicly trusted certificate (Let's Encrypt issues them for any domain) is the supported
+    way to run your own server.
+  -->
+  <base-config cleartextTrafficPermitted="false">
     <trust-anchors>
       <certificates src="system"/>
-      <certificates src="user"/> <!-- opt-in to user-installed CAs -->
     </trust-anchors>
   </base-config>
+
+  <!--
+    The development server runs over plain HTTP. 10.0.2.2 is how the emulator reaches the host
+    machine. Both are local to the device or the emulator and cannot be reached from a network,
+    so allowing cleartext here does not expose traffic.
+  -->
+  <domain-config cleartextTrafficPermitted="true">
+    <domain includeSubdomains="true">localhost</domain>
+    <domain includeSubdomains="true">127.0.0.1</domain>
+    <domain includeSubdomains="true">10.0.2.2</domain>
+  </domain-config>
+
+  <!--
+    Debug builds additionally trust user-installed CAs, so a locally generated certificate can
+    be used while developing. This block is ignored unless the APK is marked debuggable, so it
+    cannot loosen a release build.
+  -->
+  <debug-overrides>
+    <trust-anchors>
+      <certificates src="system"/>
+      <certificates src="user"/>
+    </trust-anchors>
+  </debug-overrides>
 </network-security-config>

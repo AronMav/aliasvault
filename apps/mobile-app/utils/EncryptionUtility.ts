@@ -3,8 +3,22 @@ import { Buffer } from 'buffer';
 import AesGcmCrypto from 'react-native-aes-gcm-crypto';
 
 import NativeVaultManager from '@/specs/NativeVaultManager';
+import { ENCRYPTION_SETTINGS, ENCRYPTION_TYPE } from '@/utils/dist/core/models/defaults';
 import type { EncryptionKey } from '@/utils/dist/core/models/vault';
 import type { Email, MailboxEmail } from '@/utils/dist/core/models/webapi';
+
+/**
+ * Default Argon2id parameters this build derives new keys with, generated from
+ * core/models/src/defaults/EncryptionDefaults.ts.
+ *
+ * Only used where there is no vault to take parameters from yet. An existing vault is
+ * always opened with the parameters the server reports for it, which are the ones its
+ * key was derived under.
+ */
+export const DEFAULT_ENCRYPTION = {
+  type: ENCRYPTION_TYPE,
+  settings: ENCRYPTION_SETTINGS,
+} as const;
 
 /**
  * Utility class for encryption operations including:
@@ -21,8 +35,8 @@ class EncryptionUtility {
   public static async deriveKeyFromPassword(
     password: string,
     salt: string,
-    encryptionType: string = 'Argon2Id',
-    encryptionSettings: string = '{"Iterations":2,"MemorySize":19456,"DegreeOfParallelism":1}'
+    encryptionType: string = DEFAULT_ENCRYPTION.type,
+    encryptionSettings: string = DEFAULT_ENCRYPTION.settings
   ): Promise<Uint8Array> {
     try {
       // Call the native method to derive the key via Argon2id
@@ -300,9 +314,32 @@ class EncryptionUtility {
         decryptedEmail.messageSource = await EncryptionUtility.symmetricDecrypt(email.messageSource, symmetricKeyBase64);
       }
 
+      if (email.attachments?.length) {
+        decryptedEmail.attachments = await Promise.all(email.attachments.map(async attachment => ({
+          ...attachment,
+          filename: await EncryptionUtility.decryptMetadataLegacyAware(attachment.filename, symmetricKeyBase64),
+          mimeType: await EncryptionUtility.decryptMetadataLegacyAware(attachment.mimeType, symmetricKeyBase64),
+        })));
+      }
+
       return decryptedEmail;
     } catch (err) {
       throw new Error(err instanceof Error ? err.message : 'Failed to decrypt email');
+    }
+  }
+
+  /**
+   * Decrypts attachment metadata, tolerating values that predate metadata encryption.
+   *
+   * Emails received before attachment filenames were encrypted still hold plaintext, and they
+   * cannot be migrated: the server has no way back to the per-email symmetric key. AES-GCM
+   * verifies an authentication tag, so plaintext cannot be mistaken for valid ciphertext.
+   */
+  private static async decryptMetadataLegacyAware(value: string, symmetricKeyBase64: string): Promise<string> {
+    try {
+      return await EncryptionUtility.symmetricDecrypt(value, symmetricKeyBase64);
+    } catch {
+      return value;
     }
   }
 

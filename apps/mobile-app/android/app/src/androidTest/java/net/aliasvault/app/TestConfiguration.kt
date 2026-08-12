@@ -33,17 +33,4 @@ object TestConfiguration {
      * Short timeout for quick checks (milliseconds).
      */
     const val SHORT_TIMEOUT_MS = 2_000L
-
-    /**
-     * Default Argon2Id encryption settings matching server defaults.
-     */
-    object EncryptionDefaults {
-        const val TYPE = "Argon2Id"
-        const val ITERATIONS = 2
-        const val MEMORY_SIZE = 19456
-        const val PARALLELISM = 1
-
-        val settingsJson: String
-            get() = """{"DegreeOfParallelism":$PARALLELISM,"MemorySize":$MEMORY_SIZE,"Iterations":$ITERATIONS}"""
-    }
 }

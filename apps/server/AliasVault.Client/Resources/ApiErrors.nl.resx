@@ -191,4 +191,22 @@
   <data name="ACCOUNT_LOCKED" xml:space="preserve">
     <value>Je hebt te vaak een onjuist wachtwoord ingevoerd en je account is nu vergrendeld. Je kunt het over 30 minuten opnieuw proberen.</value>
   </data>
+  <data name="AUTH_RATE_LIMIT_EXCEEDED" xml:space="preserve">
+    <value>Te veel pogingen vanaf je netwerk. Wacht een paar minuten en probeer het opnieuw.</value>
+  </data>
+  <data name="REGISTRATION_RATE_LIMIT_EXCEEDED" xml:space="preserve">
+    <value>Er zijn te veel accounts aangemaakt vanaf je netwerk. Wacht even en probeer het opnieuw.</value>
+  </data>
+  <data name="MOBILE_LOGIN_REQUEST_NOT_FOUND" xml:space="preserve">
+    <value>Dit inlogverzoek bestaat niet meer. Mogelijk is het verlopen. Start een nieuw verzoek en probeer het opnieuw.</value>
+  </data>
+  <data name="MOBILE_LOGIN_REQUEST_ALREADY_FULFILLED" xml:space="preserve">
+    <value>Dit inlogverzoek is al goedgekeurd. Start een nieuw verzoek en probeer het opnieuw.</value>
+  </data>
+  <data name="MOBILE_LOGIN_INVALID_PUBLIC_KEY" xml:space="preserve">
+    <value>Dit inlogverzoek kon niet worden gestart. Werk bij naar de nieuwste versie en probeer het opnieuw.</value>
+  </data>
+  <data name="UNSUPPORTED_ENCRYPTION_SETTINGS" xml:space="preserve">
+    <value>De server accepteert de versleutelingsinstellingen van deze versie niet. Werk bij naar de nieuwste versie en probeer het opnieuw.</value>
+  </data>
 </root>

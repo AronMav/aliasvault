@@ -16,6 +16,7 @@ using AliasVault.ImportExport;
 using AliasVault.ImportExport.Exceptions;
 using AliasVault.ImportExport.Importers;
 using AliasVault.ImportExport.Models;
+using AliasVault.ImportExport.Models.Imports;
 using AliasVault.UnitTests.Common;
 
 /// <summary>
@@ -2847,6 +2848,208 @@ public class ImportExportTests
             Assert.That(convertedLogin.ItemType, Is.EqualTo(ItemType.Login));
             Assert.That(convertedLogin.TotpCodes, Has.Count.EqualTo(1));
             Assert.That(convertedLogin.TotpCodes.First().SecretKey, Is.EqualTo("PLW4SB3PQ7MKVXY2MXF4NEXS6Y"));
+        });
+    }
+
+    /// <summary>
+    /// Test that the KDBX adapter maps the neutral model onto ImportedCredential,
+    /// including the custom field shape which does not match one to one.
+    /// </summary>
+    /// <returns>Async task.</returns>
+    [Test]
+    public async Task ImportCredentialsFromKdbxNeutralModel()
+    {
+        var result = new KdbxImportResult
+        {
+            SessionId = "kdbx-1",
+            Items =
+            [
+                new KdbxItem
+                {
+                    Title = "Example",
+                    Username = "alice",
+                    Password = "s3cret",
+                    Notes = "a note",
+                    Totp = "otpauth://totp/Example?secret=JBSWY3DPEHPK3PXP",
+                    FolderPath = "Work/Servers",
+                    Urls = ["https://example.com/", "https://login.example.com/"],
+                    Tags = ["work"],
+                    CreatedAt = "2024-01-02T03:04:05Z",
+                    UpdatedAt = "2024-02-03T04:05:06Z",
+                    CustomFields =
+                    [
+                        new KdbxCustomField { Name = "Recovery code", Value = "12345", IsProtected = true },
+                        new KdbxCustomField { Name = "Account", Value = "ACC-1", IsProtected = false },
+                    ],
+                    Attachments =
+                    [
+                        new KdbxAttachmentMeta { Id = "0", Filename = "notes.txt", Size = 5 },
+                    ],
+                }
+            ],
+            Skipped = new KdbxSkipped { RecycleBin = 0, History = 0 },
+        };
+
+        var imported = await KdbxImporter.MapToCredentials(
+            result,
+            _ => Task.FromResult<byte[]?>("hello"u8.ToArray()));
+
+        var credential = imported.Credentials[0];
+        Assert.Multiple(() =>
+        {
+            Assert.That(credential.ServiceName, Is.EqualTo("Example"));
+            Assert.That(credential.Username, Is.EqualTo("alice"));
+            Assert.That(credential.Password, Is.EqualTo("s3cret"));
+            Assert.That(credential.Notes, Is.EqualTo("a note"));
+            Assert.That(credential.TwoFactorSecret, Is.EqualTo("otpauth://totp/Example?secret=JBSWY3DPEHPK3PXP"));
+            Assert.That(credential.FolderPath, Is.EqualTo("Work/Servers"));
+            Assert.That(credential.ServiceUrls, Is.EqualTo(new List<string> { "https://example.com/", "https://login.example.com/" }));
+            Assert.That(credential.Tags, Is.EqualTo(new List<string> { "work" }));
+            Assert.That(credential.CreatedAt, Is.EqualTo(new DateTime(2024, 1, 2, 3, 4, 5, DateTimeKind.Utc)));
+            Assert.That(credential.UpdatedAt, Is.EqualTo(new DateTime(2024, 2, 3, 4, 5, 6, DateTimeKind.Utc)));
+            Assert.That(credential.Attachments, Is.Not.Null);
+            Assert.That(credential.Attachments![0].Filename, Is.EqualTo("notes.txt"));
+            Assert.That(credential.Attachments![0].Blob, Is.EqualTo("hello"u8.ToArray()));
+        });
+
+        var protectedField = credential.CustomFieldValues!.Single(f => f.Label == "Recovery code");
+        var plainField = credential.CustomFieldValues!.Single(f => f.Label == "Account");
+        Assert.Multiple(() =>
+        {
+            Assert.That(protectedField.Value, Is.EqualTo("12345"));
+            Assert.That(protectedField.FieldType, Is.EqualTo(FieldTypeKind.Password));
+            Assert.That(plainField.FieldType, Is.EqualTo(FieldTypeKind.Text));
+            Assert.That(protectedField.DefinitionId, Is.Not.EqualTo(Guid.Empty));
+            Assert.That(protectedField.DefinitionId, Is.Not.EqualTo(plainField.DefinitionId));
+        });
+    }
+
+    /// <summary>
+    /// Test that an attachment which the session no longer holds does not fail the
+    /// whole import but is reported as a per-item failure.
+    /// </summary>
+    /// <returns>Async task.</returns>
+    [Test]
+    public async Task ImportKdbxReportsMissingAttachmentAsFailure()
+    {
+        var result = new KdbxImportResult
+        {
+            SessionId = "kdbx-1",
+            Items =
+            [
+                new KdbxItem
+                {
+                    Title = "Example",
+                    Attachments = [new KdbxAttachmentMeta { Id = "0", Filename = "gone.txt", Size = 5 }],
+                }
+            ],
+            Skipped = new KdbxSkipped(),
+        };
+
+        var imported = await KdbxImporter.MapToCredentials(result, _ => Task.FromResult<byte[]?>(null));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(imported.Credentials, Has.Count.EqualTo(1));
+            Assert.That(imported.Credentials[0].Attachments, Is.Null.Or.Empty);
+            Assert.That(imported.FailedItems, Has.Count.EqualTo(1));
+            Assert.That(imported.FailedItems[0].ItemTitle, Is.EqualTo("Example"));
+        });
+    }
+
+    /// <summary>
+    /// Test that deliberately skipped content is reported to the user instead of
+    /// disappearing silently.
+    /// </summary>
+    /// <returns>Async task.</returns>
+    [Test]
+    public async Task ImportKdbxReportsSkippedContentAsNotes()
+    {
+        var result = new KdbxImportResult
+        {
+            SessionId = "kdbx-1",
+            Items = [new KdbxItem { Title = "Example" }],
+            Skipped = new KdbxSkipped { RecycleBin = 3, History = 7 },
+        };
+
+        var imported = await KdbxImporter.MapToCredentials(result, _ => Task.FromResult<byte[]?>(null));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(imported.Notes, Has.Some.Contains("3"));
+            Assert.That(imported.Notes, Has.Some.Contains("7"));
+        });
+    }
+
+    /// <summary>
+    /// Test that a database larger than the server upload limit is rejected before
+    /// any decryption work happens: such a database cannot fit into the vault at all.
+    /// </summary>
+    [Test]
+    public void KdbxFileLargerThanUploadLimitIsRejectedUpFront()
+    {
+        Assert.Multiple(() =>
+        {
+            Assert.That(ImportSizeGuard.ExceedsUploadLimit(150L * 1024 * 1024, 100), Is.True);
+            Assert.That(ImportSizeGuard.ExceedsUploadLimit(50L * 1024 * 1024, 100), Is.False);
+
+            // An older server reports no limit. Refusing on a guess would be worse
+            // than letting the existing HTTP 413 path handle it.
+            Assert.That(ImportSizeGuard.ExceedsUploadLimit(150L * 1024 * 1024, null), Is.False);
+        });
+    }
+
+    /// <summary>
+    /// Test that the preview stage compares the existing vault plus the incoming
+    /// attachments against the limit rather than the attachments alone.
+    /// </summary>
+    [Test]
+    public void PreviewCombinesVaultSizeAndAttachmentsAgainstLimit()
+    {
+        Assert.Multiple(() =>
+        {
+            Assert.That(ImportSizeGuard.WouldExceedAfterImport(90L * 1024 * 1024, 20L * 1024 * 1024, 100), Is.True);
+            Assert.That(ImportSizeGuard.WouldExceedAfterImport(10L * 1024 * 1024, 20L * 1024 * 1024, 100), Is.False);
+            Assert.That(ImportSizeGuard.WouldExceedAfterImport(90L * 1024 * 1024, 20L * 1024 * 1024, null), Is.False);
+        });
+    }
+
+    /// <summary>
+    /// Test that the incoming attachments are counted the way they will be uploaded, not raw.
+    /// </summary>
+    /// <remarks>
+    /// The vault travels base64 encoded, so it arrives a third larger than it is on disk, and the
+    /// attachments being imported into it grow by the same factor. Counting the vault encoded but the
+    /// attachments raw understates the total by a third of the import: 45 MB of vault and 35 MB of
+    /// attachments read as 95 MB against a 100 MB limit and raise no warning, while the upload that
+    /// follows is nearly 107 MB and is refused.
+    /// </remarks>
+    [Test]
+    public void PreviewCountsIncomingAttachmentsAsEncoded()
+    {
+        const long vaultBytes = 45L * 1024 * 1024;
+        const long attachmentBytes = 35L * 1024 * 1024;
+
+        Assert.That(ImportSizeGuard.WouldExceedAfterImport(vaultBytes, attachmentBytes, 100), Is.True);
+    }
+
+    /// <summary>
+    /// Test that the browser ceiling is applied independently of the server limit: a vault can
+    /// be well within what the server accepts and still be too large for the browser to save.
+    /// </summary>
+    [Test]
+    public void AttachmentsBeyondBrowserCeilingAreRejectedRegardlessOfServerLimit()
+    {
+        Assert.Multiple(() =>
+        {
+            Assert.That(ImportSizeGuard.WouldExceedBrowserLimit(1L * 1024 * 1024, 40L * 1024 * 1024), Is.True);
+            Assert.That(ImportSizeGuard.WouldExceedBrowserLimit(1L * 1024 * 1024, 10L * 1024 * 1024), Is.False);
+
+            // The existing vault counts towards the ceiling, not just the incoming attachments.
+            Assert.That(ImportSizeGuard.WouldExceedBrowserLimit(25L * 1024 * 1024, 10L * 1024 * 1024), Is.True);
+
+            // A 100 MB server limit would let this through; the browser would not.
+            Assert.That(ImportSizeGuard.WouldExceedAfterImport(1L * 1024 * 1024, 40L * 1024 * 1024, 100), Is.False);
         });
     }
 }

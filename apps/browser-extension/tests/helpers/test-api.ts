@@ -22,6 +22,13 @@ import * as srp from 'secure-remote-password/client.js';
 
 // Get the vault schema SQL from the core vault package
 import { COMPLETE_SCHEMA_SQL, VAULT_VERSIONS } from '../../src/utils/dist/core/vault/index.mjs';
+import {
+  ARGON2ID_DEGREE_OF_PARALLELISM,
+  ARGON2ID_ITERATIONS,
+  ARGON2ID_MEMORY_SIZE,
+  ENCRYPTION_SETTINGS,
+  ENCRYPTION_TYPE,
+} from '../../src/utils/dist/core/models/defaults/index.js';
 
 /**
  * Token model returned from successful registration/login.
@@ -73,20 +80,16 @@ type RegisterRequest = {
 };
 
 /**
- * Default encryption settings for Argon2Id.
- * These match the server defaults in AliasVault.Cryptography.Client/Defaults.cs
+ * Default encryption settings for Argon2Id, generated from
+ * core/models/src/defaults/EncryptionDefaults.ts.
  */
 const DEFAULT_ENCRYPTION = {
-  type: 'Argon2Id',
-  settings: JSON.stringify({
-    DegreeOfParallelism: 1,
-    MemorySize: 19456,
-    Iterations: 2,
-  }),
+  type: ENCRYPTION_TYPE,
+  settings: ENCRYPTION_SETTINGS,
   // Parsed settings for argon2 usage
-  iterations: 2,
-  memorySize: 19456,
-  parallelism: 1,
+  iterations: ARGON2ID_ITERATIONS,
+  memorySize: ARGON2ID_MEMORY_SIZE,
+  parallelism: ARGON2ID_DEGREE_OF_PARALLELISM,
 };
 
 /**

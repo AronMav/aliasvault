@@ -45,15 +45,15 @@ public class AliasVaultUserRefreshToken
     public string? IpAddress { get; set; }
 
     /// <summary>
-    /// Gets or sets the token value.
+    /// Gets or sets the SHA-256 hash of the token value. The token itself is only ever held by the
+    /// client, so reading this table does not yield anything that can be presented as a session.
     /// </summary>
     [StringLength(255)]
     public string Value { get; set; } = null!;
 
     /// <summary>
-    /// Gets or sets the previous token value that was replaced by the current one (optional).
-    /// This is used to allow a short reuse window where if multiple refresh requests are
-    /// made in quick succession they all get the same new refresh token.
+    /// Gets or sets the hash of the token that was replaced by the current one (optional), which
+    /// records what a rotation replaced.
     /// </summary>
     [StringLength(255)]
     public string? PreviousTokenValue { get; set; }

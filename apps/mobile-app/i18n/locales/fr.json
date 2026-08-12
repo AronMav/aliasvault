@@ -646,7 +646,11 @@
     "USERNAME_INVALID_CHARACTERS": "Le nom d'utilisateur est invalide : il ne peut contenir que des lettres ou des chiffres.",
     "VAULT_NOT_UP_TO_DATE": "Votre coffre-fort n'est pas à jour. Veuillez synchroniser votre coffre-fort et réessayer.",
     "INTERNAL_SERVER_ERROR": "Erreur interne du serveur.",
-    "VAULT_ERROR": "Le coffre-fort local n'est pas à jour. Veuillez synchroniser votre coffre-fort en rafraîchissant la page et réessayez."
+    "VAULT_ERROR": "Le coffre-fort local n'est pas à jour. Veuillez synchroniser votre coffre-fort en rafraîchissant la page et réessayez.",
+    "AUTH_RATE_LIMIT_EXCEEDED": "Trop de tentatives depuis votre réseau. Veuillez patienter quelques minutes et réessayer.",
+    "MOBILE_LOGIN_REQUEST_NOT_FOUND": "Cette demande de connexion n'existe plus. Elle a peut-être expiré. Veuillez en démarrer une nouvelle et réessayer.",
+    "MOBILE_LOGIN_REQUEST_ALREADY_FULFILLED": "Cette demande de connexion a déjà été approuvée. Veuillez en démarrer une nouvelle et réessayer.",
+    "UNSUPPORTED_ENCRYPTION_SETTINGS": "Le serveur n'accepte pas les paramètres de chiffrement utilisés par cette version. Veuillez mettre à jour vers la dernière version et réessayer."
   },
   "sync": {
     "offline": "Hors ligne",

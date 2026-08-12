@@ -185,5 +185,10 @@ public abstract class WebApplicationFactoryFixture<TEntryPoint> : WebApplication
         Environment.SetEnvironmentVariable("ADMIN_PASSWORD_HASH", "AQAAAAIAAYagAAAAEKWfKfa2gh9Z72vjAlnNP1xlME7FsunRznzyrfqFte40FToufRwa3kX8wwDwnEXZag==");
         Environment.SetEnvironmentVariable("ADMIN_PASSWORD_GENERATED", "2024-01-01T00:00:00Z");
         Environment.SetEnvironmentVariable("ALIASVAULT_TEST_MODE", "true");
+
+        // Every test reaches the API from loopback, so they all share one bucket in the per-IP auth
+        // rate limit. Disable it here: a shard that happens to run enough logins in a minute would
+        // otherwise fail on the limit rather than on what it set out to test.
+        Environment.SetEnvironmentVariable("MAX_AUTH_REQUESTS_PER_IP_PER_MINUTE", "0");
     }
 }

@@ -1,0 +1,208 @@
+//-----------------------------------------------------------------------
+// <copyright file="EncryptionSettingsPolicy.cs" company="aliasvault">
+// Copyright (c) aliasvault. All rights reserved.
+// Licensed under the AGPLv3 license. See LICENSE.md file in the project root for full license information.
+// </copyright>
+//-----------------------------------------------------------------------
+
+namespace AliasVault.Cryptography.Client;
+
+using System.Text.Json;
+
+/// <summary>
+/// Decides whether the Argon2id parameters a client reports having used can be recorded against a vault.
+/// </summary>
+/// <remarks>
+/// A vault is only openable with the parameters it was encrypted under, so whatever is accepted here
+/// is handed back to every client at the next login. Two things have to be kept out: parameters that
+/// cost the account less work than the ones it already had, and parameters so expensive that no phone
+/// or browser tab can open the vault again.
+///
+/// The lower bound is the account's own current parameters rather than a fixed number, so an account
+/// keeps whatever it was registered with even after the build's defaults move. This bound only ever
+/// ratchets upwards: a password change may raise the work a guess costs but never lower it, which is
+/// what stops a client from reporting cheap parameters against a vault that had expensive ones. All
+/// three parameters feed that comparison, parallelism included, because raising the lane count alone
+/// makes a guess cheaper without touching the other two.
+///
+/// The consequence is that a deployment which lowers the parameters it registers accounts with (see
+/// CryptographyOverride in the client config) cannot apply that to accounts registered before the
+/// change; their password changes are rejected until the parameters are raised back. Accounts have to
+/// be re-registered to move down, which is the accepted cost of the ratchet holding in the one
+/// direction that matters.
+///
+/// Values are rejected rather than clamped: the client has already derived its key, so recording
+/// anything other than what it reports produces a vault it cannot open.
+/// </remarks>
+public static class EncryptionSettingsPolicy
+{
+    /// <summary>
+    /// Highest memory size accepted, in KiB (1 GiB). Above this a vault stops being openable on
+    /// the phones and browser tabs that also have to open it.
+    /// </summary>
+    public const int MaxMemorySize = 1048576;
+
+    /// <summary>
+    /// Highest iteration count accepted.
+    /// </summary>
+    public const int MaxIterations = 10;
+
+    /// <summary>
+    /// Highest degree of parallelism accepted.
+    /// </summary>
+    public const int MaxDegreeOfParallelism = 4;
+
+    /// <summary>
+    /// Lowest memory size the Argon2id specification allows for a given degree of parallelism, per lane.
+    /// </summary>
+    private const int MinMemorySizePerLane = 8;
+
+    /// <summary>
+    /// Checks that the parameters a client reports can be recorded against a vault that currently
+    /// holds the given ones.
+    /// </summary>
+    /// <param name="encryptionType">The encryption type reported by the client.</param>
+    /// <param name="encryptionSettings">The encryption settings JSON reported by the client.</param>
+    /// <param name="currentEncryptionSettings">
+    /// The settings the vault holds today. The reported parameters may not cost less work than these.
+    /// When they cannot be parsed, only the absolute bounds apply, since there is nothing to compare to.
+    /// </param>
+    /// <returns>True when the reported parameters are usable and no weaker than the current ones.</returns>
+    public static bool IsAcceptable(string? encryptionType, string? encryptionSettings, string? currentEncryptionSettings)
+    {
+        if (!string.Equals(encryptionType, Defaults.EncryptionType, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!TryParse(encryptionSettings, out var parameters))
+        {
+            return false;
+        }
+
+        if (parameters.MemorySize > MaxMemorySize
+            || parameters.Iterations is < 1 or > MaxIterations
+            || parameters.DegreeOfParallelism is < 1 or > MaxDegreeOfParallelism
+            || parameters.MemorySize < MinMemorySizePerLane * parameters.DegreeOfParallelism)
+        {
+            return false;
+        }
+
+        if (!TryParse(currentEncryptionSettings, out var current))
+        {
+            return true;
+        }
+
+        // Compare the work a guess costs rather than each parameter on its own, so trading memory
+        // for passes is allowed as long as the total does not fall.
+        //
+        // Parallelism belongs in that comparison. Argon2id splits MemorySize across DegreeOfParallelism
+        // lanes that an attacker computes at the same time, so raising it at a fixed memory and pass
+        // count divides both the memory each lane needs and the time a guess takes: measured against
+        // this project's own defaults, going from one lane to four makes a guess about three and a half
+        // times cheaper. Comparing only memory times passes would call that unchanged and accept it.
+        //
+        // Cross-multiplied rather than divided so the comparison stays exact. The bounds checked above
+        // keep every factor small, so the products cannot overflow.
+        return (long)parameters.MemorySize * parameters.Iterations * current.DegreeOfParallelism
+            >= (long)current.MemorySize * current.Iterations * parameters.DegreeOfParallelism;
+    }
+
+    /// <summary>
+    /// Reads the Argon2id parameters out of a settings JSON string, filling anything absent from the
+    /// current defaults.
+    /// </summary>
+    /// <remarks>
+    /// This is what key derivation uses, as opposed to <see cref="TryParse"/>, which decides whether a
+    /// set of parameters may be recorded and so insists on all three being present. Both read the same
+    /// format from the same place, because two readers of a vault's parameters that disagree derive
+    /// two different keys from one password.
+    /// </remarks>
+    /// <param name="encryptionSettings">The encryption settings JSON string, or null for the defaults.</param>
+    /// <returns>The parameters to derive with.</returns>
+    public static (int DegreeOfParallelism, int MemorySize, int Iterations) ParseOrDefaults(string? encryptionSettings)
+    {
+        var parameters = (
+            DegreeOfParallelism: Defaults.Argon2IdDegreeOfParallelism,
+            MemorySize: Defaults.Argon2IdMemorySize,
+            Iterations: Defaults.Argon2IdIterations);
+
+        if (string.IsNullOrWhiteSpace(encryptionSettings))
+        {
+            return parameters;
+        }
+
+        Dictionary<string, int>? properties;
+        try
+        {
+            properties = JsonSerializer.Deserialize<Dictionary<string, int>>(encryptionSettings);
+        }
+        catch (JsonException)
+        {
+            return parameters;
+        }
+
+        if (properties is null)
+        {
+            return parameters;
+        }
+
+        if (properties.TryGetValue("DegreeOfParallelism", out var degreeOfParallelism))
+        {
+            parameters.DegreeOfParallelism = degreeOfParallelism;
+        }
+
+        if (properties.TryGetValue("MemorySize", out var memorySize))
+        {
+            parameters.MemorySize = memorySize;
+        }
+
+        if (properties.TryGetValue("Iterations", out var iterations))
+        {
+            parameters.Iterations = iterations;
+        }
+
+        return parameters;
+    }
+
+    /// <summary>
+    /// Reads the three Argon2id parameters out of a settings JSON string.
+    /// </summary>
+    /// <remarks>
+    /// All three have to be present. Filling a missing one in from the defaults would record
+    /// parameters the client never used, which is the failure this whole type exists to prevent.
+    /// </remarks>
+    /// <param name="encryptionSettings">The encryption settings JSON string.</param>
+    /// <param name="parameters">The parsed parameters when parsing succeeds.</param>
+    /// <returns>True when the string parsed into a complete set of parameters.</returns>
+    public static bool TryParse(string? encryptionSettings, out (int DegreeOfParallelism, int MemorySize, int Iterations) parameters)
+    {
+        parameters = default;
+
+        if (string.IsNullOrWhiteSpace(encryptionSettings))
+        {
+            return false;
+        }
+
+        Dictionary<string, int>? properties;
+        try
+        {
+            properties = JsonSerializer.Deserialize<Dictionary<string, int>>(encryptionSettings);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+
+        if (properties is null
+            || !properties.TryGetValue("DegreeOfParallelism", out var degreeOfParallelism)
+            || !properties.TryGetValue("MemorySize", out var memorySize)
+            || !properties.TryGetValue("Iterations", out var iterations))
+        {
+            return false;
+        }
+
+        parameters = (degreeOfParallelism, memorySize, iterations);
+        return true;
+    }
+}

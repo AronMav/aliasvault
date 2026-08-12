@@ -191,6 +191,18 @@
     <value>Once you have exported the file, you can upload it below.</value>
     <comment>KeePassXC export instructions part 2</comment>
   </data>
+  <data name="KdbxPasswordPrompt" xml:space="preserve">
+    <value>This database is encrypted. Please enter its master password.</value>
+    <comment>Shown above the password field when importing a .kdbx database file</comment>
+  </data>
+  <data name="KdbxPasswordHint" xml:space="preserve">
+    <value>This is the master password of your KeePass database, not your AliasVault master password. Databases that also require a key file are not supported.</value>
+    <comment>Hint shown below the password field when importing a .kdbx database file</comment>
+  </data>
+  <data name="KeePassKdbxInstructions" xml:space="preserve">
+    <value>Alternatively, select your .kdbx database file directly. This is the only way to import file attachments, which are not included in CSV or XML exports. You will be asked for your master password; databases protected by a key file are not supported.</value>
+    <comment>Instructions for importing a .kdbx database file directly, shown on the KeePass and KeePassXC cards</comment>
+  </data>
   <!-- NordPass -->
   <data name="NordPassDescription" xml:space="preserve">
     <value>Import passwords from NordPass</value>

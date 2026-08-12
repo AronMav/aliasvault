@@ -69,4 +69,15 @@ function resolveDefaultLanguage(appLanguage, availableCodes) {
   return matchAvailableLanguage(appLanguage, availableCodes) ?? availableCodes[0] ?? DEFAULT_LANGUAGE_CODE;
 }
 
-export { DEFAULT_LANGUAGE_CODE, DEFAULT_PASSWORD_LENGTH, DEFAULT_WORD_COUNT, LANGUAGES, MAX_PASSWORD_LENGTH, MAX_WORD_COUNT, MIN_PASSWORD_LENGTH, MIN_WORD_COUNT, getLanguageInfo, matchAvailableLanguage, normalizeLanguageCode, resolveDefaultLanguage };
+// src/defaults/EncryptionDefaults.ts
+var ARGON2ID_DEGREE_OF_PARALLELISM = 1;
+var ARGON2ID_MEMORY_SIZE = 65536;
+var ARGON2ID_ITERATIONS = 3;
+var ENCRYPTION_TYPE = "Argon2Id";
+var ENCRYPTION_SETTINGS = JSON.stringify({
+  DegreeOfParallelism: ARGON2ID_DEGREE_OF_PARALLELISM,
+  MemorySize: ARGON2ID_MEMORY_SIZE,
+  Iterations: ARGON2ID_ITERATIONS
+});
+
+export { ARGON2ID_DEGREE_OF_PARALLELISM, ARGON2ID_ITERATIONS, ARGON2ID_MEMORY_SIZE, DEFAULT_LANGUAGE_CODE, DEFAULT_PASSWORD_LENGTH, DEFAULT_WORD_COUNT, ENCRYPTION_SETTINGS, ENCRYPTION_TYPE, LANGUAGES, MAX_PASSWORD_LENGTH, MAX_WORD_COUNT, MIN_PASSWORD_LENGTH, MIN_WORD_COUNT, getLanguageInfo, matchAvailableLanguage, normalizeLanguageCode, resolveDefaultLanguage };

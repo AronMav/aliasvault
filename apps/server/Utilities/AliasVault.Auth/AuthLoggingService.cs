@@ -41,7 +41,7 @@ public class AuthLoggingService(IServiceProvider serviceProvider, IHttpContextAc
         var authAttempt = new AuthLog
         {
             Timestamp = DateTime.UtcNow,
-            Username = username,
+            Username = TruncateUsername(username),
             EventType = eventType,
             IsSuccess = true,
             FailureReason = null,
@@ -87,7 +87,7 @@ public class AuthLoggingService(IServiceProvider serviceProvider, IHttpContextAc
         var authAttempt = new AuthLog
         {
             Timestamp = DateTime.UtcNow,
-            Username = username,
+            Username = TruncateUsername(username),
             EventType = eventType,
             IsSuccess = false,
             FailureReason = failureReason,
@@ -103,6 +103,17 @@ public class AuthLoggingService(IServiceProvider serviceProvider, IHttpContextAc
 
         dbContext.AuthLogs.Add(authAttempt);
         await dbContext.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// Truncates a username to the length the auth log can store. Failed attempts are logged before the
+    /// username has been validated, so the value can be any length the request body allowed.
+    /// </summary>
+    /// <param name="username">The username to log.</param>
+    /// <returns>The username, shortened to the maximum length the column accepts.</returns>
+    private static string TruncateUsername(string username)
+    {
+        return UsernameHelper.Truncate(username, AuthLog.UsernameMaxLength);
     }
 
     /// <summary>

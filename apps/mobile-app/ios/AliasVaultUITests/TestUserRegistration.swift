@@ -27,21 +27,6 @@ struct ApiError: Codable {
     let message: String?
 }
 
-/// Default encryption settings for Argon2Id.
-/// These match the server defaults in AliasVault.Cryptography.Client/Defaults.cs
-enum EncryptionDefaults {
-    static let type = "Argon2Id"
-    static let iterations: UInt32 = 2
-    static let memorySize: UInt32 = 19456
-    static let parallelism: UInt32 = 1
-
-    static var settingsJson: String {
-        """
-        {"DegreeOfParallelism":\(parallelism),"MemorySize":\(memorySize),"Iterations":\(iterations)}
-        """
-    }
-}
-
 /// Test user registration helper using SRP protocol.
 /// Mirrors the browser extension's test-api.ts implementation.
 enum TestUserRegistration {
@@ -74,10 +59,8 @@ enum TestUserRegistration {
 
     /// Derive encryption key from password using Argon2Id via Rust core.
     ///
-    /// Uses the AliasVault default parameters:
-    /// - Iterations: 2
-    /// - Memory: 19456 KiB
-    /// - Parallelism: 1
+    /// Uses the AliasVault default parameters, generated from
+    /// `core/models/src/defaults/EncryptionDefaults.ts`.
     /// - Output length: 32 bytes
     static func deriveKeyArgon2(_ password: String, salt: String) throws -> Data {
         // Use the Rust core's Argon2 implementation
@@ -147,8 +130,8 @@ enum TestUserRegistration {
             "username": normalizedUsername,
             "salt": salt,
             "verifier": verifier,
-            "encryptionType": EncryptionDefaults.type,
-            "encryptionSettings": EncryptionDefaults.settingsJson
+            "encryptionType": EncryptionDefaults.encryptionType,
+            "encryptionSettings": EncryptionDefaults.encryptionSettings
         ]
 
         let requestData = try JSONSerialization.data(withJSONObject: registerRequest)

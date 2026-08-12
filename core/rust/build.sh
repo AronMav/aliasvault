@@ -17,6 +17,7 @@ cd "$SCRIPT_DIR"
 # Output directories
 DIST_DIR="$SCRIPT_DIR/dist"
 WASM_DIR="$DIST_DIR/wasm"
+WASM_WEB_DIR="$DIST_DIR/wasm-web"
 DOTNET_DIR="$DIST_DIR/dotnet"
 IOS_DIR="$DIST_DIR/ios"
 ANDROID_DIR="$DIST_DIR/android"
@@ -42,7 +43,19 @@ check_tool() {
     fi
 }
 
-# Portable checksum function (works on macOS and Linux)
+# The SHA-256 tool to checksum sources with. macOS ships shasum, Linux and Git for
+# Windows ship sha256sum, and neither ships both -- so pick whichever is here rather
+# than naming one. Without this the checksum came out empty on hosts missing shasum,
+# and every build re-ran work the incremental check exists to skip.
+if command -v sha256sum >/dev/null 2>&1; then
+    sha256() { sha256sum "$@"; }
+elif command -v shasum >/dev/null 2>&1; then
+    sha256() { shasum -a 256 "$@"; }
+else
+    sha256() { echo "no-sha256-tool"; }
+fi
+
+# Portable checksum function (works on macOS, Linux and Git for Windows)
 # Includes Rust sources AND Cargo.toml/Cargo.lock to detect dependency changes
 # that can cause UniFFI checksum mismatches
 compute_source_checksum() {
@@ -54,11 +67,11 @@ compute_source_checksum() {
         {
             find "$dir" -name "*.rs" -type f -print0 2>/dev/null | \
                 sort -z | \
-                xargs -0 shasum -a 256 2>/dev/null
+                xargs -0 sha256 2>/dev/null
             # Include Cargo files from parent directory (where Cargo.toml lives)
             local cargo_dir="$(dirname "$dir")"
-            shasum -a 256 "$cargo_dir/Cargo.toml" "$cargo_dir/Cargo.lock" 2>/dev/null
-        } | shasum -a 256 | cut -d' ' -f1
+            sha256 "$cargo_dir/Cargo.toml" "$cargo_dir/Cargo.lock" 2>/dev/null
+        } | sha256 | cut -d' ' -f1
     else
         echo "unknown"
     fi
@@ -200,6 +213,16 @@ build_browser() {
         wasm-pack build --release --target web --out-dir "$WASM_DIR" --features wasm
     fi
 
+    # Second artifact: the Blazor web client additionally gets KDBX import support,
+    # which is what makes importing KeePass databases with attachments possible.
+    # The browser extension keeps the smaller build without it.
+    echo -e "  Running wasm-pack build (web client, with kdbx)..."
+    if $FAST_MODE; then
+        wasm-pack build --dev --target web --out-dir "$WASM_WEB_DIR" --features wasm,kdbx
+    else
+        wasm-pack build --release --target web --out-dir "$WASM_WEB_DIR" --features wasm,kdbx
+    fi
+
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))
 
@@ -246,8 +269,8 @@ README_EOF
         echo -e "${BLUE}Distributing to Blazor client...${NC}"
         rm -rf "$BLAZOR_CLIENT_DIST"
         mkdir -p "$BLAZOR_CLIENT_DIST"
-        cp "$WASM_DIR"/aliasvault_core_bg.wasm "$BLAZOR_CLIENT_DIST/"
-        cp "$WASM_DIR"/aliasvault_core.js "$BLAZOR_CLIENT_DIST/"
+        cp "$WASM_WEB_DIR"/aliasvault_core_bg.wasm "$BLAZOR_CLIENT_DIST/"
+        cp "$WASM_WEB_DIR"/aliasvault_core.js "$BLAZOR_CLIENT_DIST/"
 
         echo -e "${GREEN}Distributed to: $BLAZOR_CLIENT_DIST${NC}"
         ls -lh "$BLAZOR_CLIENT_DIST/"
@@ -541,15 +564,24 @@ build_android() {
 
     # Check for Android NDK
     if [ -z "${ANDROID_NDK_HOME:-}" ]; then
-        # Try to find NDK in common locations
-        if [ -d "$HOME/Library/Android/sdk/ndk" ]; then
-            # Find the latest NDK version
-            ANDROID_NDK_HOME=$(ls -d "$HOME/Library/Android/sdk/ndk"/*/ 2>/dev/null | sort -V | tail -1)
+        # Where Android Studio puts the SDK on each platform: macOS, Linux, and Windows. On Windows
+        # the location comes from LOCALAPPDATA rather than the home directory.
+        local ndk_roots=(
+            "$HOME/Library/Android/sdk/ndk"
+            "$HOME/Android/Sdk/ndk"
+            "${LOCALAPPDATA:-$HOME/AppData/Local}/Android/Sdk/ndk"
+            "${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}/ndk"
+        )
+
+        local ndk_root
+        for ndk_root in "${ndk_roots[@]}"; do
+            [ -d "$ndk_root" ] || continue
+
+            # Highest installed version wins.
+            ANDROID_NDK_HOME=$(ls -d "$ndk_root"/*/ 2>/dev/null | sort -V | tail -1)
             ANDROID_NDK_HOME="${ANDROID_NDK_HOME%/}"
-        elif [ -d "$HOME/Android/Sdk/ndk" ]; then
-            ANDROID_NDK_HOME=$(ls -d "$HOME/Android/Sdk/ndk"/*/ 2>/dev/null | sort -V | tail -1)
-            ANDROID_NDK_HOME="${ANDROID_NDK_HOME%/}"
-        fi
+            [ -n "$ANDROID_NDK_HOME" ] && break
+        done
 
         if [ -z "${ANDROID_NDK_HOME:-}" ]; then
             echo -e "${RED}Error: Android NDK not found${NC}"
@@ -586,10 +618,20 @@ build_android() {
 
     # Set up Android toolchain
     local host_tag
+    local exe_ext=""
+    local clang_ext=""
     case "$(uname -s)" in
         Darwin) host_tag="darwin-x86_64" ;;
         Linux) host_tag="linux-x86_64" ;;
-        *) host_tag="windows-x86_64" ;;
+        *)
+            host_tag="windows-x86_64"
+            # The NDK ships each clang wrapper twice on Windows: an extensionless shell script for
+            # MSYS-style shells, and a .cmd batch file. Rust and cc launch the linker through the
+            # Windows loader, which cannot execute the shell script -- it fails with "%1 is not a
+            # valid Win32 application" -- so the batch file is the one to name here.
+            exe_ext=".exe"
+            clang_ext=".cmd"
+            ;;
     esac
 
     local toolchain="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$host_tag"
@@ -598,24 +640,24 @@ build_android() {
     # Build for each ABI
     # Note: Use only 'uniffi' feature for library builds (not uniffi-cli which includes heavy bindgen deps)
     echo -e "  Building for arm64-v8a..."
-    AR="$toolchain/bin/llvm-ar" \
-    CC="$toolchain/bin/aarch64-linux-android${api_level}-clang" \
-    CXX="$toolchain/bin/aarch64-linux-android${api_level}-clang++" \
-    CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$toolchain/bin/aarch64-linux-android${api_level}-clang" \
+    AR="$toolchain/bin/llvm-ar$exe_ext" \
+    CC="$toolchain/bin/aarch64-linux-android${api_level}-clang$clang_ext" \
+    CXX="$toolchain/bin/aarch64-linux-android${api_level}-clang++$clang_ext" \
+    CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$toolchain/bin/aarch64-linux-android${api_level}-clang$clang_ext" \
     cargo build $cargo_flags --target aarch64-linux-android --features uniffi
 
     echo -e "  Building for armeabi-v7a..."
-    AR="$toolchain/bin/llvm-ar" \
-    CC="$toolchain/bin/armv7a-linux-androideabi${api_level}-clang" \
-    CXX="$toolchain/bin/armv7a-linux-androideabi${api_level}-clang++" \
-    CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$toolchain/bin/armv7a-linux-androideabi${api_level}-clang" \
+    AR="$toolchain/bin/llvm-ar$exe_ext" \
+    CC="$toolchain/bin/armv7a-linux-androideabi${api_level}-clang$clang_ext" \
+    CXX="$toolchain/bin/armv7a-linux-androideabi${api_level}-clang++$clang_ext" \
+    CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$toolchain/bin/armv7a-linux-androideabi${api_level}-clang$clang_ext" \
     cargo build $cargo_flags --target armv7-linux-androideabi --features uniffi
 
     echo -e "  Building for x86_64..."
-    AR="$toolchain/bin/llvm-ar" \
-    CC="$toolchain/bin/x86_64-linux-android${api_level}-clang" \
-    CXX="$toolchain/bin/x86_64-linux-android${api_level}-clang++" \
-    CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$toolchain/bin/x86_64-linux-android${api_level}-clang" \
+    AR="$toolchain/bin/llvm-ar$exe_ext" \
+    CC="$toolchain/bin/x86_64-linux-android${api_level}-clang$clang_ext" \
+    CXX="$toolchain/bin/x86_64-linux-android${api_level}-clang++$clang_ext" \
+    CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$toolchain/bin/x86_64-linux-android${api_level}-clang$clang_ext" \
     cargo build $cargo_flags --target x86_64-linux-android --features uniffi
 
     # Copy libraries
@@ -627,7 +669,7 @@ build_android() {
     # This removes debug info while keeping symbols needed for JNI
     if ! $FAST_MODE; then
         echo -e "  Stripping debug symbols from libraries..."
-        local llvm_strip="$toolchain/bin/llvm-strip"
+        local llvm_strip="$toolchain/bin/llvm-strip$exe_ext"
         if [ -x "$llvm_strip" ]; then
             "$llvm_strip" --strip-debug "$ANDROID_DIR/arm64-v8a/libaliasvault_core.so" 2>/dev/null || true
             "$llvm_strip" --strip-debug "$ANDROID_DIR/armeabi-v7a/libaliasvault_core.so" 2>/dev/null || true

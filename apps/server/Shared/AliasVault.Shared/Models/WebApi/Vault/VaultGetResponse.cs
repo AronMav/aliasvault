@@ -23,4 +23,10 @@ public class VaultGetResponse
     /// Gets or sets the requested vault.
     /// </summary>
     public Vault? Vault { get; set; }
+
+    /// <summary>
+    /// Gets or sets the maximum vault upload size in megabytes accepted by this server.
+    /// Null when the server predates this field; clients then fall back to reacting to HTTP 413.
+    /// </summary>
+    public int? MaxUploadSizeMb { get; set; }
 }

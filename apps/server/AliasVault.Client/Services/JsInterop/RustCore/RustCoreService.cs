@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------
 // <copyright file="RustCoreService.cs" company="aliasvault">
 // Copyright (c) aliasvault. All rights reserved.
 // Licensed under the AGPLv3 license. See LICENSE.md file in the project root for full license information.
@@ -11,6 +11,11 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using AliasVault.Client.Main.Models;
+using AliasVault.Cryptography.Client;
+using AliasVault.ImportExport.Exceptions;
+using AliasVault.ImportExport.Importers;
+using AliasVault.ImportExport.Models;
+using AliasVault.ImportExport.Models.Imports;
 using Microsoft.JSInterop;
 
 /// <summary>
@@ -229,6 +234,47 @@ public class RustCoreService : IAsyncDisposable
     }
 
     /// <summary>
+    /// Derive an encryption key from a password using Argon2id.
+    /// </summary>
+    /// <remarks>
+    /// Runs in the Rust WASM module rather than the managed implementation, which costs seconds
+    /// per derivation on this runtime and is paid on every login, unlock and password change.
+    /// The parameters come from the vault rather than from the defaults, because a vault opens
+    /// only under the parameters its key was derived with.
+    /// </remarks>
+    /// <param name="password">The password to derive from.</param>
+    /// <param name="salt">The salt recorded against the vault.</param>
+    /// <param name="encryptionType">The encryption type recorded against the vault, or null for the default.</param>
+    /// <param name="encryptionSettings">The encryption settings recorded against the vault, or null for the defaults.</param>
+    /// <returns>The derived 256-bit key. Falls back to the managed implementation when the WASM module is unavailable.</returns>
+    /// <exception cref="NotSupportedException">Thrown if the encryption type is not one this client implements.</exception>
+    public async Task<byte[]> DeriveKeyFromPasswordAsync(string password, string salt, string? encryptionType = null, string? encryptionSettings = null)
+    {
+        encryptionType ??= Defaults.EncryptionType;
+        if (!string.Equals(encryptionType, Defaults.EncryptionType, StringComparison.Ordinal))
+        {
+            throw new NotSupportedException($"Encryption type {encryptionType} is not supported.");
+        }
+
+        if (!await WaitForAvailabilityAsync())
+        {
+            // Derive in managed code rather than failing. Both implementations are held to the same
+            // Argon2id parameters and produce the same key, so the only difference the user sees is
+            // that it takes longer. Refusing instead would leave someone whose browser served a stale
+            // cache staring at a vault they cannot open until they work out that a hard reload fixes it.
+            return await Encryption.DeriveKeyFromPasswordAsync(password, salt, encryptionType, encryptionSettings);
+        }
+
+        // Read the parameters the same way the managed implementation does, so a vault recorded with a
+        // partial settings object opens to the same key on either path.
+        var parameters = EncryptionSettingsPolicy.ParseOrDefaults(encryptionSettings);
+
+        var hex = await jsRuntime.InvokeAsync<string>(
+            "rustCoreArgon2DeriveKey", password, salt, parameters.MemorySize, parameters.Iterations, parameters.DegreeOfParallelism);
+        return Convert.FromHexString(hex);
+    }
+
+    /// <summary>
     /// Generate a random salt for SRP registration.
     /// </summary>
     /// <returns>64-character uppercase hex string (32 bytes).</returns>
@@ -428,6 +474,94 @@ public class RustCoreService : IAsyncDisposable
         {
             return ["en"];
         }
+    }
+
+    /// <summary>
+    /// Opens a KDBX (KeePass) database in the Rust core and returns its mapped contents.
+    /// </summary>
+    /// <param name="fileBytes">The .kdbx file contents.</param>
+    /// <param name="password">The master password.</param>
+    /// <returns>The parsed database contents.</returns>
+    /// <exception cref="InvalidImportPasswordException">Thrown when the password does not decrypt the database.</exception>
+    /// <exception cref="ImportException">Thrown when the database cannot be read.</exception>
+    public async Task<KdbxImportResult> KdbxOpenAsync(byte[] fileBytes, string password)
+    {
+        if (!await WaitForAvailabilityAsync())
+        {
+            throw new InvalidOperationException("Rust WASM module is not available.");
+        }
+
+        string json;
+        try
+        {
+            json = await jsRuntime.InvokeAsync<string>("rustCoreKdbxOpen", fileBytes, password);
+        }
+        catch (JSException ex) when (ex.Message.Contains("invalid password", StringComparison.OrdinalIgnoreCase))
+        {
+            // The message is replaced rather than passed on. The import card copies exception
+            // messages, inner ones included, into the diagnostic block that users paste into
+            // bug reports, and this message originates outside our control: it is whatever the
+            // JavaScript bridge surfaced from the parser. Only text we wrote gets that far.
+            throw new InvalidImportPasswordException(
+                "The password did not open this database. It may also be protected by a key file, which is not supported.");
+        }
+        catch (JSException)
+        {
+            throw new ImportException(ImportStage.Parse, "The database could not be read.");
+        }
+
+        return JsonSerializer.Deserialize<KdbxImportResult>(json, JsonOptions)
+            ?? throw new ImportException(ImportStage.Parse, "The Rust core returned an empty KDBX result.");
+    }
+
+    /// <summary>
+    /// Opens a KDBX database and maps its whole contents, attachments included.
+    /// </summary>
+    /// <remarks>
+    /// Owns the session from end to end so that callers cannot leave one open: the blobs stay
+    /// in WebAssembly memory until the session is closed, and an import that throws halfway
+    /// would otherwise strand them there.
+    /// </remarks>
+    /// <param name="fileBytes">The .kdbx file contents.</param>
+    /// <param name="password">The master password.</param>
+    /// <returns>The parsed credentials, per-item failures and informational notes.</returns>
+    /// <exception cref="InvalidImportPasswordException">Thrown when the password does not decrypt the database.</exception>
+    /// <exception cref="ImportException">Thrown when the database cannot be read.</exception>
+    public async Task<ImportFileResult> ImportKdbxAsync(byte[] fileBytes, string password)
+    {
+        var result = await KdbxOpenAsync(fileBytes, password);
+
+        try
+        {
+            return await KdbxImporter.MapToCredentials(
+                result,
+                attachmentId => KdbxTakeAttachmentAsync(result.SessionId, attachmentId));
+        }
+        finally
+        {
+            await KdbxCloseAsync(result.SessionId);
+        }
+    }
+
+    /// <summary>
+    /// Takes one attachment blob from an open session, releasing it in the Rust core.
+    /// </summary>
+    /// <param name="sessionId">The session identifier.</param>
+    /// <param name="attachmentId">The attachment identifier.</param>
+    /// <returns>The blob, or null when it was already taken or is unknown.</returns>
+    public async Task<byte[]?> KdbxTakeAttachmentAsync(string sessionId, string attachmentId)
+    {
+        return await jsRuntime.InvokeAsync<byte[]?>("rustCoreKdbxTakeAttachment", sessionId, attachmentId);
+    }
+
+    /// <summary>
+    /// Releases a session and any blobs it still holds.
+    /// </summary>
+    /// <param name="sessionId">The session identifier.</param>
+    /// <returns>Async task.</returns>
+    public async Task KdbxCloseAsync(string sessionId)
+    {
+        await jsRuntime.InvokeVoidAsync("rustCoreKdbxClose", sessionId);
     }
 
     /// <inheritdoc/>

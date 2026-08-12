@@ -79,6 +79,12 @@ public enum AuthFailureReason
 public class AuthLog
 {
     /// <summary>
+    /// The maximum length of <see cref="Username"/>. Callers that log an unvalidated username must
+    /// truncate to this length, otherwise the insert fails on a value the caller fully controls.
+    /// </summary>
+    public const int UsernameMaxLength = 255;
+
+    /// <summary>
     /// Gets or sets the unique identifier for the authentication log entry.
     /// </summary>
     [Key]
@@ -94,7 +100,7 @@ public class AuthLog
     /// Gets or sets the username associated with the authentication event.
     /// </summary>
     [Required]
-    [MaxLength(255)]
+    [MaxLength(UsernameMaxLength)]
     public string Username { get; set; } = null!;
 
     /// <summary>

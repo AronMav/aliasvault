@@ -123,7 +123,6 @@ android {
         release {
             // Caution! In production, you need to generate your own keystore file.
             // see https://reactnative.dev/docs/signed-apk-android.
-            signingConfig signingConfigs.debug
             signingConfig signingConfigs.release
             shrinkResources (findProperty('android.enableShrinkResourcesInReleaseBuilds')?.toBoolean() ?: false)
             minifyEnabled enableProguardInReleaseBuilds
@@ -361,14 +360,35 @@ task buildRustCore(type: Exec) {
 
     workingDir = file("${rootProject.projectDir}/scripts")
 
-    // Set up environment for cargo
-    environment "PATH", "${System.getProperty('user.home')}/.cargo/bin:/usr/local/bin:/opt/homebrew/bin:${System.getenv('PATH')}"
+    def isWindows = System.getProperty('os.name').toLowerCase().contains('windows')
+
+    // Set up environment for cargo. The /usr/local and Homebrew entries are for macOS, and the
+    // separator between entries is not the same on every platform.
+    def cargoBin = "${System.getProperty('user.home')}/.cargo/bin"
+    def extraPath = isWindows ? cargoBin : "${cargoBin}:/usr/local/bin:/opt/homebrew/bin"
+    environment "PATH", "${extraPath}${File.pathSeparator}${System.getenv('PATH')}"
 
     // Determine build mode based on variant
     def isRelease = gradle.startParameter.taskNames.any { it.toLowerCase().contains('release') }
     def buildArgs = isRelease ? ['./build-rust-core.sh', '--release'] : ['./build-rust-core.sh', '--debug']
 
-    commandLine buildArgs
+    // Windows cannot execute a shell script directly, so hand it to bash. Git for Windows ships one,
+    // and every build script in this repository already needs it. Named by full path on purpose:
+    // "bash" on PATH usually resolves to System32\bash.exe, the WSL launcher, which runs the script
+    // inside a Linux distribution that has neither this checkout nor a Rust toolchain.
+    def gitBash = isWindows
+        ? [
+            "${System.getenv('ProgramFiles')}\\Git\\bin\\bash.exe",
+            "${System.getenv('ProgramFiles(x86)')}\\Git\\bin\\bash.exe",
+            "${System.getenv('LOCALAPPDATA')}\\Programs\\Git\\bin\\bash.exe",
+          ].find { new File(it).exists() }
+        : null
+
+    if (isWindows && gitBash == null) {
+        throw new GradleException("Building the Rust core on Windows needs Git for Windows (bash.exe); none was found.")
+    }
+
+    commandLine isWindows ? ([gitBash] + buildArgs) : buildArgs
 
     // Only log if there are actual changes
     ignoreExitValue = false

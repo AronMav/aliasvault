@@ -10,7 +10,9 @@ namespace AliasVault.Api.Controllers.Email;
 using AliasServerDb;
 using AliasVault.Api.Controllers.Abstracts;
 using AliasVault.Auth.IpAddress;
+using AliasVault.Shared.Models.Enums;
 using AliasVault.Shared.Models.Spamok;
+using AliasVault.Shared.Models.WebApi;
 using Asp.Versioning;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
@@ -102,9 +104,10 @@ public class EmailController(ILogger<VaultController> logger, IAliasServerDbCont
         }
         catch (Exception ex)
         {
-            // Log the exception
+            // The exception text can name database objects and constraints, so it stays in the log
+            // rather than going back to the caller.
             logger.LogError(ex, "An error occurred while deleting email with ID {id}.", id);
-            return StatusCode(500, $"An error occurred while deleting the email: {ex.Message}");
+            return StatusCode(500, ApiErrorCodeHelper.CreateErrorResponse(ApiErrorCode.INTERNAL_SERVER_ERROR, 500));
         }
     }
 
@@ -135,8 +138,9 @@ public class EmailController(ILogger<VaultController> logger, IAliasServerDbCont
         }
 
         // Return the encrypted bytes as opaque binary. The original MIME type would be
-        // misleading since the payload is AES ciphertext, not a renderable file.
-        return File(attachment.Bytes, "application/octet-stream", attachment.Filename);
+        // misleading since the payload is AES ciphertext, not a renderable file. The filename is
+        // encrypted too, so a neutral name is used here; clients decrypt the real one themselves.
+        return File(attachment.Bytes, "application/octet-stream", $"attachment-{attachment.Id}.bin");
     }
 
     /// <summary>

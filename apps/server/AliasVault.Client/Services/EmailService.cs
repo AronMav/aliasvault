@@ -10,6 +10,7 @@ namespace AliasVault.Client.Services;
 using AliasClientDb;
 using AliasVault.Shared.Models.Spamok;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.JSInterop;
 
 /// <summary>
 /// Email service that contains utility methods for handling email functionality such as client-side decryption.
@@ -153,6 +154,12 @@ public sealed class EmailService(DbService dbService, JsInteropService jsInterop
             email.FromDisplay = await jsInteropService.SymmetricDecrypt(email.FromDisplay, decryptedSymmetricKeyBase64);
             email.FromLocal = await jsInteropService.SymmetricDecrypt(email.FromLocal, decryptedSymmetricKeyBase64);
             email.FromDomain = await jsInteropService.SymmetricDecrypt(email.FromDomain, decryptedSymmetricKeyBase64);
+
+            foreach (var attachment in email.Attachments)
+            {
+                attachment.Filename = await DecryptMetadataLegacyAware(attachment.Filename, decryptedSymmetricKeyBase64);
+                attachment.MimeType = await DecryptMetadataLegacyAware(attachment.MimeType, decryptedSymmetricKeyBase64);
+            }
         }
         catch (Exception ex)
         {
@@ -161,6 +168,29 @@ public sealed class EmailService(DbService dbService, JsInteropService jsInterop
         }
 
         return email;
+    }
+
+    /// <summary>
+    /// Decrypts attachment metadata, tolerating values that predate metadata encryption.
+    /// </summary>
+    /// <remarks>
+    /// Emails received before attachment filenames were encrypted still hold plaintext, and they
+    /// cannot be migrated: the server has no way back to the per-email symmetric key. AES-GCM
+    /// verifies an authentication tag, so plaintext cannot be mistaken for valid ciphertext.
+    /// </remarks>
+    /// <param name="value">The stored value, either ciphertext or legacy plaintext.</param>
+    /// <param name="symmetricKeyBase64">The symmetric key of the email.</param>
+    /// <returns>The plaintext value.</returns>
+    private async Task<string> DecryptMetadataLegacyAware(string value, string symmetricKeyBase64)
+    {
+        try
+        {
+            return await jsInteropService.SymmetricDecrypt(value, symmetricKeyBase64);
+        }
+        catch (JSException)
+        {
+            return value;
+        }
     }
 
     /// <summary>

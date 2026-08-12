@@ -1,0 +1,233 @@
+//-----------------------------------------------------------------------
+// <copyright file="EncryptionSettingsPolicyTests.cs" company="aliasvault">
+// Copyright (c) aliasvault. All rights reserved.
+// Licensed under the AGPLv3 license. See LICENSE.md file in the project root for full license information.
+// </copyright>
+//-----------------------------------------------------------------------
+
+namespace AliasVault.UnitTests.Utilities;
+
+using AliasVault.Cryptography.Client;
+
+/// <summary>
+/// Tests for the bounds applied to the key derivation parameters a client reports at a password change.
+/// Whatever is accepted here is handed back to every client at the next login and is the only thing the
+/// new vault can be opened with, so the check is what keeps an account from being moved onto cheaper
+/// parameters or onto ones no device can afford.
+/// </summary>
+public class EncryptionSettingsPolicyTests
+{
+    private const string PreviousDefaults = """{"DegreeOfParallelism":1,"MemorySize":19456,"Iterations":2}""";
+    private const string DeploymentOverride = """{"DegreeOfParallelism":1,"MemorySize":1024,"Iterations":1}""";
+
+    /// <summary>
+    /// An account already on the current defaults can be recorded with them again.
+    /// </summary>
+    [Test]
+    public void CurrentDefaultsAreAcceptedTest()
+    {
+        Assert.That(EncryptionSettingsPolicy.IsAcceptable(Defaults.EncryptionType, Defaults.EncryptionSettings, Defaults.EncryptionSettings), Is.True);
+    }
+
+    /// <summary>
+    /// An account registered under the previous defaults can move to the current ones, which is how
+    /// an existing account picks up stronger parameters.
+    /// </summary>
+    [Test]
+    public void MovingFromThePreviousDefaultsToTheCurrentOnesIsAcceptedTest()
+    {
+        Assert.That(EncryptionSettingsPolicy.IsAcceptable(Defaults.EncryptionType, Defaults.EncryptionSettings, PreviousDefaults), Is.True);
+    }
+
+    /// <summary>
+    /// An account may keep the parameters it already has, however cheap they are.
+    /// </summary>
+    /// <remarks>
+    /// A deployment picks what it registers accounts with, and the E2E and dev configurations pick
+    /// something deliberately cheap. A password change on such an instance has to keep working, so
+    /// the floor is the account's own parameters rather than a fixed number.
+    /// </remarks>
+    /// <param name="settings">The settings the account holds and reports again.</param>
+    [TestCase(DeploymentOverride)]
+    [TestCase(PreviousDefaults)]
+    public void KeepingTheParametersTheAccountAlreadyHasIsAcceptedTest(string settings)
+    {
+        Assert.That(EncryptionSettingsPolicy.IsAcceptable(Defaults.EncryptionType, settings, settings), Is.True);
+    }
+
+    /// <summary>
+    /// Parameters that cost less work than the account's current ones are refused, so a password
+    /// change cannot move an account onto a cheaper key derivation than it had before.
+    /// </summary>
+    /// <param name="settings">The settings reported by the client.</param>
+    [TestCase("""{"DegreeOfParallelism":1,"MemorySize":19456,"Iterations":2}""")]
+    [TestCase("""{"DegreeOfParallelism":1,"MemorySize":1024,"Iterations":1}""")]
+    [TestCase("""{"DegreeOfParallelism":1,"MemorySize":65536,"Iterations":2}""")]
+    public void WeakerThanTheCurrentParametersIsRejectedTest(string settings)
+    {
+        Assert.That(EncryptionSettingsPolicy.IsAcceptable(Defaults.EncryptionType, settings, Defaults.EncryptionSettings), Is.False);
+    }
+
+    /// <summary>
+    /// Trading memory for passes is allowed while the total work does not fall, because only the
+    /// product decides what a guess costs.
+    /// </summary>
+    [Test]
+    public void TradingMemoryForPassesAtEqualWorkIsAcceptedTest()
+    {
+        const string current = """{"DegreeOfParallelism":1,"MemorySize":65536,"Iterations":2}""";
+        const string reported = """{"DegreeOfParallelism":1,"MemorySize":32768,"Iterations":4}""";
+
+        Assert.That(EncryptionSettingsPolicy.IsAcceptable(Defaults.EncryptionType, reported, current), Is.True);
+    }
+
+    /// <summary>
+    /// Raising the lane count on its own is refused, even though it leaves memory times passes
+    /// untouched.
+    /// </summary>
+    /// <remarks>
+    /// Argon2id divides MemorySize across DegreeOfParallelism lanes that are computed at the same time,
+    /// so more lanes at the same memory and pass count means less memory per lane and a shorter wall
+    /// clock for a guess. Measured against these defaults, four lanes make a guess roughly three and a
+    /// half times cheaper, so accepting this would be the ratchet lowering the work it promises to hold.
+    /// </remarks>
+    /// <param name="settings">The settings reported by the client.</param>
+    [TestCase("""{"DegreeOfParallelism":2,"MemorySize":65536,"Iterations":3}""")]
+    [TestCase("""{"DegreeOfParallelism":4,"MemorySize":65536,"Iterations":3}""")]
+    public void MoreLanesAtTheSameMemoryAndPassesIsRejectedTest(string settings)
+    {
+        Assert.That(EncryptionSettingsPolicy.IsAcceptable(Defaults.EncryptionType, settings, Defaults.EncryptionSettings), Is.False);
+    }
+
+    /// <summary>
+    /// More lanes are accepted when memory or passes rise enough to pay for them, because then the work
+    /// a guess costs has not fallen.
+    /// </summary>
+    [Test]
+    public void MoreLanesPaidForWithMoreMemoryIsAcceptedTest()
+    {
+        const string current = """{"DegreeOfParallelism":1,"MemorySize":65536,"Iterations":3}""";
+        const string reported = """{"DegreeOfParallelism":2,"MemorySize":131072,"Iterations":3}""";
+
+        Assert.That(EncryptionSettingsPolicy.IsAcceptable(Defaults.EncryptionType, reported, current), Is.True);
+    }
+
+    /// <summary>
+    /// Dropping to fewer lanes at the same memory and passes is accepted, because that only makes a
+    /// guess more expensive.
+    /// </summary>
+    [Test]
+    public void FewerLanesAtTheSameMemoryAndPassesIsAcceptedTest()
+    {
+        const string current = """{"DegreeOfParallelism":4,"MemorySize":65536,"Iterations":3}""";
+        const string reported = """{"DegreeOfParallelism":1,"MemorySize":65536,"Iterations":3}""";
+
+        Assert.That(EncryptionSettingsPolicy.IsAcceptable(Defaults.EncryptionType, reported, current), Is.True);
+    }
+
+    /// <summary>
+    /// Parameters above the ceiling are refused, because a vault that costs more to open than a
+    /// phone or a browser tab can afford is a vault its owner has lost.
+    /// </summary>
+    /// <param name="settings">The settings reported by the client.</param>
+    [TestCase("""{"DegreeOfParallelism":1,"MemorySize":4194304,"Iterations":3}""")]
+    [TestCase("""{"DegreeOfParallelism":1,"MemorySize":65536,"Iterations":100}""")]
+    [TestCase("""{"DegreeOfParallelism":64,"MemorySize":65536,"Iterations":3}""")]
+    public void StrongerThanTheCeilingIsRejectedTest(string settings)
+    {
+        Assert.That(EncryptionSettingsPolicy.IsAcceptable(Defaults.EncryptionType, settings, Defaults.EncryptionSettings), Is.False);
+    }
+
+    /// <summary>
+    /// Parameters Argon2id itself will not accept are refused, rather than being passed on for the
+    /// clients to fail on one at a time.
+    /// </summary>
+    /// <param name="settings">The settings reported by the client.</param>
+    [TestCase("""{"DegreeOfParallelism":1,"MemorySize":4,"Iterations":2}""")]
+    [TestCase("""{"DegreeOfParallelism":2,"MemorySize":8,"Iterations":2}""")]
+    [TestCase("""{"DegreeOfParallelism":1,"MemorySize":65536,"Iterations":0}""")]
+    [TestCase("""{"DegreeOfParallelism":0,"MemorySize":65536,"Iterations":3}""")]
+    public void ParametersOutsideTheAlgorithmsRangeAreRejectedTest(string settings)
+    {
+        Assert.That(EncryptionSettingsPolicy.IsAcceptable(Defaults.EncryptionType, settings, settings), Is.False);
+    }
+
+    /// <summary>
+    /// A settings value that is not a complete set of parameters is refused rather than completed
+    /// from the defaults, since recording a parameter the client never used produces a vault it
+    /// cannot open.
+    /// </summary>
+    /// <param name="settings">The settings value to check.</param>
+    [TestCase("")]
+    [TestCase("   ")]
+    [TestCase("not json")]
+    [TestCase("{}")]
+    [TestCase("""{"MemorySize":65536,"Iterations":3}""")]
+    [TestCase("""{"DegreeOfParallelism":1,"Iterations":3}""")]
+    [TestCase("""{"DegreeOfParallelism":1,"MemorySize":65536}""")]
+    public void IncompleteOrUnparsableSettingsAreRejectedTest(string settings)
+    {
+        Assert.Multiple(() =>
+        {
+            Assert.That(EncryptionSettingsPolicy.IsAcceptable(Defaults.EncryptionType, settings, Defaults.EncryptionSettings), Is.False);
+            Assert.That(EncryptionSettingsPolicy.TryParse(settings, out _), Is.False);
+        });
+    }
+
+    /// <summary>
+    /// Null settings are refused for the same reason an incomplete set is.
+    /// </summary>
+    [Test]
+    public void NullSettingsAreRejectedTest()
+    {
+        Assert.Multiple(() =>
+        {
+            Assert.That(EncryptionSettingsPolicy.IsAcceptable(Defaults.EncryptionType, null, Defaults.EncryptionSettings), Is.False);
+            Assert.That(EncryptionSettingsPolicy.TryParse(null, out _), Is.False);
+        });
+    }
+
+    /// <summary>
+    /// When the vault's current settings cannot be read there is nothing to compare against, so only
+    /// the absolute bounds apply and a usable set is still accepted.
+    /// </summary>
+    [Test]
+    public void UnreadableCurrentSettingsFallBackToTheAbsoluteBoundsTest()
+    {
+        Assert.Multiple(() =>
+        {
+            Assert.That(EncryptionSettingsPolicy.IsAcceptable(Defaults.EncryptionType, Defaults.EncryptionSettings, "not json"), Is.True);
+            Assert.That(EncryptionSettingsPolicy.IsAcceptable(Defaults.EncryptionType, """{"DegreeOfParallelism":1,"MemorySize":4194304,"Iterations":3}""", "not json"), Is.False);
+        });
+    }
+
+    /// <summary>
+    /// Only Argon2id is accepted. The clients implement nothing else, so another value would name
+    /// an algorithm no one can derive with.
+    /// </summary>
+    /// <param name="encryptionType">The encryption type to check.</param>
+    [TestCase("")]
+    [TestCase("PBKDF2")]
+    [TestCase("argon2id")]
+    [TestCase(null)]
+    public void UnknownEncryptionTypeIsRejectedTest(string? encryptionType)
+    {
+        Assert.That(EncryptionSettingsPolicy.IsAcceptable(encryptionType, Defaults.EncryptionSettings, Defaults.EncryptionSettings), Is.False);
+    }
+
+    /// <summary>
+    /// Parsing reports the values as written rather than the defaults.
+    /// </summary>
+    [Test]
+    public void ParsingReportsTheValuesAsWrittenTest()
+    {
+        Assert.That(EncryptionSettingsPolicy.TryParse("""{"DegreeOfParallelism":2,"MemorySize":32768,"Iterations":4}""", out var parsed), Is.True);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(parsed.DegreeOfParallelism, Is.EqualTo(2));
+            Assert.That(parsed.MemorySize, Is.EqualTo(32768));
+            Assert.That(parsed.Iterations, Is.EqualTo(4));
+        });
+    }
+}

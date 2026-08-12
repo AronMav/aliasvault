@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------
 // <copyright file="ApiErrorCode.cs" company="aliasvault">
 // Copyright (c) aliasvault. All rights reserved.
 // Licensed under the AGPLv3 license. See LICENSE.md file in the project root for full license information.
@@ -153,4 +153,20 @@ public enum ApiErrorCode
     /// Generic user account registration failure.
     /// </summary>
     REGISTRATION_FAILED,
+
+    /// <summary>
+    /// Too many authentication requests were made from this IP address.
+    /// </summary>
+    AUTH_RATE_LIMIT_EXCEEDED,
+
+    /// <summary>
+    /// The public key supplied for a mobile login request is not a usable RSA public key.
+    /// </summary>
+    MOBILE_LOGIN_INVALID_PUBLIC_KEY,
+
+    /// <summary>
+    /// The key derivation parameters supplied with a password change are not ones the server
+    /// is willing to record against a vault.
+    /// </summary>
+    UNSUPPORTED_ENCRYPTION_SETTINGS,
 }

@@ -142,7 +142,13 @@
       "USERNAME_INVALID_CHARACTERS": "Il nome utente non è valido, può contenere solo lettere o cifre.",
       "VAULT_NOT_UP_TO_DATE": "La tua cassaforte non è aggiornata. Sincronizzala e riprova.",
       "INTERNAL_SERVER_ERROR": "Errore interno del server.",
-      "VAULT_ERROR": "La cassaforte locale non è aggiornata. Sincronizzala ricaricando la pagina e riprova."
+      "VAULT_ERROR": "La cassaforte locale non è aggiornata. Sincronizzala ricaricando la pagina e riprova.",
+      "AUTH_RATE_LIMIT_EXCEEDED": "Troppi tentativi dalla tua rete. Attendi qualche minuto e riprova.",
+      "MOBILE_LOGIN_REQUEST_NOT_FOUND": "Questa richiesta di accesso non esiste più. Potrebbe essere scaduta. Avviane una nuova e riprova.",
+      "MOBILE_LOGIN_INVALID_PUBLIC_KEY": "Impossibile avviare questa richiesta di accesso. Aggiorna all'ultima versione e riprova.",
+      "REGISTRATION_RATE_LIMIT_EXCEEDED": "Sono stati creati troppi account dalla tua rete. Attendi un po' e riprova.",
+      "REGISTRATION_FAILED": "Impossibile creare l'account. Per favore riprova tra qualche minuto. Se il problema persiste, contatta l'assistenza.",
+      "UNSUPPORTED_ENCRYPTION_SETTINGS": "Il server non accetta le impostazioni di crittografia utilizzate da questa versione. Aggiorna all'ultima versione e riprova."
     }
   },
   "content": {

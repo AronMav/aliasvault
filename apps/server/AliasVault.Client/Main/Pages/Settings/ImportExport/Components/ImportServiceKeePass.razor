@@ -2,6 +2,7 @@
 @inject NavigationManager NavigationManager
 @inject GlobalNotificationService GlobalNotificationService
 @inject IStringLocalizerFactory LocalizerFactory
+@inject AliasVault.Client.Services.JsInterop.RustCore.RustCoreService RustCore
 @using AliasVault.ImportExport.Models
 @using AliasVault.ImportExport.Importers
 @using Microsoft.Extensions.Localization
@@ -10,15 +11,19 @@
     ServiceName="KeePass"
     Description="@Localizer["KeePassDescription"]"
     LogoUrl="img/importers/keepass.svg"
-    AcceptedFileExtensions="AcceptedExtensions"
-    ProcessFileCallback="ProcessFile">
+    AcceptedFileExtensions="KdbxImportCard.AcceptedExtensions"
+    PasswordProtectedFileExtensions="KdbxImportCard.PasswordProtectedExtensions"
+    PasswordPromptText="@Localizer["KdbxPasswordPrompt"]"
+    PasswordHintText="@Localizer["KdbxPasswordHint"]"
+    ProcessFileCallback="ProcessFile"
+    DecryptFileCallback="@KdbxImportCard.DecryptFile(RustCore)">
     <p class="text-gray-700 dark:text-gray-300 mb-4">@Localizer["KeePassInstructionsPart1"]</p>
     <p class="text-gray-700 dark:text-gray-300 mb-4">@Localizer["KeePassInstructionsPart2"]</p>
+    <p class="text-gray-700 dark:text-gray-300 mb-4">@Localizer["KeePassKdbxInstructions"]</p>
 </ImportServiceCard>
 
 @code {
     private IStringLocalizer Localizer => LocalizerFactory.Create("Components.Main.Settings.ImportExport.ImportServices", "AliasVault.Client");
-    private static readonly string[] AcceptedExtensions = new[] { ".csv" };
 
     private static async Task<ImportFileResult> ProcessFile(string filename, byte[] fileBytes)
     {

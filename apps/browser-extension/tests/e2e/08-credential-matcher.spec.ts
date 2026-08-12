@@ -195,6 +195,34 @@ test.describe.serial('8. Credential Matcher Integration', () => {
     await testPage.close();
   });
 
+  test('8.3b should fill the form when the user clicks a credential in the popup', async () => {
+    const testPage = await client.context.newPage();
+
+    await setupTestPageRoute(testPage, 'example.com');
+    await testPage.goto('https://example.com/login');
+    await testPage.waitForLoadState('domcontentloaded');
+
+    const usernameField = testPage.locator('input#username');
+    await usernameField.click();
+    await testPage.waitForTimeout(2000);
+
+    expect(await isAutofillPopupVisible(testPage)).toBe(true);
+
+    /*
+     * Click the credential through Playwright so the browser dispatches the event itself.
+     * Autofill is gated on the click being trusted, which a page-scripted click is not, so a
+     * synthetic click here would prove nothing about the real path.
+     */
+    await testPage.locator('.av-credential-item').first().click();
+    await testPage.waitForTimeout(1000);
+
+    await expect(usernameField).toHaveValue('user@example.com');
+    await expect(testPage.locator('input#password')).toHaveValue('ExamplePass123!');
+
+    await testPage.screenshot({ path: 'tests/screenshots/8.3b-credential-filled.png' });
+    await testPage.close();
+  });
+
   test('8.4 should show single matching credential on another-example.com', async () => {
     const testPage = await client.context.newPage();
 

@@ -161,9 +161,15 @@ public sealed class SettingsService
     /// <summary>
     /// Sets the TutorialDone setting.
     /// </summary>
+    /// <remarks>
+    /// Waits for the server rather than syncing in the background, because finishing the tutorial is
+    /// immediately followed by navigating away and the user may well close or reload the tab right
+    /// after. A reload loads the vault from the server, so a background sync that had not landed yet
+    /// would leave the flag unset there and start the whole tutorial over.
+    /// </remarks>
     /// <param name="value">Value to set.</param>
     /// <returns>Task.</returns>
-    public Task SetTutorialDoneAsync(bool value) => SetSettingAsync("TutorialDone", value);
+    public Task SetTutorialDoneAsync(bool value) => SetSettingAsync("TutorialDone", value, waitForServerSync: true);
 
     /// <summary>
     /// Sets the CredentialsViewMode setting.
@@ -210,11 +216,12 @@ public sealed class SettingsService
     /// <typeparam name="T">The type of the value being set.</typeparam>
     /// <param name="key">The key of the setting.</param>
     /// <param name="value">The value to set.</param>
+    /// <param name="waitForServerSync">See the private overload of this method.</param>
     /// <returns>Task.</returns>
-    public Task SetSettingAsync<T>(string key, T value)
+    public Task SetSettingAsync<T>(string key, T value, bool waitForServerSync = false)
     {
         string stringValue = ConvertToString(value);
-        return SetSettingAsync(key, stringValue);
+        return SetSettingAsync(key, stringValue, waitForServerSync);
     }
 
     /// <summary>
@@ -363,8 +370,15 @@ public sealed class SettingsService
     /// </summary>
     /// <param name="key">Key of setting to set.</param>
     /// <param name="value">Value of setting to set.</param>
+    /// <param name="waitForServerSync">
+    /// True to upload the vault before returning instead of syncing in the background. The background
+    /// sync is the right default because a settings change should not block the UI on a round trip,
+    /// but it is only ever written to the server if the page lives long enough to finish it. Callers
+    /// that navigate away, reload, or otherwise expect the value to survive the current page have to
+    /// wait for it, because a reload reads the vault back from the server.
+    /// </param>
     /// <returns>Task.</returns>
-    private async Task SetSettingAsync(string key, string value)
+    private async Task SetSettingAsync(string key, string value, bool waitForServerSync = false)
     {
         // Only update if the value has changed.
         if (_settings.GetValueOrDefault(key) == value)
@@ -396,8 +410,15 @@ public sealed class SettingsService
         // is returned by subsequent local reads.
         _settings[key] = value;
 
-        // Save to EF context and sync to server in background (non-blocking).
         await db.SaveChangesAsync();
-        _dbService.SaveDatabaseInBackground();
+
+        if (waitForServerSync)
+        {
+            await _dbService.SaveDatabaseAsync();
+        }
+        else
+        {
+            _dbService.SaveDatabaseInBackground();
+        }
     }
 }

@@ -61,8 +61,9 @@ var ipLoggingEnabled = Environment.GetEnvironmentVariable("IP_LOGGING_ENABLED") 
 config.IpLoggingEnabled = bool.Parse(ipLoggingEnabled);
 
 // Configure maximum upload size (applies to vault syncs and any other client uploads).
-var maxUploadSizeMb = int.TryParse(Environment.GetEnvironmentVariable("MAX_UPLOAD_SIZE_MB"), out var parsedMb) && parsedMb > 0 ? parsedMb : 100;
-var maxUploadSizeBytes = (long)maxUploadSizeMb * 1024 * 1024;
+// The same value is reported to clients in VaultGetResponse so they can warn before
+// an import instead of only discovering the limit through an HTTP 413.
+var maxUploadSizeBytes = AliasVault.Api.UploadLimits.MaxUploadSizeBytes;
 
 builder.WebHost.ConfigureKestrel(options =>
 {
@@ -88,6 +89,7 @@ builder.Services.AddScoped<ServerSettingsService>();
 builder.Services.AddScoped<RegistrationRateLimitService>();
 builder.Services.AddScoped<IpBlockListService>();
 builder.Services.AddSingleton<FaviconRateLimitService>();
+builder.Services.AddSingleton<AnonymousAuthRateLimitService>();
 builder.Services.AddScoped<RateLimitService>();
 builder.Services.AddHttpContextAccessor();
 
@@ -124,7 +126,9 @@ builder.Services.AddAuthentication(options =>
 {
     var jwtKey = SecretReader.GetJwtKey();
 
-    options.IncludeErrorDetails = true;
+    // Detailed token validation failures are useful while developing, but in production they
+    // tell an unauthenticated caller exactly why their token was rejected.
+    options.IncludeErrorDetails = builder.Environment.IsDevelopment();
     options.TokenValidationParameters = new TokenValidationParameters
     {
         ValidateIssuer = true,
@@ -143,14 +147,34 @@ builder.Services.AddAuthentication(options =>
     options.EventsType = typeof(TimeValidationJwtBearerEvents);
 });
 
-// Configure CORS
+// Configure CORS. ALLOWED_ORIGINS restricts which sites the browser will let call this API; leaving
+// it empty keeps accepting any origin, which is what installs have always done.
+//
+// The wildcard is not the hole it would be in a cookie-authenticated API: this one authenticates with
+// a bearer token only, and no credentials are ever allowed cross-origin, so another site's script
+// cannot make the browser attach a session it does not already hold. Restricting is still worth doing
+// where the set of clients is known, which is why this is configurable, but it is not made the default:
+// which origins are legitimate depends on the install, and getting it wrong locks out working clients.
+var allowedOrigins = (Environment.GetEnvironmentVariable("ALLOWED_ORIGINS") ?? string.Empty)
+    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
 builder.Services.AddCors(options =>
 {
     options.AddPolicy(
         "CorsPolicy",
-        policy => policy.AllowAnyOrigin()
-            .AllowAnyMethod()
-            .AllowAnyHeader());
+        policy =>
+        {
+            if (allowedOrigins.Length > 0)
+            {
+                policy.WithOrigins(allowedOrigins);
+            }
+            else
+            {
+                policy.AllowAnyOrigin();
+            }
+
+            policy.AllowAnyMethod().AllowAnyHeader();
+        });
 });
 
 builder.Services.AddControllers()
