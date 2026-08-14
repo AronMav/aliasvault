@@ -1096,6 +1096,10 @@ export async function createVaultSqliteClient() : Promise<SqliteClient> {
         encryptionKey
       );
 
+      // Share the decrypted blob with handleGetVault so it doesn't decrypt again.
+      cachedDecryptedVault = decryptedVault;
+      cachedDecryptedVaultBlob = encryptedVault;
+
       // Initialize the SQLite client with the decrypted vault
       const sqliteClient = new SqliteClient();
       await sqliteClient.initializeFromBase64(decryptedVault);
@@ -1109,10 +1113,16 @@ export async function createVaultSqliteClient() : Promise<SqliteClient> {
       if (pendingVaultInit && pendingVaultInit.blob === encryptedVault) {
         pendingVaultInit = null;
       }
+      if (pendingDecrypt && pendingDecrypt.blob === encryptedVault) {
+        pendingDecrypt = null;
+      }
     }
   })();
 
   pendingVaultInit = { blob: encryptedVault, promise: initPromise };
+  // Also register as the in-flight decrypt so handleGetVault joins this promise
+  // instead of starting a second decryption in parallel.
+  pendingDecrypt = { blob: encryptedVault, promise: initPromise.then((client) => client.exportToBase64()) };
 
   return initPromise;
 }
