@@ -158,34 +158,44 @@ public sealed class DbService : IDisposable
     }
 
     /// <summary>
-    /// Generate encrypted base64 string representation of current state of database in order to save it
-    /// to the server.
+    /// Exports the current in-memory database as UTF-8 base64 bytes for uploading.
+    /// Encryption is done separately (either in JS as part of the chunked upload, or
+    /// via the legacy interop in the fallback path).
     /// </summary>
-    /// <returns>Base64 encoded vault blob.</returns>
-    public async Task<string> GetEncryptedDatabaseBase64String()
+    /// <returns>UTF-8 bytes of the base64-encoded plaintext vault.</returns>
+    public async Task<byte[]> ExportDatabaseForSaveAsync()
     {
         // Save the actual dbContext.
         await _dbContext.SaveChangesAsync();
 
-        // [AV-SAVE] step telemetry: the vault export/encrypt path is the known bottleneck on
-        // large vaults (VACUUM INTO + base64 + JS-interop encryption all run on the single
-        // WASM thread). Timings are written with console.info so they are visible in
-        // production builds where the logger runs at Warning level.
+        // [AV-SAVE] On large vaults the export path below allocates several vault-sized
+        // buffers on the WASM heap (in-memory temp file from VACUUM INTO, ReadAllBytes,
+        // then the base64 encoding). The non-compacting Mono GC often fails to reuse
+        // earlier allocations (e.g. leftovers from a previous import or decrypt) even
+        // though the heap is mostly garbage, which surfaces as OutOfMemoryException on
+        // the *second* save after a big operation. Force a full collection first so the
+        // export starts from the lowest possible watermark.
+        // NOTE: deliberately NOT calling GC.WaitForPendingFinalizers() - mono-wasm
+        // finalizers run on the main thread and can deadlock the save pipeline.
+        var gcSw = Stopwatch.StartNew();
+        GC.Collect();
+        gcSw.Stop();
+
+        // [AV-SAVE] step telemetry: the vault export path is the known bottleneck on
+        // large vaults (VACUUM INTO + base64 all run on the single WASM thread).
+        // Timings are written with console.info so they are visible in production
+        // builds where the logger runs at Warning level.
         var avSaveSw = Stopwatch.StartNew();
         var dbSavedAt = avSaveSw.ElapsedMilliseconds;
 
-        // Encrypt the base64 payload as bytes. This is the same plaintext the string based
-        // overload would encrypt, so the stored vault format is unchanged, but it avoids
-        // building a vault-sized .NET string and JSON encoding it for the interop call.
         var base64Utf8 = await ExportSqliteToUtf8Base64Async();
         var exportedAt = avSaveSw.ElapsedMilliseconds;
-
-        var encrypted = await _jsInteropService.SymmetricEncryptFromBytes(base64Utf8, _authService.GetEncryptionKeyAsBase64Async());
         avSaveSw.Stop();
-        await _jsInteropService.LogToConsoleAsync($"[AV-SAVE] export={exportedAt - dbSavedAt}ms ({base64Utf8.Length / 1024}KB b64) encrypt={avSaveSw.ElapsedMilliseconds - exportedAt}ms cipher={encrypted.Length / 1024}KB total={avSaveSw.ElapsedMilliseconds}ms");
-        await _jsInteropService.EmitTelemetryBeaconAsync("encrypt-done", $"exp={exportedAt - dbSavedAt}ms enc={avSaveSw.ElapsedMilliseconds - exportedAt}ms b64={base64Utf8.Length / 1024}KB cipher={encrypted.Length / 1024}KB");
 
-        return encrypted;
+        await _jsInteropService.LogToConsoleAsync($"[AV-SAVE] gc={gcSw.ElapsedMilliseconds}ms export={exportedAt - dbSavedAt}ms ({base64Utf8.Length / 1024}KB b64) total={avSaveSw.ElapsedMilliseconds}ms");
+        await _jsInteropService.EmitTelemetryBeaconAsync("export-done", $"gc={gcSw.ElapsedMilliseconds}ms exp={exportedAt - dbSavedAt}ms b64={base64Utf8.Length / 1024}KB");
+
+        return base64Utf8;
     }
 
     /// <summary>
@@ -206,10 +216,10 @@ public sealed class DbService : IDisposable
         // Make sure a public/private RSA encryption key exists before saving the database.
         await GetOrCreateEncryptionKeyAsync();
 
-        var encryptedBase64String = await GetEncryptedDatabaseBase64String();
+        var plainBase64Bytes = await ExportDatabaseForSaveAsync();
 
         // Save to webapi.
-        var success = await SaveToServerAsync(encryptedBase64String);
+        var success = await SaveToServerAsync(plainBase64Bytes);
         if (success)
         {
             _logger.LogInformation("Database successfully saved to server.");
@@ -275,7 +285,7 @@ public sealed class DbService : IDisposable
                         return;
                     }
 
-                    var encryptedBase64String = await GetEncryptedDatabaseBase64String();
+                    var plainBase64Bytes = await ExportDatabaseForSaveAsync();
 
                     if (cancellationToken.IsCancellationRequested || _disposed)
                     {
@@ -286,7 +296,7 @@ public sealed class DbService : IDisposable
                     _state.UpdateState(DbServiceState.DatabaseStatus.SavingToServer);
 
                     // Save to webapi.
-                    var success = await SaveToServerAsync(encryptedBase64String);
+                    var success = await SaveToServerAsync(plainBase64Bytes);
                     if (success)
                     {
                         _logger.LogInformation("Database successfully saved to server (background sync).");
@@ -1016,28 +1026,33 @@ public sealed class DbService : IDisposable
     /// <summary>
     /// Saves encrypted database blob to server and updates the local revision number.
     /// </summary>
-    /// <param name="encryptedDatabase">Encrypted database as string.</param>
+    /// <param name="plainBase64Bytes">Plaintext vault bytes (base64 of the SQLite export) to encrypt and upload from JS.</param>
     /// <returns>True if save action succeeded and revision number was updated, false otherwise.</returns>
-    private async Task<bool> SaveToServerAsync(string encryptedDatabase)
+    private async Task<bool> SaveToServerAsync(byte[] plainBase64Bytes)
     {
-        var vaultObject = await PrepareVaultForUploadAsync(encryptedDatabase);
+        var vaultObject = await PrepareVaultForUploadAsync(string.Empty);
         var serializerOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
 
         try
         {
-            // [AV-SAVE] upload step timing (see GetEncryptedDatabaseBase64String for the
-            // export/encrypt steps). Visible in production via console.info.
+            // [AV-SAVE] upload step timing (see ExportDatabaseForSaveAsync for the
+            // export steps). Visible in production via console.info.
             var uploadSw = Stopwatch.StartNew();
             await _jsInteropService.EmitTelemetryBeaconAsync("post-start");
 
-            // [AV-JS-UPLOAD] Push the ciphertext to JS in small chunks and POST from there.
-            // PostAsJsonAsync re-serializes the vault object with the ~64MB Blob string and
-            // dies inside the 32-bit browser heap on vault-sized saves (tab freezes, no
-            // request ever leaves - confirmed by /av-tel telemetry: post-start without
-            // post-done). It stays only as a fallback for stale cached JS bundles.
+            // [AV-JS-UPLOAD] v2: push the plaintext base64 bytes to JS in small chunks
+            // and let JS encrypt + assemble + POST them. Both PostAsJsonAsync (JSON
+            // re-serialization of a ~64MB Blob string) and even the v1 chunked protocol
+            // (full ciphertext string held on the .NET heap) die inside the 32-bit
+            // browser heap on vault-sized saves - confirmed via /av-tel telemetry
+            // (post-start without post-done, OOM on second save after big import).
+            // The extension does encrypt+POST natively in JS for the same vault size
+            // without problems, so we mirror that here. The managed path stays as a
+            // fallback for stale cached JS bundles only.
             vaultObject.Blob = string.Empty;
             var accessToken = await _authService.GetAccessTokenAsync();
-            var (status, body) = await _jsInteropService.UploadVaultViaJsAsync(encryptedDatabase, vaultObject, accessToken);
+            var encryptionKey = _authService.GetEncryptionKeyAsBase64Async();
+            var (status, body) = await _jsInteropService.EncryptAndUploadVaultAsync(plainBase64Bytes, vaultObject, encryptionKey, accessToken);
 
             if (status == 401)
             {
@@ -1046,7 +1061,7 @@ public sealed class DbService : IDisposable
                 var newToken = await _authService.RefreshTokenAsync();
                 if (!string.IsNullOrEmpty(newToken))
                 {
-                    (status, body) = await _jsInteropService.UploadVaultViaJsAsync(encryptedDatabase, vaultObject, newToken);
+                    (status, body) = await _jsInteropService.EncryptAndUploadVaultAsync(plainBase64Bytes, vaultObject, encryptionKey, newToken);
                 }
             }
 
@@ -1054,7 +1069,8 @@ public sealed class DbService : IDisposable
             {
                 // Stale cached JS bundle without vaultUploadInterop: fall back to the managed path.
                 await _jsInteropService.EmitTelemetryBeaconAsync("post-fallback");
-                vaultObject.Blob = encryptedDatabase;
+                var encryptedLegacy = await _jsInteropService.SymmetricEncryptFromBytes(plainBase64Bytes, _authService.GetEncryptionKeyAsBase64Async());
+                vaultObject.Blob = encryptedLegacy;
                 var response = await _httpClient.PostAsJsonAsync("v1/Vault", vaultObject);
                 status = (int)response.StatusCode;
                 body = await response.Content.ReadAsStringAsync();

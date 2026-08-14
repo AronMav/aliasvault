@@ -91,28 +91,46 @@ public sealed class JsInteropService(IJSRuntime jsRuntime)
     /// (one interop call each), assembled into a Blob by JS and POSTed with a native fetch -
     /// the same approach the browser extension uses successfully for the same blob.
     /// </remarks>
-    /// <param name="encryptedDatabaseBase64">Base64 of the encrypted vault (as produced by the encrypt step).</param>
+    /// <param name="plainBytes">Plaintext vault bytes (the base64 encoding of the SQLite export) to encrypt and upload from JS.</param>
     /// <param name="vaultMeta">Vault metadata object; its Blob field is ignored and replaced by the chunks.</param>
+    /// <param name="encryptionKeyBase64">Base64 symmetric key used to encrypt the plaintext inside JS.</param>
     /// <param name="accessToken">Bearer access token for the API.</param>
     /// <returns>Tuple of HTTP status code (0 = JS/network error) and response body text.</returns>
-    public async Task<(int Status, string Body)> UploadVaultViaJsAsync(string encryptedDatabaseBase64, object vaultMeta, string accessToken)
+    public async Task<(int Status, string Body)> EncryptAndUploadVaultAsync(byte[] plainBytes, object vaultMeta, string encryptionKeyBase64, string accessToken)
     {
         const string chunkInteropError = "vaultUploadInterop is not available";
 
         try
         {
-            await jsRuntime.InvokeVoidAsync("vaultUploadInterop.beginUpload");
+            await jsRuntime.InvokeVoidAsync("vaultUploadInterop.beginEncryptUpload");
 
-            // Push the base64 in 4MB chunks: each interop call marshals one small string,
-            // and the full ciphertext is only ever assembled inside the JS Blob.
-            const int chunkChars = 4 * 1024 * 1024;
-            for (var i = 0; i < encryptedDatabaseBase64.Length; i += chunkChars)
+            // Push the plaintext in 3MB multiples-of-3 chunks: byte[] marshals to
+            // Uint8Array (no string copy), and multiples of 3 keep the base64
+            // concatenation padding-free on the JS side.
+            const int chunkSize = 3 * 1024 * 1024;
+            for (var i = 0; i < plainBytes.Length; i += chunkSize)
             {
-                var len = Math.Min(chunkChars, encryptedDatabaseBase64.Length - i);
-                await jsRuntime.InvokeVoidAsync("vaultUploadInterop.appendChunk", encryptedDatabaseBase64.Substring(i, len));
+                var len = Math.Min(chunkSize, plainBytes.Length - i);
+                byte[] chunk;
+                if (len == plainBytes.Length)
+                {
+                    chunk = plainBytes;
+                }
+                else
+                {
+                    chunk = new byte[len];
+
+                    // NOTE: the 5-arg overload is required. Array.Copy(source, dest, len)
+                    // copies from source index 0 every time, so every chunk after the
+                    // first repeated the first 3MB - the upload succeeded with a
+                    // perfectly-sized blob that decrypted to a malformed SQLite image.
+                    Array.Copy(plainBytes, i, chunk, 0, len);
+                }
+
+                await jsRuntime.InvokeVoidAsync("vaultUploadInterop.appendPlainChunk", chunk);
             }
 
-            var result = await jsRuntime.InvokeAsync<JsonElement>("vaultUploadInterop.upload", vaultMeta, accessToken);
+            var result = await jsRuntime.InvokeAsync<JsonElement>("vaultUploadInterop.encryptAndUpload", vaultMeta, encryptionKeyBase64, accessToken);
             return (result.GetProperty("status").GetInt32(), result.GetProperty("body").GetString() ?? string.Empty);
         }
         catch (JSException ex) when (ex.Message.Contains(chunkInteropError, StringComparison.Ordinal) || ex.Message.Contains("vaultUploadInterop", StringComparison.Ordinal))

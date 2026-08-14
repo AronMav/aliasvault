@@ -377,6 +377,22 @@ window.rsaInterop = {
  * then calls upload() which assembles the JSON body as a Blob (streamed by the
  * browser, no giant JS string either) and POSTs it with a native fetch.
  */
+
+/**
+ * Chunked encrypt+upload protocol (v2).
+ *
+ * Why v2: even the v1 protocol (chunks of ALREADY-encrypted base64) required the
+ * .NET side to hold the full ~64MB ciphertext string (128MB as UTF-16 in the mono
+ * heap) between SymmetricEncryptFromBytes and the chunk loop, and the mono heap
+ * is non-compacting - the second save after a big import died with OOM there.
+ * v2 pushes the PLAINTEXT base64 chunks and lets JS do encrypt+assemble+POST,
+ * so the ciphertext only ever exists in the JS heap (which handles the same
+ * 36MB vault fine in the browser extension).
+ *
+ * Note: cryptoInterop.encrypt(plainBase64, key) treats the plaintext as a string
+ * and UTF-8 encodes it - identical bytes to encryptBytesToBase64(utf8bytes),
+ * so the stored vault format is unchanged.
+ */
 window.vaultUploadInterop = {
     _chunks: [],
 
@@ -425,6 +441,74 @@ window.vaultUploadInterop = {
             return { status: response.status, body: text };
         } catch (e) {
             return { status: 0, body: 'JS fetch error: ' + (e && e.message ? e.message : String(e)) };
+        }
+    },
+
+    // ---- v2: encrypt-and-upload (plaintext chunks in, one POST out) ----
+    _plainChunks: [],
+
+    /** Reset the pending plaintext chunk buffer (v2 protocol). */
+    beginEncryptUpload: function () {
+        this._plainChunks = [];
+    },
+
+    /**
+     * Append one PLAINTEXT base64 chunk of the exported vault as a Uint8Array
+     * (v2 protocol). byte[] from .NET marshals to Uint8Array - no string copy.
+     */
+    appendPlainChunk: function (chunk) {
+        this._plainChunks.push(chunk);
+    },
+
+    /**
+     * Concatenate the buffered plaintext chunks, AES-encrypt them, assemble the
+     * JSON body as a Blob and POST it - all inside the JS heap. Neither the
+     * plaintext nor the ciphertext is ever surfaced to the .NET heap as a
+     * vault-sized string.
+     * @param {Object} meta - vault metadata WITHOUT the Blob field (small, JSON-serialized by interop)
+     * @param {string} base64Key - base64 AES key (same key the .NET path uses)
+     * @param {string} accessToken - Bearer token for the API
+     * @returns {Promise<{status: number, body: string}>} HTTP status and response body text (status 0 = network/JS error, -1 via exception = interop missing)
+     */
+    encryptAndUpload: async function (meta, base64Key, accessToken) {
+        this._chunks = [];
+        const chunks = this._plainChunks;
+        this._plainChunks = [];
+        try {
+            let total = 0;
+            for (const c of chunks) {
+                total += c.length;
+            }
+            const merged = new Uint8Array(total);
+            let offset = 0;
+            for (const c of chunks) {
+                merged.set(c, offset);
+                offset += c.length;
+            }
+
+            const cipherBase64 = await window.cryptoInterop.encryptBytesToBase64(merged, base64Key);
+
+            const metaNoBlob = Object.assign({}, meta);
+            delete metaNoBlob.Blob;
+            delete metaNoBlob.blob;
+            const metaJson = JSON.stringify(metaNoBlob);
+
+            // Base64 needs no JSON escaping, so embed the ciphertext directly.
+            const parts = [metaJson.slice(0, -1) + ',"Blob":"', cipherBase64, '"}'];
+            const body = new Blob(parts, { type: 'application/json' });
+
+            const response = await fetch('/api/v1/Vault', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + accessToken,
+                },
+                body: body,
+            });
+            const text = await response.text();
+            return { status: response.status, body: text };
+        } catch (e) {
+            return { status: 0, body: 'JS encrypt/upload error: ' + (e && e.message ? e.message : String(e)) };
         }
     }
 };
