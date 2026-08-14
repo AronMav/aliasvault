@@ -73,7 +73,7 @@ export interface IExtensionMessageProtocol {
   GET_SEARCH_ITEMS(data: { searchTerm: string }): ItemsResponse;
   GET_SERVER_REVISION(): number;
   GET_SYNC_STATE(): { isDirty: boolean; mutationSequence: number; serverRevision: number; isSyncInProgress: boolean };
-  GET_TOTP_SECRETS(data: { itemIds: string[] }): { success: boolean; secrets?: Record<string, string>; error?: string };
+  GET_TOTP_SECRETS(data: { itemIds: string[], currentUrl?: string }): { success: boolean; secrets?: Record<string, string>; error?: string };
   GET_TWO_FACTOR_STATE(): TwoFactorState | null;
   GET_VAULT(): VaultResponse;
   GET_WEBAUTHN_SETTINGS(data: any): WebAuthnSettingsResponse;

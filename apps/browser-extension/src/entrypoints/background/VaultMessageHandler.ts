@@ -2191,7 +2191,7 @@ export async function handleSearchItemsWithTotp(
  * @param message - Array of item IDs to get TOTP secrets for
  */
 export async function handleGetTotpSecrets(
-  message: { itemIds: string[] }
+  message: { itemIds: string[], currentUrl?: string }
 ): Promise<{ success: boolean; secrets?: Record<string, string>; error?: string }> {
   const encryptionKey = await handleGetEncryptionKey();
 
@@ -2201,9 +2201,24 @@ export async function handleGetTotpSecrets(
 
   try {
     const sqliteClient = await createVaultSqliteClient();
+
+    // The requesting content script runs in an arbitrary page and supplies the item IDs itself.
+    // Re-check every requested ID against the sender's URL so a compromised tab cannot ask for
+    // the TOTP seeds of credentials that belong to a different site.
+    let allowedIds: Set<string> | null = null;
+    if (message.currentUrl) {
+      const allItems = getCachedAllItems(sqliteClient);
+      const matched = await filterItemsByUrl(allItems, message.currentUrl, '');
+      allowedIds = new Set(matched.map(item => item.Id));
+    }
+
     const secrets: Record<string, string> = {};
 
     for (const itemId of message.itemIds) {
+      if (allowedIds !== null && !allowedIds.has(itemId)) {
+        continue;
+      }
+
       const totpCodes = sqliteClient.settings.getTotpCodesForItem(itemId);
       if (totpCodes.length > 0) {
         secrets[itemId] = totpCodes[0].SecretKey;
