@@ -145,11 +145,32 @@ task_passkeys_allowlist() {
 
 task_public_suffix_list() {
     local url="https://publicsuffix.org/list/public_suffix_list.dat"
+    local mirror_url="https://raw.githubusercontent.com/publicsuffix/list/master/public_suffix_list.dat"
     local target="$REPO_ROOT/core/rust/src/credential_matcher/public_suffix_list.dat"
 
     echo -e "  ${BLUE}↓${RESET} fetching $url"
     local raw="$WORK_DIR/public_suffix_list.dat"
     download "$url" "$raw"
+
+    # Fetch the same list from the GitHub mirror as a second source. If the
+    # two differ, the primary source may have been tampered with and the
+    # refresh must be aborted until a human can investigate.
+    echo -e "  ${BLUE}↓${RESET} fetching mirror $mirror_url"
+    local mirror="$WORK_DIR/public_suffix_list.mirror.dat"
+    if ! download "$mirror_url" "$mirror"; then
+        echo -e "  ${YELLOW}⚠${RESET} mirror unavailable, continuing with primary only" >&2
+    else
+        local primary_hash mirror_hash
+        primary_hash=$(sha256sum "$raw" | awk '{print $1}')
+        mirror_hash=$(sha256sum "$mirror" | awk '{print $1}')
+        if [ "$primary_hash" != "$mirror_hash" ]; then
+            echo -e "  ${RED}✗${RESET} primary and mirror hashes differ — refusing to update" >&2
+            echo -e "    primary: $primary_hash" >&2
+            echo -e "    mirror:  $mirror_hash" >&2
+            return 1
+        fi
+        echo -e "  ${GREEN}✓${RESET} primary matches mirror ($primary_hash)"
+    fi
 
     # Keep only the rules. The upstream prose is more than half the file and the
     # Rust core embeds this verbatim into the WASM and mobile binaries. Rule
