@@ -101,8 +101,10 @@ object RustItemMatcher {
             return filtered
         } catch (e: Exception) {
             Log.e(TAG, "Error filtering items with Rust matcher: ${e.message}", e)
-            // Fallback to returning all items on error
-            return items
+            // Fail closed: offering credentials from unrelated entries in whatever app asked
+            // for autofill turns a matcher outage into a credential-disclosure surface.
+            // An empty list shows the "open AliasVault" fallback instead of the whole vault.
+            return emptyList()
         }
     }
 
