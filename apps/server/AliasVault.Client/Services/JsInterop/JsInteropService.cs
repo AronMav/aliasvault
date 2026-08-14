@@ -81,6 +81,32 @@ public sealed class JsInteropService(IJSRuntime jsRuntime)
     }
 
     /// <summary>
+    /// Writes an informational message to the browser console via console.info.
+    /// </summary>
+    /// <remarks>
+    /// Used for save-path telemetry ([AV-SAVE]) that must be visible in production builds,
+    /// where the .NET logger runs at Warning level and LogInformation calls are dropped.
+    /// Mirrors the console.info rule from the extension codebase (no-console lint allows info).
+    /// </remarks>
+    /// <param name="message">Message to write.</param>
+    /// <returns>Task representing the asynchronous operation.</returns>
+    public async Task LogToConsoleAsync(string message)
+    {
+        try
+        {
+            await jsRuntime.InvokeVoidAsync("console.info", message);
+        }
+        catch (JSDisconnectedException)
+        {
+            // Circuit disconnected mid-save; telemetry is best-effort.
+        }
+        catch (ObjectDisposedException)
+        {
+            // Runtime shutting down; ignore.
+        }
+    }
+
+    /// <summary>
     /// Symmetrically decrypts a string using the provided encryption key.
     /// </summary>
     /// <param name="ciphertext">Cipher text to decrypt.</param>
