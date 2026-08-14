@@ -87,14 +87,15 @@ public static class AuthHelper
     /// <param name="user">The user object.</param>
     /// <param name="clientEphemeral">The client ephemeral value.</param>
     /// <param name="clientSessionProof">The client session proof.</param>
-    /// <returns>SrpSession if validation succeeds, null otherwise.</returns>
-    public static SrpSession? ValidateSrpSession(IMemoryCache cache, AliasVaultUser user, string clientEphemeral, string clientSessionProof)
+    /// <returns>Tuple with the SrpSession (null if validation failed) and whether an active SRP session existed.</returns>
+    public static (SrpSession? Session, bool ActiveSessionFound) ValidateSrpSession(IMemoryCache cache, AliasVaultUser user, string clientEphemeral, string clientSessionProof)
     {
         var srpIdentity = GetSrpIdentity(user);
 
         if (!cache.TryGetValue(CachePrefixEphemeral + srpIdentity, out var cached) || cached is not SrpEphemeralSet ephemeralSet)
         {
-            return null;
+            // No login was initiated for this user, or the server ephemeral has expired. Return false to indicate that no active session was found.
+            return (null, false);
         }
 
         // Retrieve latest vault of user which contains the current salt and verifier.
@@ -117,11 +118,13 @@ public static class AuthHelper
 
             if (serverSession is not null)
             {
-                return serverSession;
+                return (serverSession, true);
             }
         }
 
-        return null;
+        // The proof matched none of the live secrets: an exchange was started for this account, so
+        // this was a real password attempt and not a validate call for a session that never existed.
+        return (null, true);
     }
 
     /// <summary>

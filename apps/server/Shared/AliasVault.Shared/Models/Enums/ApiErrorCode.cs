@@ -165,6 +165,11 @@ public enum ApiErrorCode
     MOBILE_LOGIN_INVALID_PUBLIC_KEY,
 
     /// <summary>
+    /// Too many mobile login requests were created from this client in a short period.
+    /// </summary>
+    MOBILE_LOGIN_RATE_LIMIT_EXCEEDED,
+
+    /// <summary>
     /// The key derivation parameters supplied with a password change are not ones the server
     /// is willing to record against a vault.
     /// </summary>
