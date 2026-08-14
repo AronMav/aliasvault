@@ -361,3 +361,70 @@ window.rsaInterop = {
         }
     }
 };
+
+/**
+ * Uploads the encrypted vault to the server entirely from JavaScript.
+ *
+ * Why: the .NET (Blazor WASM) save path JSON-serializes the vault object (with
+ * the ~64MB base64 ciphertext as a string property) inside PostAsJsonAsync,
+ * which exhausts the 32-bit browser heap on vault-sized blobs - the POST never
+ * leaves the tab, observed as the tab freezing and the mutation being lost.
+ * The browser extension uploads the same blob with a plain JS fetch without
+ * any problems, so we do the same here.
+ *
+ * Protocol: .NET pushes the ALREADY encrypted base64 in small chunks
+ * (appendChunk, one interop call each so no giant string is ever marshalled),
+ * then calls upload() which assembles the JSON body as a Blob (streamed by the
+ * browser, no giant JS string either) and POSTs it with a native fetch.
+ */
+window.vaultUploadInterop = {
+    _chunks: [],
+
+    /** Reset the pending chunk buffer. */
+    beginUpload: function () {
+        this._chunks = [];
+    },
+
+    /** Append one base64 chunk of the encrypted vault. */
+    appendChunk: function (chunk) {
+        this._chunks.push(chunk);
+    },
+
+    /**
+     * Assemble the JSON body from the buffered chunks and POST it.
+     * @param {Object} meta - vault metadata WITHOUT the Blob field (small, JSON-serialized by interop)
+     * @param {string} accessToken - Bearer token for the API
+     * @returns {Promise<{status: number, body: string}>} HTTP status and response body text (status 0 = network/JS error)
+     */
+    upload: async function (meta, accessToken) {
+        // Base64 alphabet (A-Za-z0-9+/=) needs no JSON escaping, so the chunks
+        // can be embedded into the JSON text directly as Blob parts.
+        const metaNoBlob = Object.assign({}, meta);
+        delete metaNoBlob.Blob;
+        const metaJson = JSON.stringify(metaNoBlob);
+
+        const parts = [metaJson.slice(0, -1) + ',"Blob":"'];
+        for (const chunk of this._chunks) {
+            parts.push(chunk);
+        }
+        parts.push('"}');
+        this._chunks = [];
+
+        const body = new Blob(parts, { type: 'application/json' });
+
+        try {
+            const response = await fetch('/api/v1/Vault', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + accessToken,
+                },
+                body: body,
+            });
+            const text = await response.text();
+            return { status: response.status, body: text };
+        } catch (e) {
+            return { status: 0, body: 'JS fetch error: ' + (e && e.message ? e.message : String(e)) };
+        }
+    }
+};

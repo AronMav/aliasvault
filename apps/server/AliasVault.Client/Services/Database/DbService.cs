@@ -1021,6 +1021,7 @@ public sealed class DbService : IDisposable
     private async Task<bool> SaveToServerAsync(string encryptedDatabase)
     {
         var vaultObject = await PrepareVaultForUploadAsync(encryptedDatabase);
+        var serializerOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
 
         try
         {
@@ -1028,14 +1029,44 @@ public sealed class DbService : IDisposable
             // export/encrypt steps). Visible in production via console.info.
             var uploadSw = Stopwatch.StartNew();
             await _jsInteropService.EmitTelemetryBeaconAsync("post-start");
-            var response = await _httpClient.PostAsJsonAsync("v1/Vault", vaultObject);
-            await _jsInteropService.LogToConsoleAsync($"[AV-SAVE] POST v1/Vault -> {(int)response.StatusCode} in {uploadSw.ElapsedMilliseconds}ms");
+
+            // [AV-JS-UPLOAD] Push the ciphertext to JS in small chunks and POST from there.
+            // PostAsJsonAsync re-serializes the vault object with the ~64MB Blob string and
+            // dies inside the 32-bit browser heap on vault-sized saves (tab freezes, no
+            // request ever leaves - confirmed by /av-tel telemetry: post-start without
+            // post-done). It stays only as a fallback for stale cached JS bundles.
+            vaultObject.Blob = string.Empty;
+            var accessToken = await _authService.GetAccessTokenAsync();
+            var (status, body) = await _jsInteropService.UploadVaultViaJsAsync(encryptedDatabase, vaultObject, accessToken);
+
+            if (status == 401)
+            {
+                // The native JS fetch bypasses the managed DelegatingHandler that normally
+                // refreshes expired tokens transparently - do one refresh-and-retry here.
+                var newToken = await _authService.RefreshTokenAsync();
+                if (!string.IsNullOrEmpty(newToken))
+                {
+                    (status, body) = await _jsInteropService.UploadVaultViaJsAsync(encryptedDatabase, vaultObject, newToken);
+                }
+            }
+
+            if (status == -1)
+            {
+                // Stale cached JS bundle without vaultUploadInterop: fall back to the managed path.
+                await _jsInteropService.EmitTelemetryBeaconAsync("post-fallback");
+                vaultObject.Blob = encryptedDatabase;
+                var response = await _httpClient.PostAsJsonAsync("v1/Vault", vaultObject);
+                status = (int)response.StatusCode;
+                body = await response.Content.ReadAsStringAsync();
+            }
+
+            await _jsInteropService.LogToConsoleAsync($"[AV-SAVE] POST v1/Vault -> {status} in {uploadSw.ElapsedMilliseconds}ms");
             uploadSw.Stop();
-            await _jsInteropService.EmitTelemetryBeaconAsync("post-done", $"code={(int)response.StatusCode} ms={uploadSw.ElapsedMilliseconds}");
+            await _jsInteropService.EmitTelemetryBeaconAsync("post-done", $"code={status} ms={uploadSw.ElapsedMilliseconds}");
 
             // 413: server / reverse-proxy rejected the upload because the vault exceeded MAX_UPLOAD_SIZE_MB.
             // Show the targeted message and skip the generic notification fired in the catch / fallthrough.
-            if (response.StatusCode == HttpStatusCode.RequestEntityTooLarge)
+            if (status == (int)HttpStatusCode.RequestEntityTooLarge)
             {
                 _logger.LogError("Vault upload rejected by server with 413 Request Entity Too Large. The vault exceeds the server's configured MAX_UPLOAD_SIZE_MB.");
                 _globalNotificationService.AddErrorMessage(_sharedLocalizer["VaultTooLargeError"], true);
@@ -1043,10 +1074,15 @@ public sealed class DbService : IDisposable
             }
 
             // Ensure the request was successful
-            response.EnsureSuccessStatusCode();
+            if (status < 200 || status > 299)
+            {
+                _logger.LogError("Error during save: server returned status {Status}. Body: {Body}", status, body.Length > 500 ? body[..500] : body);
+                _globalNotificationService.AddErrorMessage(_sharedLocalizer["VaultSaveError"], true);
+                return false;
+            }
 
             // Deserialize the response content
-            var vaultUpdateResponse = await response.Content.ReadFromJsonAsync<VaultUpdateResponse>();
+            var vaultUpdateResponse = JsonSerializer.Deserialize<VaultUpdateResponse>(body, serializerOptions);
 
             if (vaultUpdateResponse != null)
             {

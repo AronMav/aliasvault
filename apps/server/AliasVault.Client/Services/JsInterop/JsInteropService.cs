@@ -81,6 +81,48 @@ public sealed class JsInteropService(IJSRuntime jsRuntime)
     }
 
     /// <summary>
+    /// Uploads the encrypted vault to the server via a chunked JS interop protocol, so the
+    /// ~64MB base64 ciphertext is never JSON-serialized inside PostAsJsonAsync.
+    /// </summary>
+    /// <remarks>
+    /// The managed PostAsJsonAsync path JSON-serializes the vault object (with the ciphertext
+    /// as a string property) which exhausts the 32-bit browser heap on vault-sized blobs and
+    /// the request never leaves the tab. Here the ciphertext is pushed to JS in small chunks
+    /// (one interop call each), assembled into a Blob by JS and POSTed with a native fetch -
+    /// the same approach the browser extension uses successfully for the same blob.
+    /// </remarks>
+    /// <param name="encryptedDatabaseBase64">Base64 of the encrypted vault (as produced by the encrypt step).</param>
+    /// <param name="vaultMeta">Vault metadata object; its Blob field is ignored and replaced by the chunks.</param>
+    /// <param name="accessToken">Bearer access token for the API.</param>
+    /// <returns>Tuple of HTTP status code (0 = JS/network error) and response body text.</returns>
+    public async Task<(int Status, string Body)> UploadVaultViaJsAsync(string encryptedDatabaseBase64, object vaultMeta, string accessToken)
+    {
+        const string chunkInteropError = "vaultUploadInterop is not available";
+
+        try
+        {
+            await jsRuntime.InvokeVoidAsync("vaultUploadInterop.beginUpload");
+
+            // Push the base64 in 4MB chunks: each interop call marshals one small string,
+            // and the full ciphertext is only ever assembled inside the JS Blob.
+            const int chunkChars = 4 * 1024 * 1024;
+            for (var i = 0; i < encryptedDatabaseBase64.Length; i += chunkChars)
+            {
+                var len = Math.Min(chunkChars, encryptedDatabaseBase64.Length - i);
+                await jsRuntime.InvokeVoidAsync("vaultUploadInterop.appendChunk", encryptedDatabaseBase64.Substring(i, len));
+            }
+
+            var result = await jsRuntime.InvokeAsync<JsonElement>("vaultUploadInterop.upload", vaultMeta, accessToken);
+            return (result.GetProperty("status").GetInt32(), result.GetProperty("body").GetString() ?? string.Empty);
+        }
+        catch (JSException ex) when (ex.Message.Contains(chunkInteropError, StringComparison.Ordinal) || ex.Message.Contains("vaultUploadInterop", StringComparison.Ordinal))
+        {
+            // Older cached JS bundle without the interop functions: signal the caller to fall back.
+            return (-1, ex.Message);
+        }
+    }
+
+    /// <summary>
     /// Writes an informational message to the browser console via console.info.
     /// </summary>
     /// <remarks>
