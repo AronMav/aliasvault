@@ -2202,9 +2202,11 @@ export async function handleGetTotpSecrets(
   try {
     const sqliteClient = await createVaultSqliteClient();
 
-    // The requesting content script runs in an arbitrary page and supplies the item IDs itself.
-    // Re-check every requested ID against the sender's URL so a compromised tab cannot ask for
-    // the TOTP seeds of credentials that belong to a different site.
+    /*
+     * The requesting content script runs in an arbitrary page and supplies the item IDs itself.
+     * Re-check every requested ID against the sender's URL so a compromised tab cannot ask for
+     * the TOTP seeds of credentials that belong to a different site.
+     */
     let allowedIds: Set<string> | null = null;
     if (message.currentUrl) {
       const allItems = getCachedAllItems(sqliteClient);

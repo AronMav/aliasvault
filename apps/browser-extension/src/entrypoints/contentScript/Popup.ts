@@ -489,8 +489,10 @@ function updateTotpPopupContent(items: Item[], itemList: HTMLElement | null, inp
   // Fetch TOTP secrets and create items with live codes
   (async (): Promise<void> => {
     const itemIds = items.map(item => item.Id);
-    // Include the page URL so the background can verify each requested item actually
-    // belongs to this site before releasing its TOTP seed.
+    /*
+     * Include the page URL so the background can verify each requested item actually
+     * belongs to this site before releasing its TOTP seed.
+     */
     const currentUrl = getCurrentAutofillFrameUrl();
     const secretsResponse = await sendMessage('GET_TOTP_SECRETS', { itemIds, currentUrl });
 

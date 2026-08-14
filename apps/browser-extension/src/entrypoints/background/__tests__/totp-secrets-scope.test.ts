@@ -28,9 +28,11 @@ vi.mock('@/utils/RustCore', async (importOriginal) => {
   return {
     ...actual,
     isUrlAlreadyLinked: vi.fn().mockResolvedValue(false),
-    // The WASM credential matcher cannot run under vitest (no extension runtime),
-    // so emulate its URL matching with the same input mapping the real function
-    // builds: credential URLs come from item.Fields with FieldKey 'login.url'.
+    /*
+     * The WASM credential matcher cannot run under vitest (no extension runtime),
+     * so emulate its URL matching with the same input mapping the real function
+     * builds: credential URLs come from item.Fields with FieldKey 'login.url'.
+     */
     filterItems: vi.fn().mockImplementation(async (items: Array<{ Id: string, Fields?: Array<{ FieldKey: string | null, Value: string | string[] | null }> }>, currentUrl: string) => {
       try {
         const pageOrigin = new URL(currentUrl).origin;
@@ -54,12 +56,18 @@ vi.mock('@/utils/RustCore', async (importOriginal) => {
   };
 });
 
+/**
+ * Base64 of a random 32-byte AES key.
+ */
 function randomKeyBase64(): string {
   return btoa(String.fromCharCode(...Array.from({ length: 32 }, () => Math.floor(Math.random() * 256))));
 }
 
 const ENCRYPTION_KEY_B64 = randomKeyBase64();
 
+/**
+ * Seeds storage with a fresh empty vault and the session key.
+ */
 async function seedVault(): Promise<void> {
   const SQL = await initSqlJs();
   const raw = new SQL.Database();
@@ -115,8 +123,10 @@ describe('GET_TOTP_SECRETS URL scope', () => {
     expect(matchingItem).toBeDefined();
     expect(otherItem).toBeDefined();
 
-    // Attach a TOTP code to both items directly in the vault store.
-    // Dates use the normalized sqlite format 'yyyy-MM-dd HH:mm:ss.fff'.
+    /*
+     * Attach a TOTP code to both items directly in the vault store.
+     * Dates use the normalized sqlite format 'yyyy-MM-dd HH:mm:ss.fff'.
+     */
     const now = '2026-08-14 12:00:00.000';
     const totpInserts = [matchingItem!, otherItem!]
       .map(item => `INSERT INTO TotpCodes (Id, Name, SecretKey, ItemId, CreatedAt, UpdatedAt, IsDeleted) VALUES ('${crypto.randomUUID()}', 'Test TOTP', 'JBSWY3DPEHPK3PXP', '${item.Id}', '${now}', '${now}', 0)`)
@@ -153,8 +163,10 @@ describe('GET_TOTP_SECRETS URL scope', () => {
     const now = '2026-08-14 12:00:00.000';
     client.executeRaw(`INSERT INTO TotpCodes (Id, Name, SecretKey, ItemId, CreatedAt, UpdatedAt, IsDeleted) VALUES ('${crypto.randomUUID()}', 'Test TOTP', 'JBSWY3DPEHPK3PXP', '${item!.Id}', '${now}', '${now}', 0)`);
 
-    // No currentUrl: the scope check is skipped and both seeds are returned,
-    // matching the pre-fix behaviour for callers that cannot know the URL.
+    /*
+     * No currentUrl: the scope check is skipped and both seeds are returned,
+     * matching the pre-fix behaviour for callers that cannot know the URL.
+     */
     const response = await handleGetTotpSecrets({ itemIds: [item!.Id] });
 
     expect(response.success).toBe(true);
