@@ -251,11 +251,21 @@ export async function handleStoreEncryptionKey(
     cachedEncryptionKey = encryptionKey;
 
     /*
-     * Vault is now unlocked — prewarm the sqlite client and items cache in the background
-     * so the first field click is instant. This takes 3-8 seconds on some machines due to
-     * sql.js WASM overhead; running it here means the user never waits for it.
+     * Vault is now unlocked — prewarm the sqlite client and items cache before
+     * returning to the popup. The popup will immediately request GET_VAULT after
+     * this call; if we fire-and-forget the prewarm, GET_VAULT often arrives before
+     * pendingDecrypt is set (prewarmVaultCache does two storage reads first), so
+     * handleGetVault starts a second decryption in parallel. Two simultaneous
+     * symmetricDecrypt + sqlite.init calls can exceed the popup's 3.5 s timeout
+     * on slower machines, producing E-001 "Background service worker timed out".
+     *
+     * Awaiting here means the popup's STORE_ENCRYPTION_KEY call blocks until the
+     * vault is decrypted and cached. The user sees a spinner on the Unlock button
+     * during this time — expected UX for unlocking a password manager. The
+     * subsequent GET_VAULT call then hits cachedDecryptedVault and returns
+     * instantly, well within the timeout.
      */
-    void prewarmVaultCache();
+    await prewarmVaultCache();
 
     return { success: true };
   } catch (error) {
