@@ -109,7 +109,12 @@ public static class IpAddressUtility
     /// <returns>The raw IP address string, or null when it cannot be determined.</returns>
     private static string? ExtractRawIpString(HttpContext httpContext)
     {
-        if (httpContext.Request.Headers.TryGetValue(RealIpHeader, out var realIp))
+        // Only a reverse proxy reaching us over a private network may name the client
+        // (see the remarks on ExtractRawIpString above). A request straight from the
+        // internet that carries X-Real-IP must not get that header honoured: anyone
+        // could set it and pick the address the block list and registration limits see.
+        var peer = httpContext.Connection.RemoteIpAddress;
+        if (IsPrivatePeer(peer) && httpContext.Request.Headers.TryGetValue(RealIpHeader, out var realIp))
         {
             var lastEntry = realIp.ToString().Split(',')[^1].Trim();
             if (lastEntry.Length > 0)
