@@ -474,3 +474,6 @@ docs/superpowers/
 # Test run output (dotnet test --logger trx --results-directory e2e-results)
 e2e-results/
 *.trx
+
+# Hermes agent session artifacts
+.hermes/
