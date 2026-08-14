@@ -280,7 +280,7 @@ public class SrpEphemeralSetTests
         /// <returns>The server session, or null when the proof is not accepted.</returns>
         public SrpSession? Validate(TestExchange exchange)
         {
-            return AuthHelper.ValidateSrpSession(this.cache, this.user, exchange.ClientEphemeralPublic, exchange.ClientSessionProof);
+            return AuthHelper.ValidateSrpSession(this.cache, this.user, exchange.ClientEphemeralPublic, exchange.ClientSessionProof).Session;
         }
 
         /// <summary>
