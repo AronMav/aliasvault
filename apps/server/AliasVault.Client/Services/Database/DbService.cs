@@ -10,6 +10,7 @@ namespace AliasVault.Client.Services.Database;
 using System.Buffers;
 using System.Buffers.Text;
 using System.Data;
+using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
@@ -166,12 +167,24 @@ public sealed class DbService : IDisposable
         // Save the actual dbContext.
         await _dbContext.SaveChangesAsync();
 
+        // [AV-SAVE] step telemetry: the vault export/encrypt path is the known bottleneck on
+        // large vaults (VACUUM INTO + base64 + JS-interop encryption all run on the single
+        // WASM thread). Timings are written with console.info so they are visible in
+        // production builds where the logger runs at Warning level.
+        var avSaveSw = Stopwatch.StartNew();
+        var dbSavedAt = avSaveSw.ElapsedMilliseconds;
+
         // Encrypt the base64 payload as bytes. This is the same plaintext the string based
         // overload would encrypt, so the stored vault format is unchanged, but it avoids
         // building a vault-sized .NET string and JSON encoding it for the interop call.
         var base64Utf8 = await ExportSqliteToUtf8Base64Async();
+        var exportedAt = avSaveSw.ElapsedMilliseconds;
 
-        return await _jsInteropService.SymmetricEncryptFromBytes(base64Utf8, _authService.GetEncryptionKeyAsBase64Async());
+        var encrypted = await _jsInteropService.SymmetricEncryptFromBytes(base64Utf8, _authService.GetEncryptionKeyAsBase64Async());
+        avSaveSw.Stop();
+        await _jsInteropService.LogToConsoleAsync($"[AV-SAVE] export={exportedAt - dbSavedAt}ms ({base64Utf8.Length / 1024}KB b64) encrypt={avSaveSw.ElapsedMilliseconds - exportedAt}ms cipher={encrypted.Length / 1024}KB total={avSaveSw.ElapsedMilliseconds}ms");
+
+        return encrypted;
     }
 
     /// <summary>
@@ -238,8 +251,13 @@ public sealed class DbService : IDisposable
                         return;
                     }
 
+                    await _jsInteropService.LogToConsoleAsync("[AV-SAVE] background save started");
+
                     // Prune expired items from trash before saving.
+                    var pruneSw = Stopwatch.StartNew();
                     await PruneExpiredTrashItemsAsync();
+                    await _jsInteropService.LogToConsoleAsync($"[AV-SAVE] prune={pruneSw.ElapsedMilliseconds}ms");
+                    pruneSw.Stop();
 
                     if (cancellationToken.IsCancellationRequested || _disposed)
                     {
@@ -1002,7 +1020,12 @@ public sealed class DbService : IDisposable
 
         try
         {
+            // [AV-SAVE] upload step timing (see GetEncryptedDatabaseBase64String for the
+            // export/encrypt steps). Visible in production via console.info.
+            var uploadSw = Stopwatch.StartNew();
             var response = await _httpClient.PostAsJsonAsync("v1/Vault", vaultObject);
+            await _jsInteropService.LogToConsoleAsync($"[AV-SAVE] POST v1/Vault -> {(int)response.StatusCode} in {uploadSw.ElapsedMilliseconds}ms");
+            uploadSw.Stop();
 
             // 413: server / reverse-proxy rejected the upload because the vault exceeded MAX_UPLOAD_SIZE_MB.
             // Show the targeted message and skip the generic notification fired in the catch / fallthrough.

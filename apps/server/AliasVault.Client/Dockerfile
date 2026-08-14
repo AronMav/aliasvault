@@ -88,7 +88,7 @@ RUN dotnet publish "AliasVault.Client.csproj" \
     -o /app/publish \
     /p:UseAppHost=false \
     /p:WasmNativeStrip=false \
-    /p:EmccInitialHeapSize=268435456
+    /p:EmccInitialHeapSize=1073741824
 
 # Final stage
 FROM nginx:1.24.0 AS final
