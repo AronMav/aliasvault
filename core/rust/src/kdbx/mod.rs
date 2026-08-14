@@ -33,6 +33,10 @@ pub enum KdbxError {
     /// The file is not a readable KDBX database.
     #[error("could not read the database: {0}")]
     Malformed(String),
+
+    /// The database is structurally valid but exceeds a resource limit.
+    #[error("the database exceeds a resource limit: {0}")]
+    TooLarge(String),
 }
 
 /// Opens a KDBX database using a master password only.

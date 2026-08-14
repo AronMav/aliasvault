@@ -182,6 +182,11 @@ public static class KdbxImporter
             notes.Add($"{skipped.History} previous versions of entries were not imported, only the current version of each entry.");
         }
 
+        if (skipped.MaxDepthExceeded > 0)
+        {
+            notes.Add($"{skipped.MaxDepthExceeded} entries in deeply nested groups were not imported. The importer supports up to 100 levels of group nesting.");
+        }
+
         return notes;
     }
 }

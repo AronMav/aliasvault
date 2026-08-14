@@ -57,6 +57,14 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
     value.filter(|v| !v.is_empty())
 }
 
+/// Maximum group nesting depth the importer will traverse.
+///
+/// KeePass allows arbitrary nesting. A crafted database with thousands of
+/// nested groups causes a stack overflow in the recursive visitor. 100 levels
+/// is far beyond any real-world vault (most have 2–4) while staying well
+/// within the WASM stack budget.
+const MAX_GROUP_DEPTH: usize = 100;
+
 /// Maps every entry outside the recycle bin into the neutral model.
 ///
 /// Returns the items, the counts of skipped content, and the attachment blobs.
@@ -74,6 +82,7 @@ pub fn map_database(db: &Database) -> (Vec<KdbxItem>, KdbxSkipped, Vec<Vec<u8>>)
         db.root(),
         recycle_bin_id,
         &[],
+        0,
         &mut items,
         &mut skipped,
         &mut blobs,
@@ -86,12 +95,18 @@ fn visit_group(
     group: GroupRef<'_>,
     recycle_bin_id: Option<GroupId>,
     ancestors: &[String],
+    depth: usize,
     items: &mut Vec<KdbxItem>,
     skipped: &mut KdbxSkipped,
     blobs: &mut Vec<Vec<u8>>,
 ) {
     if recycle_bin_id == Some(group.id()) {
         skipped.recycle_bin += count_entries(&group);
+        return;
+    }
+
+    if depth > MAX_GROUP_DEPTH {
+        skipped.max_depth_exceeded += count_entries(&group);
         return;
     }
 
@@ -108,7 +123,7 @@ fn visit_group(
     for child in group.groups() {
         let mut path = ancestors.to_vec();
         path.push(child.name.clone());
-        visit_group(child, recycle_bin_id, &path, items, skipped, blobs);
+        visit_group(child, recycle_bin_id, &path, depth + 1, items, skipped, blobs);
     }
 }
 

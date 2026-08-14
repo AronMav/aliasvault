@@ -152,4 +152,9 @@ public class KdbxSkipped
     /// Gets or sets the number of historical versions of entries.
     /// </summary>
     public int History { get; set; }
+
+    /// <summary>
+    /// Gets or sets the number of entries in groups deeper than the maximum supported depth.
+    /// </summary>
+    public int MaxDepthExceeded { get; set; }
 }

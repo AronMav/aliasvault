@@ -74,4 +74,6 @@ pub struct KdbxSkipped {
     pub recycle_bin: u32,
     /// Historical versions of entries.
     pub history: u32,
+    /// Entries in groups deeper than the maximum supported depth.
+    pub max_depth_exceeded: u32,
 }
