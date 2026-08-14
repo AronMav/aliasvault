@@ -107,6 +107,49 @@ public sealed class JsInteropService(IJSRuntime jsRuntime)
     }
 
     /// <summary>
+    /// Emits a best-effort server-side telemetry beacon (HTTP GET to /av-tel/&lt;step&gt;).
+    /// The request lands in the client webserver access log, so the step trail is
+    /// observable on the server even when the browser tab dies mid-operation and the
+    /// console output is lost. 404 responses are expected and harmless.
+    /// The beacon also reports performance.memory.usedJSHeapSize (Chrome) so heap
+    /// exhaustion during the vault-sized JS interop calls is observable with numbers.
+    /// </summary>
+    /// <param name="step">Short URL-safe step identifier, e.g. "bg-start".</param>
+    /// <param name="detail">Optional detail; URL-encoded by this method.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    public async Task EmitTelemetryBeaconAsync(string step, string? detail = null)
+    {
+        try
+        {
+            var url = $"/av-tel/{Uri.EscapeDataString(step)}";
+            if (!string.IsNullOrEmpty(detail))
+            {
+                url += $"?d={Uri.EscapeDataString(detail)}";
+            }
+
+            url += url.Contains('?') ? "&h=" : "?h=";
+
+            // eval lets us append the heap size at fetch time in one round-trip. The URL
+            // is serialized as a JSON string literal, so it stays a valid JS expression.
+            await jsRuntime.InvokeVoidAsync(
+                "eval",
+                $"fetch({JsonSerializer.Serialize(url)} + ((performance && performance.memory && performance.memory.usedJSHeapSize) || 0))");
+        }
+        catch (JSDisconnectedException)
+        {
+            // Circuit disconnected mid-operation; telemetry is best-effort.
+        }
+        catch (ObjectDisposedException)
+        {
+            // Runtime shutting down; ignore.
+        }
+        catch (JSException)
+        {
+            // JS runtime rejected the fetch (e.g. during teardown); ignore.
+        }
+    }
+
+    /// <summary>
     /// Symmetrically decrypts a string using the provided encryption key.
     /// </summary>
     /// <param name="ciphertext">Cipher text to decrypt.</param>

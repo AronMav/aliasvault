@@ -183,6 +183,7 @@ public sealed class DbService : IDisposable
         var encrypted = await _jsInteropService.SymmetricEncryptFromBytes(base64Utf8, _authService.GetEncryptionKeyAsBase64Async());
         avSaveSw.Stop();
         await _jsInteropService.LogToConsoleAsync($"[AV-SAVE] export={exportedAt - dbSavedAt}ms ({base64Utf8.Length / 1024}KB b64) encrypt={avSaveSw.ElapsedMilliseconds - exportedAt}ms cipher={encrypted.Length / 1024}KB total={avSaveSw.ElapsedMilliseconds}ms");
+        await _jsInteropService.EmitTelemetryBeaconAsync("encrypt-done", $"exp={exportedAt - dbSavedAt}ms enc={avSaveSw.ElapsedMilliseconds - exportedAt}ms b64={base64Utf8.Length / 1024}KB cipher={encrypted.Length / 1024}KB");
 
         return encrypted;
     }
@@ -252,11 +253,13 @@ public sealed class DbService : IDisposable
                     }
 
                     await _jsInteropService.LogToConsoleAsync("[AV-SAVE] background save started");
+                    await _jsInteropService.EmitTelemetryBeaconAsync("bg-start", $"rev={_vaultRevisionNumber}");
 
                     // Prune expired items from trash before saving.
                     var pruneSw = Stopwatch.StartNew();
                     await PruneExpiredTrashItemsAsync();
                     await _jsInteropService.LogToConsoleAsync($"[AV-SAVE] prune={pruneSw.ElapsedMilliseconds}ms");
+                    await _jsInteropService.EmitTelemetryBeaconAsync("prune-done", $"ms={pruneSw.ElapsedMilliseconds}");
                     pruneSw.Stop();
 
                     if (cancellationToken.IsCancellationRequested || _disposed)
@@ -309,6 +312,7 @@ public sealed class DbService : IDisposable
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Error during background database sync.");
+                    await _jsInteropService.EmitTelemetryBeaconAsync("bg-error", $"t={ex.GetType().Name} m={ex.Message}");
                     _globalNotificationService.AddErrorMessage(_sharedLocalizer["ErrorUnknown"], true);
                     _state.UpdateState(DbServiceState.DatabaseStatus.Ready);
                 }
@@ -1023,9 +1027,11 @@ public sealed class DbService : IDisposable
             // [AV-SAVE] upload step timing (see GetEncryptedDatabaseBase64String for the
             // export/encrypt steps). Visible in production via console.info.
             var uploadSw = Stopwatch.StartNew();
+            await _jsInteropService.EmitTelemetryBeaconAsync("post-start");
             var response = await _httpClient.PostAsJsonAsync("v1/Vault", vaultObject);
             await _jsInteropService.LogToConsoleAsync($"[AV-SAVE] POST v1/Vault -> {(int)response.StatusCode} in {uploadSw.ElapsedMilliseconds}ms");
             uploadSw.Stop();
+            await _jsInteropService.EmitTelemetryBeaconAsync("post-done", $"code={(int)response.StatusCode} ms={uploadSw.ElapsedMilliseconds}");
 
             // 413: server / reverse-proxy rejected the upload because the vault exceeded MAX_UPLOAD_SIZE_MB.
             // Show the targeted message and skip the generic notification fired in the catch / fallthrough.
