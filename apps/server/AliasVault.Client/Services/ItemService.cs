@@ -521,40 +521,50 @@ public sealed class ItemService(HttpClient httpClient, DbService dbService, Conf
         }
 
         // Retrieve all items from client DB.
+        // NOTE: attachments are intentionally NOT included. Their blobs dominate the vault size
+        // (tens of MB on attachment-heavy vaults) and the list view only needs to know whether
+        // any non-deleted attachment exists. Materializing the blobs here has, on large vaults,
+        // exhausted the WASM heap (SQLite Error 7: 'out of memory') right after unlock, which
+        // crashed the whole app with the generic error banner. Passkeys and TOTP codes are small,
+        // but they are projected through sub-selects as well so the list query stays a single
+        // flat result set instead of split-query result buffers per collection.
         var items = await context.Items
             .Include(x => x.FieldValues.Where(fv => !fv.IsDeleted))
             .Include(x => x.Logo)
             .Include(x => x.Folder)
-            .Include(x => x.Passkeys.Where(p => !p.IsDeleted))
-            .Include(x => x.Attachments.Where(a => !a.IsDeleted))
-            .Include(x => x.TotpCodes.Where(t => !t.IsDeleted))
-            .AsSplitQuery()
             .Where(x => !x.IsDeleted)
             .Where(x => x.DeletedAt == null) // Exclude items in trash
+            .Select(x => new
+            {
+                Item = x,
+                HasPasskey = x.Passkeys.Any(p => !p.IsDeleted),
+                HasAttachment = x.Attachments.Any(a => !a.IsDeleted),
+                HasTotp = x.TotpCodes.Any(t => !t.IsDeleted),
+            })
             .ToListAsync();
 
         // Map to ItemListEntry with proper boolean logic
         var list = items.Select(x => new ItemListEntry
         {
-            Id = x.Id,
-            ItemType = x.ItemType ?? AliasClientDb.Models.ItemType.Login,
-            LogoDataUri = LogoConverter.ToDataUri(x.Logo?.FileData),
-            Service = x.Name,
-            Username = GetFieldValue(x, FieldKey.LoginUsername),
-            Email = GetFieldValue(x, FieldKey.LoginEmail),
-            CardNumber = GetFieldValue(x, FieldKey.CardNumber),
-            CreatedAt = x.CreatedAt,
-            HasPasskey = x.Passkeys != null && x.Passkeys.Any(p => !p.IsDeleted),
-            HasAlias = !string.IsNullOrWhiteSpace(GetFieldValue(x, FieldKey.AliasFirstName)) ||
-                       !string.IsNullOrWhiteSpace(GetFieldValue(x, FieldKey.AliasLastName)) ||
-                       !string.IsNullOrWhiteSpace(GetFieldValue(x, FieldKey.AliasGender)) ||
-                       !string.IsNullOrWhiteSpace(GetFieldValue(x, FieldKey.AliasBirthdate)),
-            HasUsernameOrPassword = !string.IsNullOrWhiteSpace(GetFieldValue(x, FieldKey.LoginUsername)) ||
-                                    !string.IsNullOrWhiteSpace(GetFieldValue(x, FieldKey.LoginPassword)),
-            HasAttachment = x.Attachments != null && x.Attachments.Any(a => !a.IsDeleted),
-            HasTotp = x.TotpCodes != null && x.TotpCodes.Any(t => !t.IsDeleted),
-            FolderId = x.FolderId,
-            FolderName = x.Folder?.Name,
+            Id = x.Item.Id,
+            ItemType = x.Item.ItemType ?? AliasClientDb.Models.ItemType.Login,
+            LogoDataUri = LogoConverter.ToDataUri(x.Item.Logo?.FileData),
+            Service = x.Item.Name,
+            Username = GetFieldValue(x.Item, FieldKey.LoginUsername),
+            Email = GetFieldValue(x.Item, FieldKey.LoginEmail),
+            CardNumber = GetFieldValue(x.Item, FieldKey.CardNumber),
+            CreatedAt = x.Item.CreatedAt,
+            HasPasskey = x.HasPasskey,
+            HasAlias = !string.IsNullOrWhiteSpace(GetFieldValue(x.Item, FieldKey.AliasFirstName)) ||
+                       !string.IsNullOrWhiteSpace(GetFieldValue(x.Item, FieldKey.AliasLastName)) ||
+                       !string.IsNullOrWhiteSpace(GetFieldValue(x.Item, FieldKey.AliasGender)) ||
+                       !string.IsNullOrWhiteSpace(GetFieldValue(x.Item, FieldKey.AliasBirthdate)),
+            HasUsernameOrPassword = !string.IsNullOrWhiteSpace(GetFieldValue(x.Item, FieldKey.LoginUsername)) ||
+                                    !string.IsNullOrWhiteSpace(GetFieldValue(x.Item, FieldKey.LoginPassword)),
+            HasAttachment = x.HasAttachment,
+            HasTotp = x.HasTotp,
+            FolderId = x.Item.FolderId,
+            FolderName = x.Item.Folder?.Name,
         }).ToList();
 
         _cachedList = list;
