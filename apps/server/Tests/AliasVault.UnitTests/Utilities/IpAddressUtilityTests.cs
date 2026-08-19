@@ -46,8 +46,8 @@ public class IpAddressUtilityTests
     }
 
     /// <summary>
-    /// Tests that X-Real-IP set by the bundled reverse proxy is honoured. The proxy runs on the
-    /// container network, so it reaches the API from a private address.
+    /// Tests that a well-formed X-Real-IP set by the bundled reverse proxy is honoured. The proxy runs
+    /// on the container network, so it reaches the API from a private address.
     /// </summary>
     [Test]
     public void RealIpFromReverseProxyIsHonoured()
@@ -58,6 +58,23 @@ public class IpAddressUtilityTests
         var result = IpAddressUtility.GetRawIpAddressFromContext(context);
 
         Assert.That(result?.ToString(), Is.EqualTo("198.51.100.7"));
+    }
+
+    /// <summary>
+    /// Tests that an X-Real-IP value that does not parse as an address is NOT honoured: falling
+    /// through with it would surface a null client address downstream, silently disabling the IP
+    /// block list and the per-address anonymous-auth limit. The connection peer is used instead,
+    /// keeping the request metered and checked.
+    /// </summary>
+    [Test]
+    public void UnparseableRealIpFallsBackToPeer()
+    {
+        var context = CreateContext("172.18.0.5");
+        context.Request.Headers["X-Real-IP"] = "garbage";
+
+        var result = IpAddressUtility.GetRawIpAddressFromContext(context);
+
+        Assert.That(result?.ToString(), Is.EqualTo("172.18.0.5"));
     }
 
     /// <summary>

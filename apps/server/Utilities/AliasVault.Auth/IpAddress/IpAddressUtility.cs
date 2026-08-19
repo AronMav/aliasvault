@@ -117,7 +117,14 @@ public static class IpAddressUtility
         if (IsPrivatePeer(peer) && httpContext.Request.Headers.TryGetValue(RealIpHeader, out var realIp))
         {
             var lastEntry = realIp.ToString().Split(',')[^1].Trim();
-            if (lastEntry.Length > 0)
+
+            // Only trust a value that parses as an address. An unparseable one would surface as a
+            // null client address downstream, which silently disables the IP block list and the
+            // per-address anonymous-auth limit for that request - a misbehaving or hostile proxy
+            // could switch both protections off per request. Falling back to the connection peer
+            // keeps every request metered and checked. The bundled nginx always sends a
+            // well-formed address here, so this only ever fires for a broken proxy.
+            if (lastEntry.Length > 0 && IPAddress.TryParse(lastEntry, out _))
             {
                 return lastEntry;
             }

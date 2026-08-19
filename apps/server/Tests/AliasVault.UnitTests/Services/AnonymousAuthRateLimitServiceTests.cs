@@ -70,19 +70,39 @@ public class AnonymousAuthRateLimitServiceTests
     }
 
     /// <summary>
-    /// A request whose address could not be determined is allowed through: rejecting it would turn an
-    /// unresolvable address into a way to deny service.
+    /// Requests whose address cannot be determined are metered against one shared bucket: within the
+    /// allowance they pass, and once the shared allowance is spent further such requests are rejected.
+    /// Admitting them unmetered would let a caller who hides their address spend without bound.
     /// </summary>
     [Test]
-    public void UnknownAddressIsAllowedTest()
+    public void UnknownAddressIsMeteredTest()
     {
-        var service = new AnonymousAuthRateLimitService(1);
+        var service = new AnonymousAuthRateLimitService(2);
 
         Assert.Multiple(() =>
         {
             Assert.That(service.TryConsume(null), Is.True);
-            Assert.That(service.TryConsume(null), Is.True);
             Assert.That(service.TryConsume(string.Empty), Is.True);
+            Assert.That(service.TryConsume(null), Is.False);
+            Assert.That(service.TryConsume(string.Empty), Is.False);
+        });
+    }
+
+    /// <summary>
+    /// The shared undetermined-address bucket is independent of the buckets of real addresses, so a
+    /// flood from an unresolvable address cannot exhaust someone else's allowance.
+    /// </summary>
+    [Test]
+    public void UnknownAddressBucketIsIndependentTest()
+    {
+        var service = new AnonymousAuthRateLimitService(1);
+
+        service.TryConsume(null);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(service.TryConsume(null), Is.False);
+            Assert.That(service.TryConsume(Address), Is.True);
         });
     }
 

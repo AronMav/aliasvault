@@ -63,6 +63,13 @@ public sealed class AnonymousAuthRateLimitService
     private const int SlotCount = 1 << 16;
 
     /// <summary>
+    /// Bucket key used for every caller whose address could not be determined, so those requests are
+    /// metered against one shared allowance instead of being admitted unmetered. Deliberately not a
+    /// string that could ever equal a parsed address.
+    /// </summary>
+    private const string UnknownAddressKey = "\x00undetermined";
+
+    /// <summary>
     /// Length of one counting window, in milliseconds.
     /// </summary>
     private const long WindowMilliseconds = 60_000;
@@ -97,16 +104,25 @@ public sealed class AnonymousAuthRateLimitService
     /// <summary>
     /// Records a request from the given address and reports whether it still fits in the allowance.
     /// </summary>
-    /// <param name="ipAddress">The address the request came from, or null when it cannot be determined.</param>
+    /// <param name="ipAddress">The address the request came from, or null when it cannot be determined.
+    /// Callers with an undetermined address all share one metered bucket; they are never let through
+    /// unmetered.</param>
     /// <returns>True if the request is within the limit; false if it exceeds it and should be rejected.</returns>
     public bool TryConsume(string? ipAddress)
     {
-        if (_maxPerMinute <= 0 || string.IsNullOrEmpty(ipAddress))
+        if (_maxPerMinute <= 0)
         {
             return true;
         }
 
-        var slot = ipAddress.GetHashCode(StringComparison.Ordinal) & (SlotCount - 1);
+        // A caller whose address cannot be determined is counted in one shared bucket with every
+        // other such caller instead of being admitted unmetered. Unlimited access would let any
+        // caller who hides their address spend without bound, while refusing the request outright
+        // would turn an unresolvable address into a denial of service. A bounded shared bucket
+        // fails closed without either hole.
+        var key = string.IsNullOrEmpty(ipAddress) ? UnknownAddressKey : ipAddress;
+
+        var slot = key.GetHashCode(StringComparison.Ordinal) & (SlotCount - 1);
 
         // Wrapping is fine: windows are only ever compared for equality, and a wrap at worst restarts
         // one window early, which costs a single caller nothing and happens once every few millennia.
