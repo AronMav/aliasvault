@@ -54,6 +54,23 @@ public class FaviconController(
         try
         {
             var image = await FaviconExtractor.FaviconExtractor.GetFaviconAsync(url);
+            if (image == null)
+            {
+                // Distinguish "site has no icon" from "extractor is broken": probe SkiaSharp once
+                // and log loudly if the native lib is missing (e.g. libfontconfig absent on Alpine).
+                // Otherwise every raster favicon fails silently as {"image":null} (200/45B responses).
+                if (!FaviconDiagnostics.IsSkiaSharpHealthy(logger))
+                {
+                    // SkiaSharp broken - every raster icon would be dropped. 500 makes the
+                    // breakage visible in logs/monitoring instead of an endless stream of nulls.
+                    return StatusCode(StatusCodes.Status500InternalServerError, new ProblemDetails
+                    {
+                        Title = "Favicon extractor unavailable",
+                        Detail = "The server-side image processing library failed to load. Contact the administrator.",
+                    });
+                }
+            }
+
             return Ok(new FaviconExtractModel { Image = image });
         }
         catch (Exception ex)
@@ -125,5 +142,42 @@ public class FaviconController(
     private static string AnonymizeUrl(string url)
     {
         return new string(url.Select(c => char.IsLetter(c) ? 'x' : c).ToArray());
+    }
+
+    /// <summary>
+    /// One-shot cached probe for the SkiaSharp native library: decodes a 1x1 PNG once per
+    /// process lifetime. The result cannot change while the process runs.
+    /// </summary>
+    internal static class FaviconDiagnostics
+    {
+        private static bool? healthy;
+
+        /// <summary>
+        /// Returns true when SkiaSharp's native library loads and decodes a minimal PNG.
+        /// </summary>
+        /// <param name="logger">Logger for the one-time failure exception.</param>
+        /// <returns>True if SkiaSharp is usable.</returns>
+        public static bool IsSkiaSharpHealthy(ILogger logger)
+        {
+            if (healthy.HasValue)
+            {
+                return healthy.Value;
+            }
+
+            try
+            {
+                byte[] png = Convert.FromHexString("89504E470D0A1A0A0000000D49484452000000010000000108060000001F15C4890000000D49444154789C626001000000FFFF03000006000557BFABD40000000049454E44AE426082");
+                using var bitmap = SkiaSharp.SKBitmap.Decode(png);
+                healthy = bitmap is not null;
+            }
+            catch (Exception ex)
+            {
+                // DllNotFoundException here = missing native dependency (libfontconfig on musl, etc.)
+                logger.LogError(ex, "SkiaSharp native library failed to load - favicon extraction for raster images (PNG/ICO/JPEG/GIF/WebP) is unavailable.");
+                healthy = false;
+            }
+
+            return healthy.Value;
+        }
     }
 }

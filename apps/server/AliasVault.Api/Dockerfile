@@ -24,8 +24,13 @@ LABEL org.opencontainers.image.licenses="AGPL-3.0"
 LABEL org.opencontainers.image.title="AliasVault API"
 LABEL org.opencontainers.image.description="REST API backend for AliasVault. Part of multi-container setup and can be deployed via install.sh (see docs.aliasvault.com)"
 
-# Install Kerberos libraries to prevent .NET 10 GSSAPI warnings
-RUN apk add --no-cache krb5-libs
+# Install Kerberos libraries to prevent .NET 10 GSSAPI warnings.
+# Install fontconfig: libSkiaSharp.so (favicon decode/resize, SkiaSharp) links against
+# libfontconfig.so.1; without it SkiaSharp fails to load with DllNotFoundException on
+# musl/Alpine and FaviconExtractor silently rejects every raster favicon (PNG/ICO/JPEG/
+# GIF/WebP) - only SVG icons survived. Verified in prod container: ldd shows unresolved
+# FcInitLoadConfigAndFonts etc.
+RUN apk add --no-cache krb5-libs fontconfig
 
 WORKDIR /app
 COPY --from=build /app/publish .
