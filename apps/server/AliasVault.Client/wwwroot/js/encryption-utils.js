@@ -429,7 +429,7 @@ window.vaultUploadInterop = {
      * @param {string} accessToken - Bearer token for the API
      * @returns {Promise<{status: number, body: string}>} HTTP status and response body text (status 0 = network/JS error)
      */
-    upload: async function (meta, accessToken) {
+    upload: async function (meta, accessToken, uploadUrl) {
         // Base64 alphabet (A-Za-z0-9+/=) needs no JSON escaping, so the chunks
         // can be embedded into the JSON text directly as Blob parts.
         const metaNoBlob = Object.assign({}, meta);
@@ -446,7 +446,7 @@ window.vaultUploadInterop = {
         const body = new Blob(parts, { type: 'application/json' });
 
         try {
-            const response = await fetch('/api/v1/Vault', {
+            const response = await fetch(uploadUrl || '/api/v1/Vault', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -486,9 +486,11 @@ window.vaultUploadInterop = {
      * @param {Object} meta - vault metadata WITHOUT the Blob field (small, JSON-serialized by interop)
      * @param {string} base64Key - base64 AES key (same key the .NET path uses)
      * @param {string} accessToken - Bearer token for the API
+     * @param {string} uploadUrl - absolute API URL for the POST (e.g. "http://host:port/api/v1/Vault").
+     * Relative fallback kept only for stale callers.
      * @returns {Promise<{status: number, body: string}>} HTTP status and response body text (status 0 = network/JS error, -1 via exception = interop missing)
      */
-    encryptAndUpload: async function (meta, base64Key, accessToken) {
+    encryptAndUpload: async function (meta, base64Key, accessToken, uploadUrl) {
         this._chunks = [];
         const chunks = this._plainChunks;
         this._plainChunks = [];
@@ -515,7 +517,7 @@ window.vaultUploadInterop = {
             const parts = [metaJson.slice(0, -1) + ',"Blob":"', cipherBase64, '"}'];
             const body = new Blob(parts, { type: 'application/json' });
 
-            const response = await fetch('/api/v1/Vault', {
+            const response = await fetch(uploadUrl || '/api/v1/Vault', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',

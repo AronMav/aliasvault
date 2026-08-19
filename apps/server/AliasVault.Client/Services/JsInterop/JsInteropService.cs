@@ -95,8 +95,12 @@ public sealed class JsInteropService(IJSRuntime jsRuntime)
     /// <param name="vaultMeta">Vault metadata object; its Blob field is ignored and replaced by the chunks.</param>
     /// <param name="encryptionKeyBase64">Base64 symmetric key used to encrypt the plaintext inside JS.</param>
     /// <param name="accessToken">Bearer access token for the API.</param>
+    /// <param name="uploadUrl">Absolute URL of the vault upload endpoint. The native JS fetch
+    /// bypasses the managed HttpClient, so it needs the full API URL explicitly: a relative
+    /// path would resolve against the client origin, which differs from the API origin in
+    /// split-origin deployments (E2E fixtures, dev setups without a reverse proxy).</param>
     /// <returns>Tuple of HTTP status code (0 = JS/network error) and response body text.</returns>
-    public async Task<(int Status, string Body)> EncryptAndUploadVaultAsync(byte[] plainBytes, object vaultMeta, string encryptionKeyBase64, string accessToken)
+    public async Task<(int Status, string Body)> EncryptAndUploadVaultAsync(byte[] plainBytes, object vaultMeta, string encryptionKeyBase64, string accessToken, string uploadUrl)
     {
         const string chunkInteropError = "vaultUploadInterop is not available";
 
@@ -136,7 +140,7 @@ public sealed class JsInteropService(IJSRuntime jsRuntime)
                 await jsRuntime.InvokeVoidAsync("vaultUploadInterop.appendPlainChunk", chunk);
             }
 
-            var result = await jsRuntime.InvokeAsync<JsonElement>("vaultUploadInterop.encryptAndUpload", vaultMeta, encryptionKeyBase64, accessToken);
+            var result = await jsRuntime.InvokeAsync<JsonElement>("vaultUploadInterop.encryptAndUpload", vaultMeta, encryptionKeyBase64, accessToken, uploadUrl);
             return (result.GetProperty("status").GetInt32(), result.GetProperty("body").GetString() ?? string.Empty);
         }
         catch (JSException ex) when (ex.Message.Contains(chunkInteropError, StringComparison.Ordinal) || ex.Message.Contains("vaultUploadInterop", StringComparison.Ordinal))
