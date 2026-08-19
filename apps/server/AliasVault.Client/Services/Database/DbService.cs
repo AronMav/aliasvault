@@ -1052,7 +1052,15 @@ public sealed class DbService : IDisposable
             vaultObject.Blob = string.Empty;
             var accessToken = await _authService.GetAccessTokenAsync();
             var encryptionKey = _authService.GetEncryptionKeyAsBase64Async();
-            var (status, body) = await _jsInteropService.EncryptAndUploadVaultAsync(plainBase64Bytes, vaultObject, encryptionKey, accessToken);
+
+            // The native JS fetch bypasses the managed HttpClient, so hand it the absolute
+            // upload URL built from the configured API base. A relative path would resolve
+            // against the client origin, which is wrong whenever client and API are on
+            // different origins (E2E fixtures, dev setups without a reverse proxy).
+            var uploadUrl = _httpClient.BaseAddress is not null
+                ? new Uri(_httpClient.BaseAddress, "v1/Vault").ToString()
+                : "/api/v1/Vault";
+            var (status, body) = await _jsInteropService.EncryptAndUploadVaultAsync(plainBase64Bytes, vaultObject, encryptionKey, accessToken, uploadUrl);
 
             if (status == 401)
             {
@@ -1061,7 +1069,7 @@ public sealed class DbService : IDisposable
                 var newToken = await _authService.RefreshTokenAsync();
                 if (!string.IsNullOrEmpty(newToken))
                 {
-                    (status, body) = await _jsInteropService.EncryptAndUploadVaultAsync(plainBase64Bytes, vaultObject, encryptionKey, newToken);
+                    (status, body) = await _jsInteropService.EncryptAndUploadVaultAsync(plainBase64Bytes, vaultObject, encryptionKey, newToken, uploadUrl);
                 }
             }
 
