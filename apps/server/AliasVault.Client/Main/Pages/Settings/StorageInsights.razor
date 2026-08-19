@@ -422,6 +422,10 @@ else
             await DbService.VacuumDatabaseAsync();
             await DbService.SaveDatabaseAsync();
 
+            // Same list-cache invalidation as RedownloadAllLogos: the cached rows still
+            // carry the deleted logos' data URIs until invalidated.
+            ItemService.InvalidateListCache();
+
             GlobalNotificationService.AddSuccessMessage(SharedLocalizer["Success"], true);
             await LoadStatisticsAsync();
         }
@@ -550,6 +554,11 @@ else
 
             await ctx.SaveChangesAsync();
             await DbService.SaveDatabaseAsync();
+
+            // Cached ItemListEntry rows carry the LogoDataUri rendered by the main list;
+            // without this invalidation the list keeps showing placeholders after a bulk
+            // logo redownload even though the vault now has the icons.
+            ItemService.InvalidateListCache();
 
             if (result.Status == FaviconService.BulkExtractStatus.RateLimited)
             {
