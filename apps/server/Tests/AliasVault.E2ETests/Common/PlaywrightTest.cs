@@ -13,6 +13,8 @@
 
 namespace AliasVault.E2ETests.Common;
 
+using System.Net;
+using System.Net.Sockets;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Playwright;
 
@@ -100,6 +102,33 @@ public abstract class PlaywrightTest
                 }
 
                 await Task.Delay(500);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Allocates the next test port from the given per-fixture counter, skipping ports that
+    /// cannot be bound on this machine. On Windows with Hyper-V/WinNAT enabled the OS
+    /// dynamically reserves ephemeral port ranges (visible via `netsh interface ipv4 show
+    /// excludedportrange protocol=tcp`); binding inside one fails with WSAEACCES
+    /// ("An attempt was made to access a socket in a way forbidden by its access permissions"),
+    /// which kills the in-process Kestrel fixture and cascades into NREs in every test of the
+    /// class. Probing with a real bind before handing a port out makes the fixtures immune
+    /// to those reservations.
+    /// </summary>
+    /// <param name="currentPort">Per-fixture port counter to advance.</param>
+    /// <returns>The next bindable port.</returns>
+    protected static int AllocatePort(ref int currentPort)
+    {
+        lock (Lock)
+        {
+            while (true)
+            {
+                currentPort++;
+                if (IsPortBindable(currentPort))
+                {
+                    return currentPort;
+                }
             }
         }
     }
@@ -268,10 +297,29 @@ public abstract class PlaywrightTest
     }
 
     /// <summary>
-    /// Set up the Playwright test environment. This method is required to be implemented by the derived class.
+    /// Sets up the test environment.
     /// </summary>
     /// <returns>Async task.</returns>
     protected abstract Task SetupEnvironment();
+
+    /// <summary>
+    /// Probes whether a TCP port can be bound on loopback right now.
+    /// </summary>
+    /// <param name="port">Port number to probe.</param>
+    /// <returns>True when binding succeeded.</returns>
+    private static bool IsPortBindable(int port)
+    {
+        try
+        {
+            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            socket.Bind(new IPEndPoint(IPAddress.Loopback, port));
+            return true;
+        }
+        catch (SocketException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>
     /// Internal navigation implementation.

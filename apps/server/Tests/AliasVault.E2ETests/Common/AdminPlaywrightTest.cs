@@ -52,11 +52,9 @@ public abstract class AdminPlaywrightTest : PlaywrightTest
     {
         // Set the base port for the test starting at 5600. Increase the port by 2 for each test running
         // in parallel to avoid port conflicts.
-        int appPort;
-        lock (Lock)
-        {
-            appPort = Interlocked.Increment(ref _currentPort);
-        }
+        // Allocate a port from the per-fixture counter, skipping ports the OS has reserved
+        // (Hyper-V/WinNAT excluded ranges) - see PlaywrightTest.AllocatePort.
+        var appPort = AllocatePort(ref _currentPort);
 
         AppBaseUrl = "http://localhost:" + appPort + "/";
 
