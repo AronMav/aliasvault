@@ -1630,7 +1630,16 @@ async function handleFullVaultSyncInternal(): Promise<FullVaultSyncResult> {
         if (error instanceof VaultVersionIncompatibleError) {
           return { success: false, hasNewVault: false, wasOffline: false, upgradeRequired: false, requiresLogout: true, error: error.message };
         }
-        // E-501: Vault decryption failed
+        /*
+         * Log the underlying error before masking it with the generic E-203 message.
+         * The catch covers the whole sync block: decrypt failure, sqlite import of
+         * the server blob, metadata store, migration check. All of them surfaced as
+         * the same "Vault could not be decrypted" text with no trace of the real
+         * cause, which made incidents (e.g. corrupted local cache after a
+         * multi-client sync) undiagnosable from the service worker console.
+         */
+        console.error('[VaultSync] Full vault sync failed:', error);
+        // E-203: Vault decryption failed
         throw new Error(formatErrorWithCode(
           'Vault could not be decrypted, if the problem persists please logout and login again.',
           AppErrorCode.VAULT_DECRYPT_FAILED
