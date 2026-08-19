@@ -396,6 +396,23 @@ window.rsaInterop = {
 window.vaultUploadInterop = {
     _chunks: [],
 
+    /**
+     * Client identifier sent as X-AliasVault-Client on the native fetch POSTs.
+     * Set by setClientName() (called from .NET with the same "web-{version}"
+     * value the managed HttpClient default headers carry) so vault revisions
+     * uploaded through the JS path are attributed to this client in the
+     * server DB instead of being stored with a NULL client. Falls back to
+     * 'web-unknown' when never set (e.g. stale cached JS bundle).
+     */
+    clientName: 'web-unknown',
+
+    /** Set the client name used in the X-AliasVault-Client header. */
+    setClientName: function (name) {
+        if (typeof name === 'string' && name.length > 0) {
+            this.clientName = name;
+        }
+    },
+
     /** Reset the pending chunk buffer. */
     beginUpload: function () {
         this._chunks = [];
@@ -434,6 +451,7 @@ window.vaultUploadInterop = {
                 headers: {
                     'Content-Type': 'application/json',
                     'Authorization': 'Bearer ' + accessToken,
+                    'X-AliasVault-Client': window.vaultUploadInterop.clientName,
                 },
                 body: body,
             });
@@ -502,6 +520,7 @@ window.vaultUploadInterop = {
                 headers: {
                     'Content-Type': 'application/json',
                     'Authorization': 'Bearer ' + accessToken,
+                    'X-AliasVault-Client': window.vaultUploadInterop.clientName,
                 },
                 body: body,
             });

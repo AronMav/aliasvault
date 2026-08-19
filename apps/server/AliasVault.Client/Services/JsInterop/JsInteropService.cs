@@ -102,6 +102,12 @@ public sealed class JsInteropService(IJSRuntime jsRuntime)
 
         try
         {
+            // Ensure the native JS fetch POSTs carry the same X-AliasVault-Client
+            // header as the managed HttpClient default headers - otherwise vault
+            // revisions uploaded through the JS interop path are stored with a
+            // NULL client, breaking per-client attribution/forensics on the server.
+            await jsRuntime.InvokeVoidAsync("vaultUploadInterop.setClientName", "web-" + AppInfo.GetFullVersion());
+
             await jsRuntime.InvokeVoidAsync("vaultUploadInterop.beginEncryptUpload");
 
             // Push the plaintext in 3MB multiples-of-3 chunks: byte[] marshals to
