@@ -232,12 +232,24 @@ public class DbSyncTests : ClientPlaywrightTest
     {
         ApiTimeProvider.AdvanceBy(TimeSpan.FromSeconds(1));
 
-        // Remove all vaults and add the baseline vault back.
-        ApiDbContext.Vaults.RemoveRange(ApiDbContext.Vaults);
-        await ApiDbContext.SaveChangesAsync();
-        baselineVault.Id = Guid.NewGuid();
-        ApiDbContext.Vaults.Add(baselineVault);
-        await ApiDbContext.SaveChangesAsync();
+        // Remove all vaults and add the baseline vault back ATOMICALLY in one retriable unit:
+        // with two separate SaveChanges calls the empty vault table is a committed state for a
+        // brief window, and a late vault save from the still-logged-in previous client that
+        // lands in that window makes VaultController.Update throw ("Sequence contains no
+        // elements", HTTP 500) and silently loses that revision - flaking the merge assertions.
+        // Note the execution strategy wrapper: NpgsqlRetryingExecutionStrategy rejects
+        // user-initiated transactions unless everything runs inside CreateExecutionStrategy().
+        var strategy = ApiDbContext.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
+        {
+            await using var transaction = await ApiDbContext.Database.BeginTransactionAsync();
+            ApiDbContext.Vaults.RemoveRange(ApiDbContext.Vaults);
+            await ApiDbContext.SaveChangesAsync();
+            baselineVault.Id = Guid.NewGuid();
+            ApiDbContext.Vaults.Add(baselineVault);
+            await ApiDbContext.SaveChangesAsync();
+            await transaction.CommitAsync();
+        });
 
         // Simulate new client.
         await Logout();
@@ -246,6 +258,25 @@ public class DbSyncTests : ClientPlaywrightTest
 
         // Execute custom client actions.
         await clientActions();
+
+        // Wait for the background save to land on the server. The client posts
+        // SaveDatabaseInBackground (fire-and-forget) after every mutation; without
+        // this wait the vault returned below can be pre-save (stale), making the
+        // next SimulateClient inject a vault that lacks the mutations performed
+        // in clientActions — the root cause of the flaky
+        // "Deleted item found in vault after merge" assertion.
+        var baselineRevision = baselineVault.RevisionNumber;
+        for (int i = 0; i < 30; i++)
+        {
+            await Task.Delay(1000);
+            var latestRevision = await ApiDbContext.Vaults
+                .MaxAsync(v => (long?)v.RevisionNumber) ?? 0;
+            if (latestRevision > baselineRevision)
+            {
+                break;
+            }
+        }
+
         return await ApiDbContext.Vaults.OrderByDescending(x => x.RevisionNumber).FirstAsync();
     }
 }
