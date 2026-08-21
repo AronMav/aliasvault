@@ -135,6 +135,20 @@ android {
             useLegacyPackaging (findProperty('expo.useLegacyPackaging')?.toBoolean() ?: false)
         }
     }
+    // Fork-only: build a single-ABI APK (e.g. arm64-v8a) to cut APK size.
+    // Opt-in via -Paliasvault.abiFilter=arm64-v8a or gradle.properties, so
+    // default builds keep all ABIs (x86 emulators, older devices).
+    def abiFilter = findProperty('aliasvault.abiFilter')
+    if (abiFilter) {
+        splits {
+            abi {
+                enable true
+                reset()
+                include abiFilter
+                universalApk false
+            }
+        }
+    }
     androidResources {
         ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:!CVS:!thumbs.db:!picasa.ini:!*~'
     }

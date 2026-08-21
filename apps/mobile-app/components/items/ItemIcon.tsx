@@ -1,5 +1,6 @@
 import { Buffer } from 'buffer';
 
+import { useState } from 'react';
 import { Image, ImageStyle, StyleSheet, View } from 'react-native';
 import { SvgXml } from 'react-native-svg';
 
@@ -8,6 +9,13 @@ import {
   ItemTypes,
   FieldKey,
 } from '@/utils/dist/core/models/vault';
+
+import {
+  detectMimeType,
+  detectMimeTypeFromBase64,
+  sanitizeSvg,
+  toUint8Array,
+} from '@/utils/logoFormat';
 
 import servicePlaceholder from '@/assets/images/service-placeholder.webp';
 
@@ -112,6 +120,36 @@ export function ItemIcon({ logo, item, style }: ItemIconProps) : React.ReactNode
     <View style={[styles.iconContainer, style]}>
       <PlaceholderIcon width={width} height={height} />
     </View>
+  );
+}
+
+/**
+ * Image wrapper that actually swaps to the placeholder when the logo fails
+ * to decode. The Image onError callback alone cannot swap the source, so we
+ * track the failure in state and render the placeholder instead.
+ */
+function SafeLogoImage({ source, style }: { source: string | number; style?: ImageStyle }) {
+  const [failed, setFailed] = useState(false);
+
+  if (failed) {
+    return (
+      <Image
+        source={servicePlaceholder}
+        style={[styles.logo, style]}
+      />
+    );
+  }
+
+  return (
+    <Image
+      source={typeof source === 'string' ? { uri: source } : source}
+      style={[styles.logo, style]}
+      defaultSource={servicePlaceholder}
+      onError={(e) => {
+        console.warn('ItemIcon: Image failed to render logo, using placeholder', e.nativeEvent?.error);
+        setFailed(true);
+      }}
+    />
   );
 }
 
@@ -221,255 +259,11 @@ function renderLogo(
   }
 
   return (
-    <Image
-      source={typeof logoSource.source === 'string' ? { uri: logoSource.source } : logoSource.source}
-      style={[styles.logo, style]}
-      defaultSource={servicePlaceholder}
-      onError={(e) => {
-        console.warn('ItemIcon: Image failed to render logo, using placeholder', e.nativeEvent?.error);
-      }}
+    <SafeLogoImage
+      source={logoSource.source}
+      style={style}
     />
   );
-}
-
-/**
- * Sanitize SVG XML for react-native-svg compatibility.
- *
- * Addresses several crash vectors:
- * 1. Zero/missing dimensions on the root <svg> tag cause iOS native renderer to crash
- *    with: UIGraphicsBeginImageContext() failed to allocate CGBitmapContext: size={0, 0}.
- * 2. Nested <svg> elements create nested Svg components with no layout dimensions,
- *    triggering the same zero-size crash.
- * 3. Namespaced elements (sodipodi:*, inkscape:*, metadata, rdf:*, cc:*, dc:*) are not
- *    supported by react-native-svg and can cause parse/render failures.
- *
- * Returns null if the SVG is fundamentally broken and should not be rendered.
- */
-function sanitizeSvg(xml: string, targetWidth: number, targetHeight: number): string | null {
-  try {
-    if (!xml || xml.trim().length === 0) {
-      return null;
-    }
-
-    let sanitized = xml;
-
-    // Remove unsupported namespaced elements and metadata that react-native-svg cannot handle.
-    // These include Inkscape/Sodipodi editor elements, RDF metadata, Creative Commons, etc.
-    // Use [\s\S] instead of . to match across newlines.
-    sanitized = sanitized.replace(/<sodipodi:[^>]*\/>/gi, '');
-    sanitized = sanitized.replace(/<sodipodi:[^>]*>[\s\S]*?<\/sodipodi:[^>]*>/gi, '');
-    sanitized = sanitized.replace(/<inkscape:[^>]*\/>/gi, '');
-    sanitized = sanitized.replace(/<inkscape:[^>]*>[\s\S]*?<\/inkscape:[^>]*>/gi, '');
-    sanitized = sanitized.replace(/<metadata[\s>][\s\S]*?<\/metadata>/gi, '');
-
-    // Remove <image> elements with external href (http/https/data/protocol-relative URLs).
-    // react-native-svg cannot fetch remote resources and crashes (native SIGSEGV)
-    // when it encounters <image href="https://..."> inside an SVG.
-    // Also catches data: URIs which can be huge and crash the SVG parser.
-    // Matches both href and xlink:href, single and double quotes, self-closing and paired tags.
-    const externalImagePattern = /\b(?:xlink:)?href\s*=\s*["'](?:https?:|\/\/|data:)[^"']*["']/i;
-    sanitized = sanitized.replace(/<image\b[^>]*\/>/gi, (tag) => {
-      return externalImagePattern.test(tag) ? '' : tag;
-    });
-    sanitized = sanitized.replace(/<image\b[^>]*>[\s\S]*?<\/image>/gi, (tag) => {
-      return externalImagePattern.test(tag) ? '' : tag;
-    });
-
-    // Replace nested <svg> elements (not the root) with <g> elements.
-    // Nested <svg> tags create nested Svg root components in react-native-svg
-    // that inherit no layout dimensions, causing the zero-size native crash.
-    // We preserve the first (root) <svg> and convert inner ones to <g>.
-    let isFirst = true;
-    sanitized = sanitized.replace(/<svg\b([^>]*)>/gi, (match, attrs) => {
-      if (isFirst) {
-        isFirst = false;
-        return match;
-      }
-      // Convert inner <svg> to <g>, preserving transform attribute if present
-      const transformMatch = (attrs as string).match(/\btransform\s*=\s*["'][^"']*["']/i);
-      const transform = transformMatch ? ` ${transformMatch[0]}` : '';
-      return `<g${transform}>`;
-    });
-    // Replace matching closing </svg> tags (all except the last one, which closes the root)
-    // Count remaining </svg> tags and replace all but the last with </g>
-    const closingTags: number[] = [];
-    const closingRegex = /<\/svg>/gi;
-    let closeMatch;
-    while ((closeMatch = closingRegex.exec(sanitized)) !== null) {
-      closingTags.push(closeMatch.index);
-    }
-    // Replace all closing </svg> except the last one (root) with </g>
-    if (closingTags.length > 1) {
-      for (let i = closingTags.length - 2; i >= 0; i--) {
-        const idx = closingTags[i];
-        sanitized = sanitized.substring(0, idx) + '</g>' + sanitized.substring(idx + 6);
-      }
-    }
-
-    // Ensure root <svg> has valid, non-zero dimensions
-    const svgTagMatch = sanitized.match(/<svg\b([^>]*)>/i);
-    if (!svgTagMatch) {
-      return null;
-    }
-
-    const attrs = svgTagMatch[1];
-    const widthMatch = attrs.match(/\bwidth\s*=\s*["']([^"']*)["']/i);
-    const heightMatch = attrs.match(/\bheight\s*=\s*["']([^"']*)["']/i);
-
-    const hasZeroWidth = widthMatch && (parseFloat(widthMatch[1]) === 0 || widthMatch[1].trim() === '');
-    const hasZeroHeight = heightMatch && (parseFloat(heightMatch[1]) === 0 || heightMatch[1].trim() === '');
-    const hasMissingWidth = !widthMatch;
-    const hasMissingHeight = !heightMatch;
-
-    if (hasZeroWidth || hasMissingWidth || hasZeroHeight || hasMissingHeight) {
-      let newAttrs = attrs;
-
-      if (hasZeroWidth && widthMatch) {
-        newAttrs = newAttrs.replace(widthMatch[0], `width="${targetWidth}"`);
-      } else if (hasMissingWidth) {
-        newAttrs = ` width="${targetWidth}"` + newAttrs;
-      }
-
-      if (hasZeroHeight && heightMatch) {
-        newAttrs = newAttrs.replace(heightMatch[0], `height="${targetHeight}"`);
-      } else if (hasMissingHeight) {
-        newAttrs = ` height="${targetHeight}"` + newAttrs;
-      }
-
-      sanitized = sanitized.replace(svgTagMatch[0], `<svg${newAttrs}>`);
-    }
-
-    return sanitized;
-  } catch (error) {
-    console.warn('Failed to sanitize SVG:', error);
-    return null;
-  }
-}
-
-/**
- * Detect MIME type from base64 string by decoding first few bytes
- */
-function detectMimeTypeFromBase64(base64: string): string {
-  try {
-    const binaryString = atob(base64.slice(0, 16));
-    const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
-    }
-    return detectMimeType(bytes);
-  } catch (error) {
-    console.warn('Error detecting mime type from base64:', error);
-    return 'application/octet-stream';
-  }
-}
-
-/**
- * Detect MIME type from file signature (magic numbers)
- */
-function detectMimeType(bytes: Uint8Array): string {
-  /**
-   * Check if the file is an SVG.
-   */
-  const isSvg = (): boolean => {
-    const header = new TextDecoder().decode(bytes.slice(0, 5)).toLowerCase();
-    return header.includes('<?xml') || header.includes('<svg');
-  };
-
-  /**
-   * Check if the file is an ICO.
-   */
-  const isIco = (): boolean => {
-    return bytes[0] === 0x00 && bytes[1] === 0x00 && bytes[2] === 0x01 && bytes[3] === 0x00;
-  };
-
-  /**
-   * Check if the file is a PNG.
-   */
-  const isPng = (): boolean => {
-    return bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47;
-  };
-
-  /**
-   * Check if the file is a JPEG.
-   */
-  const isJpeg = (): boolean => {
-    return bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF;
-  };
-
-  /**
-   * Check if the file is a GIF.
-   */
-  const isGif = (): boolean => {
-    return bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38;
-  };
-
-  /**
-   * Check if the file is a WebP (RIFF....WEBP).
-   */
-  const isWebp = (): boolean => {
-    return bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
-           bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50;
-  };
-
-  /**
-   * Check if the file is a BMP.
-   */
-  const isBmp = (): boolean => {
-    return bytes[0] === 0x42 && bytes[1] === 0x4D;
-  };
-
-  if (isSvg()) {
-    return 'image/svg+xml';
-  }
-  if (isPng()) {
-    return 'image/png';
-  }
-  if (isJpeg()) {
-    return 'image/jpeg';
-  }
-  if (isGif()) {
-    return 'image/gif';
-  }
-  if (isWebp()) {
-    return 'image/webp';
-  }
-  if (isBmp()) {
-    return 'image/bmp';
-  }
-  // ICO: return application/octet-stream to use placeholder.
-  // Fresco on Android crashes on multi-resolution ICO files (NoClassDefFoundError
-  // on org.jetbrains.skia.ImageCodec for certain ICO variants). Single-resolution
-  // ICO works, but we can't distinguish at detection time, so safest to placeholder.
-  if (isIco()) {
-    return 'application/octet-stream';
-  }
-
-  // Unknown format: return application/octet-stream to signal caller to use placeholder.
-  // Previously this returned 'image/x-icon' for everything unrecognized,
-  // which caused Fresco to attempt HEIC/AVIF/unknown decoding and crash
-  // with NoClassDefFoundError or OutOfMemoryError on certain devices.
-  return 'application/octet-stream';
-}
-
-/**
- * Convert various binary data formats to Uint8Array
- */
-function toUint8Array(buffer: Uint8Array | number[] | {[key: number]: number}): Uint8Array {
-  if (buffer instanceof Uint8Array) {
-    return buffer;
-  }
-
-  if (Array.isArray(buffer)) {
-    return new Uint8Array(buffer);
-  }
-
-  const length = Object.keys(buffer).length;
-  const arr = new Uint8Array(length);
-  for (let i = 0; i < length; i++) {
-    arr[i] = buffer[i];
-  }
-
-  return arr;
 }
 
 const styles = StyleSheet.create({

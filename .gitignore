@@ -477,3 +477,4 @@ e2e-results/
 
 # Hermes agent session artifacts
 .hermes/
+key.properties
