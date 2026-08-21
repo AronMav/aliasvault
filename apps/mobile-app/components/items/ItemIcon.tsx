@@ -140,6 +140,10 @@ function renderLogo(
           // Decode base64 to raw SVG XML for SvgXml component
           return { type: 'svg', source: Buffer.from(data, 'base64').toString('utf-8') };
         }
+        // Unknown/unrecognized format -> use placeholder
+        if (mimeType === 'application/octet-stream') {
+          return { type: 'image', source: servicePlaceholder };
+        }
         return { type: 'image', source: `data:${mimeType};base64,${data}` };
       }
 
@@ -149,6 +153,11 @@ function renderLogo(
       if (mimeType === 'image/svg+xml') {
         // Decode bytes to raw SVG XML for SvgXml component
         return { type: 'svg', source: new TextDecoder().decode(logoBytes) };
+      }
+      // Unknown/unrecognized format -> use placeholder instead of attempting
+      // to decode it (which can crash Fresco on Android with HEIC/AVIF/etc.)
+      if (mimeType === 'application/octet-stream') {
+        return { type: 'image', source: servicePlaceholder };
       }
       const base64Logo = Buffer.from(logoBytes).toString('base64');
       return { type: 'image', source: `data:${mimeType};base64,${base64Logo}` };
@@ -216,6 +225,9 @@ function renderLogo(
       source={typeof logoSource.source === 'string' ? { uri: logoSource.source } : logoSource.source}
       style={[styles.logo, style]}
       defaultSource={servicePlaceholder}
+      onError={(e) => {
+        console.warn('ItemIcon: Image failed to render logo, using placeholder', e.nativeEvent?.error);
+      }}
     />
   );
 }
@@ -249,6 +261,14 @@ function sanitizeSvg(xml: string, targetWidth: number, targetHeight: number): st
     sanitized = sanitized.replace(/<inkscape:[^>]*\/>/gi, '');
     sanitized = sanitized.replace(/<inkscape:[^>]*>[\s\S]*?<\/inkscape:[^>]*>/gi, '');
     sanitized = sanitized.replace(/<metadata[\s>][\s\S]*?<\/metadata>/gi, '');
+
+    // Remove <image> elements with external href (http/https/data URLs).
+    // react-native-svg cannot fetch remote resources and crashes (native SIGSEGV)
+    // when it encounters <image href="https://..."> inside an SVG.
+    sanitized = sanitized.replace(/<image\b[^>]*\bhref\s*=\s*["']https?:\/\/[^"']*["'][^>]*\/>/gi, '');
+    sanitized = sanitized.replace(/<image\b[^>]*\bhref\s*=\s*["']https?:\/\/[^"']*["'][^>]*>[\s\S]*?<\/image>/gi, '');
+    sanitized = sanitized.replace(/<image\b[^>]*\bxlink:href\s*=\s*["']https?:\/\/[^"']*["'][^>]*\/>/gi, '');
+    sanitized = sanitized.replace(/<image\b[^>]*\bxlink:href\s*=\s*["']https?:\/\/[^"']*["'][^>]*>[\s\S]*?<\/image>/gi, '');
 
     // Replace nested <svg> elements (not the root) with <g> elements.
     // Nested <svg> tags create nested Svg root components in react-native-svg
@@ -326,7 +346,7 @@ function sanitizeSvg(xml: string, targetWidth: number, targetHeight: number): st
  */
 function detectMimeTypeFromBase64(base64: string): string {
   try {
-    const binaryString = atob(base64.slice(0, 8));
+    const binaryString = atob(base64.slice(0, 16));
     const bytes = new Uint8Array(binaryString.length);
     for (let i = 0; i < binaryString.length; i++) {
       bytes[i] = binaryString.charCodeAt(i);
@@ -334,7 +354,7 @@ function detectMimeTypeFromBase64(base64: string): string {
     return detectMimeType(bytes);
   } catch (error) {
     console.warn('Error detecting mime type from base64:', error);
-    return 'image/x-icon';
+    return 'application/octet-stream';
   }
 }
 
@@ -364,17 +384,62 @@ function detectMimeType(bytes: Uint8Array): string {
     return bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47;
   };
 
+  /**
+   * Check if the file is a JPEG.
+   */
+  const isJpeg = (): boolean => {
+    return bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF;
+  };
+
+  /**
+   * Check if the file is a GIF.
+   */
+  const isGif = (): boolean => {
+    return bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38;
+  };
+
+  /**
+   * Check if the file is a WebP (RIFF....WEBP).
+   */
+  const isWebp = (): boolean => {
+    return bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+           bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50;
+  };
+
+  /**
+   * Check if the file is a BMP.
+   */
+  const isBmp = (): boolean => {
+    return bytes[0] === 0x42 && bytes[1] === 0x4D;
+  };
+
   if (isSvg()) {
     return 'image/svg+xml';
-  }
-  if (isIco()) {
-    return 'image/x-icon';
   }
   if (isPng()) {
     return 'image/png';
   }
+  if (isJpeg()) {
+    return 'image/jpeg';
+  }
+  if (isGif()) {
+    return 'image/gif';
+  }
+  if (isWebp()) {
+    return 'image/webp';
+  }
+  if (isBmp()) {
+    return 'image/bmp';
+  }
+  if (isIco()) {
+    return 'image/x-icon';
+  }
 
-  return 'image/x-icon';
+  // Unknown format: return null to signal caller to use placeholder.
+  // Previously this returned 'image/x-icon' for everything unrecognized,
+  // which caused Fresco to attempt HEIC/AVIF/unknown decoding and crash
+  // with NoClassDefFoundError or OutOfMemoryError on certain devices.
+  return 'application/octet-stream';
 }
 
 /**
