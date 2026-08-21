@@ -262,13 +262,18 @@ function sanitizeSvg(xml: string, targetWidth: number, targetHeight: number): st
     sanitized = sanitized.replace(/<inkscape:[^>]*>[\s\S]*?<\/inkscape:[^>]*>/gi, '');
     sanitized = sanitized.replace(/<metadata[\s>][\s\S]*?<\/metadata>/gi, '');
 
-    // Remove <image> elements with external href (http/https/data URLs).
+    // Remove <image> elements with external href (http/https/data/protocol-relative URLs).
     // react-native-svg cannot fetch remote resources and crashes (native SIGSEGV)
     // when it encounters <image href="https://..."> inside an SVG.
-    sanitized = sanitized.replace(/<image\b[^>]*\bhref\s*=\s*["']https?:\/\/[^"']*["'][^>]*\/>/gi, '');
-    sanitized = sanitized.replace(/<image\b[^>]*\bhref\s*=\s*["']https?:\/\/[^"']*["'][^>]*>[\s\S]*?<\/image>/gi, '');
-    sanitized = sanitized.replace(/<image\b[^>]*\bxlink:href\s*=\s*["']https?:\/\/[^"']*["'][^>]*\/>/gi, '');
-    sanitized = sanitized.replace(/<image\b[^>]*\bxlink:href\s*=\s*["']https?:\/\/[^"']*["'][^>]*>[\s\S]*?<\/image>/gi, '');
+    // Also catches data: URIs which can be huge and crash the SVG parser.
+    // Matches both href and xlink:href, single and double quotes, self-closing and paired tags.
+    const externalImagePattern = /\b(?:xlink:)?href\s*=\s*["'](?:https?:|\/\/|data:)[^"']*["']/i;
+    sanitized = sanitized.replace(/<image\b[^>]*\/>/gi, (tag) => {
+      return externalImagePattern.test(tag) ? '' : tag;
+    });
+    sanitized = sanitized.replace(/<image\b[^>]*>[\s\S]*?<\/image>/gi, (tag) => {
+      return externalImagePattern.test(tag) ? '' : tag;
+    });
 
     // Replace nested <svg> elements (not the root) with <g> elements.
     // Nested <svg> tags create nested Svg root components in react-native-svg
@@ -431,11 +436,15 @@ function detectMimeType(bytes: Uint8Array): string {
   if (isBmp()) {
     return 'image/bmp';
   }
+  // ICO: return application/octet-stream to use placeholder.
+  // Fresco on Android crashes on multi-resolution ICO files (NoClassDefFoundError
+  // on org.jetbrains.skia.ImageCodec for certain ICO variants). Single-resolution
+  // ICO works, but we can't distinguish at detection time, so safest to placeholder.
   if (isIco()) {
-    return 'image/x-icon';
+    return 'application/octet-stream';
   }
 
-  // Unknown format: return null to signal caller to use placeholder.
+  // Unknown format: return application/octet-stream to signal caller to use placeholder.
   // Previously this returned 'image/x-icon' for everything unrecognized,
   // which caused Fresco to attempt HEIC/AVIF/unknown decoding and crash
   // with NoClassDefFoundError or OutOfMemoryError on certain devices.
