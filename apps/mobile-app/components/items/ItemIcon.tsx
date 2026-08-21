@@ -262,6 +262,14 @@ function sanitizeSvg(xml: string, targetWidth: number, targetHeight: number): st
     sanitized = sanitized.replace(/<inkscape:[^>]*>[\s\S]*?<\/inkscape:[^>]*>/gi, '');
     sanitized = sanitized.replace(/<metadata[\s>][\s\S]*?<\/metadata>/gi, '');
 
+    // Remove <image> elements with external href (http/https/data URLs).
+    // react-native-svg cannot fetch remote resources and crashes (native SIGSEGV)
+    // when it encounters <image href="https://..."> inside an SVG.
+    sanitized = sanitized.replace(/<image\b[^>]*\bhref\s*=\s*["']https?:\/\/[^"']*["'][^>]*\/>/gi, '');
+    sanitized = sanitized.replace(/<image\b[^>]*\bhref\s*=\s*["']https?:\/\/[^"']*["'][^>]*>[\s\S]*?<\/image>/gi, '');
+    sanitized = sanitized.replace(/<image\b[^>]*\bxlink:href\s*=\s*["']https?:\/\/[^"']*["'][^>]*\/>/gi, '');
+    sanitized = sanitized.replace(/<image\b[^>]*\bxlink:href\s*=\s*["']https?:\/\/[^"']*["'][^>]*>[\s\S]*?<\/image>/gi, '');
+
     // Replace nested <svg> elements (not the root) with <g> elements.
     // Nested <svg> tags create nested Svg root components in react-native-svg
     // that inherit no layout dimensions, causing the zero-size native crash.
