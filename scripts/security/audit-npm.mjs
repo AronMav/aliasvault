@@ -13,6 +13,19 @@ const mitigated = new Set([
   'https://github.com/advisories/GHSA-w3rx-r6r6-pgpr',
   'https://github.com/advisories/GHSA-5p2g-fcmc-qvqq',
 ]);
+/*
+ * image-size 2.0.3/2.0.4 (2026-09-14) contain the upstream fix for both advisories,
+ * so any project that CAN resolve >=2.0.3 must do so and no longer needs this gate
+ * (docs does exactly that). The one remaining consumer is the mobile app: metro
+ * 0.84.x (pinned by react-native 0.85 / @expo/metro 56) still passes file PATH
+ * STRINGS to image-size, an API removed in 2.x - overriding to 2.0.4 breaks Metro's
+ * asset dimension reading with a TypeError. metro >=0.87 dropped image-size
+ * entirely, but react-native 0.85 cannot use it. So the mobile app stays on 1.2.1
+ * with the verified local parser hardening. Revisit when react-native moves to
+ * metro >=0.87 (then delete the override-free path, this gate, harden-image-size,
+ * and the security-checks harden/test steps).
+ */
+const METIGATION_REVIEW_BY = '2027-03-01T00:00:00Z';
 let checkedMitigation = false;
 const failures = new Set();
 function check(name, parents = new Set()) {
@@ -23,7 +36,7 @@ function check(name, parents = new Set()) {
     if (typeof via === 'string') {
       check(via, new Set([...parents, name]));
     } else if (via.name === 'image-size' && mitigated.has(via.url)) {
-      if (Date.now() >= Date.parse('2026-10-07T00:00:00Z')) throw new Error('image-size mitigation review is overdue');
+      if (Date.now() >= Date.parse(METIGATION_REVIEW_BY)) throw new Error('image-size mitigation review is overdue - see the comment above for the removal criteria');
       if (!checkedMitigation) hardenImageSize(project, true);
       checkedMitigation = true;
     } else {
@@ -34,5 +47,5 @@ function check(name, parents = new Set()) {
 for (const name of Object.keys(audit.vulnerabilities)) check(name);
 if (failures.size) throw new Error(`Unmitigated advisories:\n${[...failures].join('\n')}`);
 console.log(checkedMitigation
-  ? 'No unmitigated advisories. Two image-size advisories have a verified local patch; review by 2026-10-06.'
+  ? 'No unmitigated advisories. The image-size advisories have a verified local patch; removal criteria in scripts/security/audit-npm.mjs.'
   : 'No known vulnerable npm dependencies.');

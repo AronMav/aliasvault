@@ -38,7 +38,8 @@ jobs:
         working-directory: ${{ matrix.project }}
       # Apply the image-size hardening BEFORE the audit: audit-npm.mjs verifies it
       # (checkOnly) when it walks the mitigated advisories, so the patch must exist first.
-      - if: matrix.project == 'apps/mobile-app' || matrix.project == 'docs'
+      # mobile-app only: docs resolves image-size 2.0.4 (upstream fix) and needs no patch.
+      - if: matrix.project == 'apps/mobile-app'
         run: node scripts/security/harden-image-size.mjs '${{ matrix.project }}'
       - run: node scripts/security/audit-npm.mjs '${{ matrix.project }}'
       - if: matrix.project == 'apps/mobile-app' || matrix.project == 'docs'
