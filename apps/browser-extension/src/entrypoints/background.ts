@@ -250,7 +250,10 @@ export default defineBackground({
       }
     });
 
-    // Listen for messages via @webext-core/messaging
+    /*
+     * Listen for messages via @webext-core/messaging.
+     */
+    onMessage('PING', () => true);
     onMessage('CHECK_AUTH_STATUS', (data) => handleCheckAuthStatus(data ?? {}));
 
     onMessage('GET_ENCRYPTION_KEY', () => handleGetEncryptionKey());

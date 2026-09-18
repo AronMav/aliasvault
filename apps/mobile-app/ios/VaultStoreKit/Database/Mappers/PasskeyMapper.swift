@@ -42,13 +42,13 @@ public struct PasskeyRow {
 
         // Handle optional blob fields
         if let userHandleBase64 = row["UserHandle"] as? String {
-            self.userHandle = Data(base64Encoded: userHandleBase64)
+            self.userHandle = Data(base64Encoded: userHandleBase64, options: .ignoreUnknownCharacters)
         } else {
             self.userHandle = nil
         }
 
         if let prfKeyBase64 = row["PrfKey"] as? String {
-            self.prfKey = Data(base64Encoded: prfKeyBase64)
+            self.prfKey = Data(base64Encoded: prfKeyBase64, options: .ignoreUnknownCharacters)
         } else {
             self.prfKey = nil
         }
@@ -60,6 +60,7 @@ public struct PasskeyWithItemInfoRow {
     public let passkeyRow: PasskeyRow
     public let serviceName: String?
     public let username: String?
+    public let email: String?
 
     /// Initialize from a database row dictionary.
     public init?(from row: [String: Any]) {
@@ -70,6 +71,7 @@ public struct PasskeyWithItemInfoRow {
         self.passkeyRow = passkeyRow
         self.serviceName = row["ServiceName"] as? String
         self.username = row["Username"] as? String
+        self.email = row["Email"] as? String
     }
 }
 
@@ -78,11 +80,13 @@ public struct PasskeyWithItemInfo {
     public let passkey: Passkey
     public let serviceName: String?
     public let username: String?
+    public let email: String?
 
-    public init(passkey: Passkey, serviceName: String?, username: String?) {
+    public init(passkey: Passkey, serviceName: String?, username: String?, email: String? = nil) {
         self.passkey = passkey
         self.serviceName = serviceName
         self.username = username
+        self.email = email
     }
 }
 
@@ -147,7 +151,8 @@ public struct PasskeyMapper {
         return PasskeyWithItemInfo(
             passkey: passkey,
             serviceName: row.serviceName,
-            username: row.username
+            username: row.username,
+            email: row.email
         )
     }
 
