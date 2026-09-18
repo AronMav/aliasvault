@@ -7,6 +7,9 @@
 
 namespace AliasVault.E2ETests.Tests.Client.Shard3.Abstracts;
 
+using AliasServerDb;
+using Microsoft.EntityFrameworkCore;
+
 /// <summary>
 /// Abstract base class for two factor auth test which contains common methods.
 /// </summary>
@@ -38,6 +41,18 @@ public class TwoFactorAuthBase : ClientPlaywrightTest
                 State = WaitForSelectorState.Visible,
                 Timeout = 5000,
             });
+
+            // Disabling 2FA requires a valid authenticator code (see the
+            // session-hardening wave: the confirm button stays disabled until a
+            // 6-digit code is entered). The secret is only displayed during
+            // enable, so read it from the server database and derive the code.
+            var secret = await GetActiveAuthenticatorSecretAsync();
+            Assert.That(secret, Is.Not.Null.And.Not.Empty, "Two-factor auth is enabled but no authenticator secret was found in the database.");
+            var totpCode = TotpGenerator.TotpGenerator.GenerateTotpCode(secret);
+            Assert.That(totpCode, Is.Not.Null.And.Not.Empty, "No 2FA code generated.");
+
+            var verificationCodeField = Page.Locator("input[id='verificationCode']");
+            await verificationCodeField.FillAsync(totpCode);
 
             // Press the confirm disable button as well.
             await confirmButton.ClickAsync();
@@ -110,5 +125,27 @@ public class TwoFactorAuthBase : ClientPlaywrightTest
         Assert.That(recoveryCode, Is.Not.Null.And.Not.Empty, "Recovery codes displayed but first value could not be extracted.");
 
         return (totpCode, recoveryCode!);
+    }
+
+    /// <summary>
+    /// Reads the active authenticator secret for the test user from the server
+    /// database. Disabling 2FA requires a valid authenticator code, and the secret
+    /// is only shown in the UI during the enable flow, so tests that clean up an
+    /// enabled state need to derive the code from the stored token.
+    /// </summary>
+    /// <returns>The Base32 authenticator secret, or null when none is stored.</returns>
+    protected async Task<string?> GetActiveAuthenticatorSecretAsync()
+    {
+        var user = await ApiDbContext.AliasVaultUsers.AsNoTracking().Where(u => u.UserName == TestUserUsername).FirstOrDefaultAsync();
+        if (user is null)
+        {
+            return null;
+        }
+
+        var token = await ApiDbContext.UserTokens.AsNoTracking().Where(t =>
+            t.UserId == user.Id
+            && t.LoginProvider == "[AspNetUserStore]"
+            && t.Name == "AuthenticatorKey").FirstOrDefaultAsync();
+        return token?.Value;
     }
 }

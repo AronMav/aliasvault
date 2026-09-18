@@ -101,10 +101,23 @@ public class ApiTests : ClientPlaywrightTest
 
         // Create a test refresh token with the fixed date.
         var user = await ApiDbContext.AliasVaultUsers.FirstAsync();
+
+        // Durable sessions: every refresh token is bound to a UserSessions row
+        // (FK_AliasVaultUserRefreshTokens_UserSessions_SessionId), so create the
+        // session the token belongs to before inserting the token itself.
+        var session = new UserSession
+        {
+            Id = Guid.NewGuid(),
+            UserId = user.Id,
+            CreatedAt = testDate,
+        };
+        await ApiDbContext.UserSessions.AddAsync(session);
+
         var refreshToken = new AliasVaultUserRefreshToken
         {
             Id = Guid.NewGuid(),
             UserId = user.Id,
+            SessionId = session.Id,
             DeviceIdentifier = "test-device",
             Value = "test-value",
             ExpireDate = testDate,
