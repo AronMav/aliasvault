@@ -207,9 +207,11 @@ export class SqliteClient implements IDatabaseClient {
 
       const binaryArray = this.db.export();
 
-      // Convert to string in chunks to avoid O(n^2) byte-by-byte concatenation.
-      // On a multi-VM vault export (~35MB SQLite image) this measured 1147ms ->
-      // 477ms (2.4x) against the previous loop; identical output (bench-export-base64.cjs).
+      /*
+       * Convert to string in chunks to avoid O(n^2) byte-by-byte concatenation.
+       * On a multi-VM vault export (~35MB SQLite image) this measured 1147ms ->
+       * 477ms (2.4x) against the previous loop; identical output (bench-export-base64.cjs). 
+       */
       const chunkSize = 0x8000;
       const parts: string[] = [];
       for (let i = 0; i < binaryArray.length; i += chunkSize) {

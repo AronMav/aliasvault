@@ -35,6 +35,18 @@ vi.mock('@/utils/RustCore', async (importOriginal) => {
   return {
     ...actual,
     isUrlAlreadyLinked: vi.fn().mockResolvedValue(false),
+    /*
+     * Saving a credential now resolves its favicon target in the Rust core
+     * (upstream #2385). The WASM core cannot run under vitest (no extension
+     * runtime), so return a deterministic target for any URL list — the value
+     * itself is irrelevant to what these tests assert.
+     */
+    selectFaviconTarget: vi.fn().mockImplementation(async (urls: string[]) => {
+      if (!urls || urls.length === 0) {
+        return null;
+      }
+      return { url: urls[0], source: urls[0] };
+    }),
   };
 });
 

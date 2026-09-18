@@ -1131,8 +1131,10 @@ export async function createVaultSqliteClient() : Promise<SqliteClient> {
   })();
 
   pendingVaultInit = { blob: encryptedVault, promise: initPromise };
-  // Also register as the in-flight decrypt so handleGetVault joins this promise
-  // instead of starting a second decryption in parallel.
+  /*
+   * Also register as the in-flight decrypt so handleGetVault joins this promise
+   * instead of starting a second decryption in parallel. 
+   */
   pendingDecrypt = { blob: encryptedVault, promise: initPromise.then((client) => client.exportToBase64()) };
 
   return initPromise;
