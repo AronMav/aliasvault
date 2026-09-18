@@ -30,13 +30,16 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
-      # --ignore-scripts: the audit reads package-lock.json only; postinstall hooks
-      # are covered by the dedicated security scripts below. In particular
-      # apps/browser-extension's postinstall (wxt prepare) resolves an import of
-      # the Rust WASM artifact that only exists after build:rust, and the mobile
-      # postinstall re-applies the image-size hardening in its own step.
+      # --ignore-scripts: the browser-extension postinstall (wxt prepare) resolves an
+      # import of the Rust WASM artifact that only exists after build:rust, and npm ci
+      # must not run it during a lock-only audit. The security hardening that other
+      # postinstall hooks would apply is done explicitly in the steps below.
       - run: npm ci --ignore-scripts
         working-directory: ${{ matrix.project }}
+      # Apply the image-size hardening BEFORE the audit: audit-npm.mjs verifies it
+      # (checkOnly) when it walks the mitigated advisories, so the patch must exist first.
+      - if: matrix.project == 'apps/mobile-app' || matrix.project == 'docs'
+        run: node scripts/security/harden-image-size.mjs '${{ matrix.project }}'
       - run: node scripts/security/audit-npm.mjs '${{ matrix.project }}'
       - if: matrix.project == 'apps/mobile-app' || matrix.project == 'docs'
         run: node scripts/security/image-size.test.mjs '${{ matrix.project }}'
