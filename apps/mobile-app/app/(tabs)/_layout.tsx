@@ -38,11 +38,11 @@ export default function TabLayout() : React.ReactNode {
     if (requireLoginOrUnlock) {
       // Small delay to let global auth listener handle it first
       const timer = setTimeout(() => {
-        router.replace('/login');
+        router.replace(isAuthenticated ? '/reinitialize' : '/login');
       }, 200);
       return () : void => clearTimeout(timer);
     }
-  }, [requireLoginOrUnlock]);
+  }, [requireLoginOrUnlock, isAuthenticated]);
 
   if (!isFullyInitialized || requireLoginOrUnlock) {
     return null;

@@ -47,6 +47,7 @@
             <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
         </PackageReference>
         <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="10.0.10" />
+        <PackageReference Include="Microsoft.AspNetCore.TestHost" Version="10.0.10" />
     </ItemGroup>
 
     <ItemGroup>

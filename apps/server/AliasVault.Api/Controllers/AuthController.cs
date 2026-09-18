@@ -464,6 +464,9 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
         // This to make sure all tokens are revoked for this device that user is "logging out" from.
         var deviceIdentifier = AuthHelper.GenerateDeviceIdentifier(Request);
         var allDeviceTokens = await context.AliasVaultUserRefreshTokens.Where(t => t.UserId == user.Id && (t.Value == refreshTokenHash || t.DeviceIdentifier == deviceIdentifier)).ToListAsync();
+        var sessionIds = allDeviceTokens.Select(t => t.SessionId).ToArray();
+        await context.UserSessions.Where(s => s.UserId == user.Id && sessionIds.Contains(s.Id))
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, timeProvider.UtcNow));
         context.AliasVaultUserRefreshTokens.RemoveRange(allDeviceTokens);
         await context.SaveChangesAsync();
 
@@ -501,7 +504,10 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
         }
 
         // Remove only the specific token, not other device tokens
-        context.AliasVaultUserRefreshTokens.Remove(refreshTokenEntry);
+        await context.UserSessions.Where(s => s.UserId == refreshTokenEntry.UserId && s.Id == refreshTokenEntry.SessionId)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, timeProvider.UtcNow));
+        context.AliasVaultUserRefreshTokens.RemoveRange(
+            await context.AliasVaultUserRefreshTokens.Where(t => t.UserId == refreshTokenEntry.UserId && t.SessionId == refreshTokenEntry.SessionId).ToListAsync());
         await context.SaveChangesAsync();
 
         return Ok();
@@ -787,95 +793,8 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
     [AllowAnonymous]
     public async Task<IActionResult> PollMobileLogin(string requestId)
     {
-        await using var context = await dbContextFactory.CreateDbContextAsync();
-
-        var loginRequest = await context.MobileLoginRequests.FirstOrDefaultAsync(r => r.Id == requestId);
-
-        // Check if request exists and hasn't expired
-        if (loginRequest == null || loginRequest.CreatedAt.AddMinutes(MobileLoginTimeoutMinutes) < timeProvider.UtcNow)
-        {
-            return NotFound(ApiErrorCodeHelper.CreateErrorResponse(ApiErrorCode.MOBILE_LOGIN_REQUEST_NOT_FOUND, 404));
-        }
-
-        // If not fulfilled, return pending status
-        if (loginRequest.FulfilledAt == null)
-        {
-            return Ok(new MobileLoginPollResponse
-            {
-                Fulfilled = false,
-                EncryptedSymmetricKey = null,
-                EncryptedToken = null,
-                EncryptedRefreshToken = null,
-                EncryptedDecryptionKey = null,
-                EncryptedUsername = null,
-            });
-        }
-
-        // Check if already retrieved (one-time use protection)
-        if (loginRequest.RetrievedAt != null)
-        {
-            return NotFound(ApiErrorCodeHelper.CreateErrorResponse(ApiErrorCode.MOBILE_LOGIN_REQUEST_NOT_FOUND, 404));
-        }
-
-        // Sanity check: check if user exists using UserId FK
-        var user = await userManager.FindByIdAsync(loginRequest.UserId!);
-        if (user == null)
-        {
-            await authLoggingService.LogAuthEventFailAsync("n/a", AuthEventType.MobileLogin, AuthFailureReason.InvalidUsername);
-            return BadRequest(ApiErrorCodeHelper.CreateErrorResponse(ApiErrorCode.USER_NOT_FOUND, 400));
-        }
-
-        // Sanity check: check if the account is blocked.
-        if (user.Blocked)
-        {
-            await authLoggingService.LogAuthEventFailAsync(user.UserName!, AuthEventType.MobileLogin, AuthFailureReason.AccountBlocked);
-            return BadRequest(ApiErrorCodeHelper.CreateErrorResponse(ApiErrorCode.ACCOUNT_BLOCKED, 400));
-        }
-
-        // Sanity check: check if the account is locked out.
-        if (await userManager.IsLockedOutAsync(user))
-        {
-            await authLoggingService.LogAuthEventFailAsync(user.UserName!, AuthEventType.MobileLogin, AuthFailureReason.AccountLocked);
-            return BadRequest(ApiErrorCodeHelper.CreateErrorResponse(ApiErrorCode.ACCOUNT_LOCKED, 400));
-        }
-
-        // Generate token for the user
-        var tokenModel = await GenerateNewTokensForUser(user, extendedLifetime: true);
-
-        // Get encrypted decryption key from the login request and put it in memory
-        var encryptedDecryptionKey = loginRequest.EncryptedDecryptionKey!;
-
-        // Generate a single symmetric key for encrypting all fields
-        var symmetricKey = Cryptography.Server.Encryption.GenerateRandomSymmetricKey();
-
-        // Encrypt each field with the symmetric key (returns base64)
-        var encryptedToken = Cryptography.Server.Encryption.SymmetricEncrypt(tokenModel.Token, symmetricKey);
-        var encryptedRefreshToken = Cryptography.Server.Encryption.SymmetricEncrypt(tokenModel.RefreshToken, symmetricKey);
-        var encryptedUsername = Cryptography.Server.Encryption.SymmetricEncrypt(user.UserName!, symmetricKey);
-
-        // Encrypt the symmetric key with the client's RSA public key (returns base64)
-        var encryptedSymmetricKey = Cryptography.Server.Encryption.EncryptSymmetricKeyWithRsa(symmetricKey, loginRequest.ClientPublicKey);
-
-        // Log successful mobile login authentication
-        await authLoggingService.LogAuthEventSuccessAsync(user.UserName!, AuthEventType.MobileLogin);
-
-        // Mark as retrieved and clear sensitive data from database
-        loginRequest.ClientPublicKey = string.Empty;
-        loginRequest.EncryptedDecryptionKey = null;
-        loginRequest.RetrievedAt = timeProvider.UtcNow;
-        await context.SaveChangesAsync();
-
-        // Return response with encrypted symmetric key and encrypted fields
-        // Client will decrypt username to call /login endpoint for salt and encryption settings
-        return Ok(new MobileLoginPollResponse
-        {
-            Fulfilled = true,
-            EncryptedSymmetricKey = encryptedSymmetricKey,
-            EncryptedToken = encryptedToken,
-            EncryptedRefreshToken = encryptedRefreshToken,
-            EncryptedDecryptionKey = encryptedDecryptionKey,
-            EncryptedUsername = encryptedUsername,
-        });
+        await using var strategyContext = await dbContextFactory.CreateDbContextAsync();
+        return await strategyContext.Database.CreateExecutionStrategy().ExecuteAsync(() => PollMobileLoginCore(requestId));
     }
 
     /// <summary>
@@ -897,8 +816,10 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
             return NotFound(ApiErrorCodeHelper.CreateErrorResponse(ApiErrorCode.MOBILE_LOGIN_REQUEST_NOT_FOUND, 404));
         }
 
-        // Return only the public key
-        return Ok(new { clientPublicKey = loginRequest.ClientPublicKey });
+        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        var approvalPublicKey = await context.UserEncryptionKeys
+            .Where(k => k.UserId == userId && k.IsPrimary).Select(k => k.PublicKey).FirstOrDefaultAsync();
+        return Ok(new { clientPublicKey = loginRequest.ClientPublicKey, approvalPublicKey });
     }
 
     /// <summary>
@@ -933,13 +854,29 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
             return BadRequest(ApiErrorCodeHelper.CreateErrorResponse(ApiErrorCode.MOBILE_LOGIN_REQUEST_ALREADY_FULFILLED, 400));
         }
 
-        // Update the login request with the encrypted key and user ID
-        loginRequest.EncryptedDecryptionKey = model.EncryptedDecryptionKey;
-        loginRequest.UserId = user.Id;
-        loginRequest.FulfilledAt = timeProvider.UtcNow;
-        loginRequest.MobileIpAddress = IpAddressUtility.GetAnonymizedIpFromContext(HttpContext, config.IpLoggingEnabled);
+        if (user.Blocked || !Guid.TryParse(User.FindFirstValue("sid"), out var sessionId)
+            || string.IsNullOrEmpty(model.EncryptedDecryptionKey) || model.EncryptedDecryptionKey.Length > 16384)
+        {
+            return Unauthorized();
+        }
 
-        await context.SaveChangesAsync();
+        var approvalPublicKey = await context.UserEncryptionKeys
+            .Where(k => k.UserId == user.Id && k.IsPrimary).Select(k => k.PublicKey).FirstOrDefaultAsync();
+        var payload = MobileLoginApproval.CreatePayload(model.RequestId, loginRequest.ClientPublicKey, model.EncryptedDecryptionKey);
+        if (approvalPublicKey is null || !Cryptography.Server.Encryption.VerifyApproval(approvalPublicKey, payload, model.ApprovalSignature))
+        {
+            return BadRequest("Unlock the vault in an updated mobile app to approve this request.");
+        }
+
+        var mobileIp = IpAddressUtility.GetAnonymizedIpFromContext(HttpContext, config.IpLoggingEnabled);
+        var updated = await context.MobileLoginRequests.Where(r => r.Id == model.RequestId && r.FulfilledAt == null && r.RetrievedAt == null)
+            .ExecuteUpdateAsync(u => u.SetProperty(r => r.EncryptedDecryptionKey, model.EncryptedDecryptionKey)
+                .SetProperty(r => r.UserId, user.Id).SetProperty(r => r.FulfilledAt, timeProvider.UtcNow)
+                .SetProperty(r => r.ApprovingSessionId, sessionId).SetProperty(r => r.MobileIpAddress, mobileIp));
+        if (updated != 1)
+        {
+            return Conflict("Request already approved.");
+        }
 
         return Ok();
     }
@@ -1114,6 +1051,115 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
         return (true, ApiErrorCode.USERNAME_AVAILABLE);
     }
 
+    private async Task<IActionResult> PollMobileLoginCore(string requestId)
+    {
+        await using var context = await dbContextFactory.CreateDbContextAsync();
+
+        var loginRequest = await context.MobileLoginRequests.FirstOrDefaultAsync(r => r.Id == requestId);
+
+        // Check if request exists and hasn't expired
+        if (loginRequest == null || loginRequest.CreatedAt.AddMinutes(MobileLoginTimeoutMinutes) < timeProvider.UtcNow)
+        {
+            return NotFound(ApiErrorCodeHelper.CreateErrorResponse(ApiErrorCode.MOBILE_LOGIN_REQUEST_NOT_FOUND, 404));
+        }
+
+        // If not fulfilled, return pending status
+        if (loginRequest.FulfilledAt == null)
+        {
+            return Ok(new MobileLoginPollResponse
+            {
+                Fulfilled = false,
+                EncryptedSymmetricKey = null,
+                EncryptedToken = null,
+                EncryptedRefreshToken = null,
+                EncryptedDecryptionKey = null,
+                EncryptedUsername = null,
+            });
+        }
+
+        // Check if already retrieved (one-time use protection)
+        if (loginRequest.RetrievedAt != null)
+        {
+            return NotFound(ApiErrorCodeHelper.CreateErrorResponse(ApiErrorCode.MOBILE_LOGIN_REQUEST_NOT_FOUND, 404));
+        }
+
+        // Sanity check: check if user exists using UserId FK
+        var user = await userManager.FindByIdAsync(loginRequest.UserId!);
+        if (user == null)
+        {
+            await authLoggingService.LogAuthEventFailAsync("n/a", AuthEventType.MobileLogin, AuthFailureReason.InvalidUsername);
+            return BadRequest(ApiErrorCodeHelper.CreateErrorResponse(ApiErrorCode.USER_NOT_FOUND, 400));
+        }
+
+        // Sanity check: check if the account is blocked.
+        if (user.Blocked)
+        {
+            await authLoggingService.LogAuthEventFailAsync(user.UserName!, AuthEventType.MobileLogin, AuthFailureReason.AccountBlocked);
+            return BadRequest(ApiErrorCodeHelper.CreateErrorResponse(ApiErrorCode.ACCOUNT_BLOCKED, 400));
+        }
+
+        // Sanity check: check if the account is locked out.
+        if (await userManager.IsLockedOutAsync(user))
+        {
+            await authLoggingService.LogAuthEventFailAsync(user.UserName!, AuthEventType.MobileLogin, AuthFailureReason.AccountLocked);
+            return BadRequest(ApiErrorCodeHelper.CreateErrorResponse(ApiErrorCode.ACCOUNT_LOCKED, 400));
+        }
+
+        await using var transaction = await context.Database.BeginTransactionAsync();
+        var approvingSession = await context.UserSessions
+            .FromSqlInterpolated($"SELECT * FROM \"UserSessions\" WHERE \"Id\" = {loginRequest.ApprovingSessionId} FOR UPDATE")
+            .FirstOrDefaultAsync();
+        if (approvingSession is null || approvingSession.UserId != user.Id || approvingSession.RevokedAt is not null
+            || !await context.AliasVaultUserRefreshTokens.AnyAsync(t => t.SessionId == approvingSession.Id && t.ExpireDate > timeProvider.UtcNow))
+        {
+            return Unauthorized();
+        }
+
+        // Claim exactly once in the database, also when several API instances receive the poll.
+        var claimed = await context.MobileLoginRequests.Where(r => r.Id == requestId && r.RetrievedAt == null)
+            .ExecuteUpdateAsync(u => u.SetProperty(r => r.RetrievedAt, timeProvider.UtcNow)
+                .SetProperty(r => r.ClientPublicKey, string.Empty).SetProperty(r => r.EncryptedDecryptionKey, (string?)null));
+        if (claimed != 1)
+        {
+            return NotFound();
+        }
+
+        // Generate token only after checking the approving session and claiming the request.
+        var tokenModel = await GenerateNewTokensForUser(user, extendedLifetime: true);
+
+        // Get encrypted decryption key from the login request and put it in memory
+        var encryptedDecryptionKey = loginRequest.EncryptedDecryptionKey!;
+
+        // Generate a single symmetric key for encrypting all fields
+        var symmetricKey = Cryptography.Server.Encryption.GenerateRandomSymmetricKey();
+
+        // Encrypt each field with the symmetric key (returns base64)
+        var encryptedToken = Cryptography.Server.Encryption.SymmetricEncrypt(tokenModel.Token, symmetricKey);
+        var encryptedRefreshToken = Cryptography.Server.Encryption.SymmetricEncrypt(tokenModel.RefreshToken, symmetricKey);
+        var encryptedUsername = Cryptography.Server.Encryption.SymmetricEncrypt(user.UserName!, symmetricKey);
+
+        // Encrypt the symmetric key with the client's RSA public key (returns base64)
+        var encryptedSymmetricKey = Cryptography.Server.Encryption.EncryptSymmetricKeyWithRsa(symmetricKey, loginRequest.ClientPublicKey);
+
+        // Log successful mobile login authentication
+        await authLoggingService.LogAuthEventSuccessAsync(user.UserName!, AuthEventType.MobileLogin);
+
+        // Mark as retrieved and clear sensitive data from database
+        await transaction.CommitAsync();
+
+        // Return response with encrypted symmetric key and encrypted fields
+        // Client will decrypt username to call /login endpoint for salt and encryption settings
+        return Ok(new MobileLoginPollResponse
+        {
+            Fulfilled = true,
+            EncryptedSymmetricKey = encryptedSymmetricKey,
+            EncryptedToken = encryptedToken,
+            EncryptedRefreshToken = encryptedRefreshToken,
+            EncryptedDecryptionKey = encryptedDecryptionKey,
+            EncryptedUsername = encryptedUsername,
+        });
+    }
+
     /// <summary>
     /// Counts one request against the caller's allowance for the endpoints that need no authentication
     /// to reach, and produces the response to return when that allowance is used up.
@@ -1194,14 +1240,16 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
     /// when this access token expires.
     /// </summary>
     /// <param name="user">The user to generate the Jwt access token for.</param>
+    /// <param name="sessionId">The stable refresh session identity.</param>
     /// <returns>Access token as string.</returns>
-    private string GenerateJwtToken(AliasVaultUser user)
+    private string GenerateJwtToken(AliasVaultUser user, Guid sessionId)
     {
         var claims = new List<Claim>
         {
             new(ClaimTypes.NameIdentifier, user.Id),
             new(ClaimTypes.Name, user.UserName ?? string.Empty),
             new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+            new("sid", sessionId.ToString()),
         };
 
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(GetJwtKey()));
@@ -1272,12 +1320,12 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
                 // would keep handing out ten-minute access tokens for up to 30 seconds after a logout.
                 var rotatedTokenHash = AuthHelper.HashRefreshToken(rotatedToken);
                 var now = timeProvider.UtcNow;
-                var rotatedTokenIsLive = await context.AliasVaultUserRefreshTokens
-                    .AnyAsync(t => t.UserId == user.Id && t.Value == rotatedTokenHash && t.ExpireDate >= now);
+                var rotatedTokenEntry = await context.AliasVaultUserRefreshTokens
+                    .FirstOrDefaultAsync(t => t.UserId == user.Id && t.Value == rotatedTokenHash && t.ExpireDate > now && t.Session.RevokedAt == null);
 
-                if (rotatedTokenIsLive)
+                if (rotatedTokenEntry is not null)
                 {
-                    var accessToken = GenerateJwtToken(user);
+                    var accessToken = GenerateJwtToken(user, rotatedTokenEntry.SessionId);
                     return new TokenModel { Token = accessToken, RefreshToken = rotatedToken };
                 }
 
@@ -1287,7 +1335,7 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
             }
 
             // Check if the refresh token still exists and is not expired.
-            var existingToken = await context.AliasVaultUserRefreshTokens.FirstOrDefaultAsync(t => t.UserId == user.Id && t.Value == existingTokenHash);
+            var existingToken = await context.AliasVaultUserRefreshTokens.FirstOrDefaultAsync(t => t.UserId == user.Id && t.Value == existingTokenHash && t.Session.RevokedAt == null);
             if (existingToken == null || existingToken.ExpireDate < timeProvider.UtcNow)
             {
                 return await RotateWithinWindowAfterCacheLoss(context, user, existingTokenHash);
@@ -1299,7 +1347,7 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
             var existingTokenLifetime = existingToken.ExpireDate - existingToken.CreatedAt;
 
             // Retrieve new refresh token.
-            var newRefreshToken = await GenerateRefreshToken(user, existingTokenLifetime, existingTokenHash);
+            var newRefreshToken = await GenerateRefreshToken(user, existingTokenLifetime, existingTokenHash, existingToken.SessionId);
 
             // After successfully retrieving new refresh token, remove the existing one by saving changes.
             await context.SaveChangesAsync();
@@ -1346,7 +1394,7 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
             .FirstOrDefaultAsync(t => t.UserId == user.Id
                 && t.PreviousTokenValue == existingTokenHash
                 && t.CreatedAt >= windowStart
-                && t.ExpireDate >= now);
+                && t.ExpireDate >= now && t.Session.RevokedAt == null);
 
         if (replacement is null)
         {
@@ -1358,7 +1406,7 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
         // start forward on every call, and a token someone had taken a copy of would go on minting
         // new ones for as long as they kept asking. A further request inside the window still finds
         // the original replacement row, which is what the lookup above matches on.
-        var newRefreshToken = await GenerateRefreshToken(user, replacement.ExpireDate - replacement.CreatedAt);
+        var newRefreshToken = await GenerateRefreshToken(user, replacement.ExpireDate - replacement.CreatedAt, sessionId: replacement.SessionId);
 
         cache.Set(
             AuthHelper.CachePrefixRotatedToken + existingTokenHash,
@@ -1375,19 +1423,27 @@ public class AuthController(IAliasServerDbContextFactory dbContextFactory, UserM
     /// <param name="user">The user to generate the tokens for.</param>
     /// <param name="newTokenLifetime">The lifetime of the new token.</param>
     /// <param name="existingTokenHash">The hash of the token that is being replaced (optional).</param>
+    /// <param name="sessionId">The existing session identity when rotating a token.</param>
     /// <returns>TokenModel which includes new access and refresh token.</returns>
-    private async Task<TokenModel> GenerateRefreshToken(AliasVaultUser user, TimeSpan newTokenLifetime, string? existingTokenHash = null)
+    private async Task<TokenModel> GenerateRefreshToken(AliasVaultUser user, TimeSpan newTokenLifetime, string? existingTokenHash = null, Guid? sessionId = null)
     {
         await using var context = await dbContextFactory.CreateDbContextAsync();
 
-         // Generate device identifier
-        var accessToken = GenerateJwtToken(user);
+        // Keep the session identity stable across refresh-token rotation.
+        var stableSessionId = sessionId ?? Guid.NewGuid();
+        if (sessionId is null)
+        {
+            context.UserSessions.Add(new UserSession { Id = stableSessionId, UserId = user.Id, CreatedAt = timeProvider.UtcNow });
+        }
+
+        var accessToken = GenerateJwtToken(user, stableSessionId);
         var refreshToken = GenerateRefreshToken();
         var deviceIdentifier = AuthHelper.GenerateDeviceIdentifier(Request);
 
         // Add new refresh token.
         context.AliasVaultUserRefreshTokens.Add(new AliasVaultUserRefreshToken
         {
+            SessionId = stableSessionId,
             UserId = user.Id,
             DeviceIdentifier = deviceIdentifier,
             IpAddress = IpAddressUtility.GetAnonymizedIpFromContext(HttpContext, config.IpLoggingEnabled),

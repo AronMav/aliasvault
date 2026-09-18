@@ -9,12 +9,22 @@ namespace AliasServerDb;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.EntityFrameworkCore;
 
 /// <summary>
 /// Refresh tokens for users.
 /// </summary>
+[Index(nameof(UserId), nameof(SessionId))]
 public class AliasVaultUserRefreshToken
 {
+    /// <summary>
+    /// Gets or sets the stable session identity shared by all rotations of a refresh token.
+    /// </summary>
+    public Guid SessionId { get; set; } = Guid.NewGuid();
+
+    /// <summary>Gets or sets the durable session, retained across token rotations.</summary>
+    public virtual UserSession Session { get; set; } = null!;
+
     /// <summary>
     /// Gets or sets Refresh Token ID.
     /// </summary>

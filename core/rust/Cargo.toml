@@ -58,7 +58,7 @@ keepass = { version = "0.13", optional = true, default-features = false }
 # UniFFI for Swift/Kotlin bindings (optional)
 # Note: Don't add "cli" feature here - it pulls in heavy bindgen dependencies
 # The uniffi-cli feature enables CLI separately for the uniffi-bindgen binary only
-uniffi = { version = "0.28", optional = true }
+uniffi = { version = "0.32", optional = true }
 
 # WASM bindings (optional)
 wasm-bindgen = { version = "0.2", optional = true }
@@ -69,7 +69,7 @@ console_error_panic_hook = { version = "0.1", optional = true }
 
 # Build dependencies for UniFFI
 [build-dependencies]
-uniffi = { version = "0.28", features = ["build"] }
+uniffi = { version = "0.32", features = ["build"] }
 
 # Binary for generating Swift/Kotlin bindings
 # This binary requires uniffi-cli feature which includes the heavy bindgen dependencies

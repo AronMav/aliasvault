@@ -19,6 +19,9 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -103,6 +106,7 @@ class PinUnlockActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         setContentView(R.layout.activity_pin_unlock)
 
         // Keep screen on during PIN entry
@@ -137,18 +141,24 @@ class PinUnlockActivity : AppCompatActivity() {
     }
 
     private fun applyWindowInsets() {
-        findViewById<View>(android.R.id.content).setOnApplyWindowInsetsListener { _, insets ->
-            val cancelButton = findViewById<ImageButton>(R.id.cancelButton)
-            val systemBarsInsets = insets.systemWindowInsets
-
-            // Apply top inset to cancel button's parent FrameLayout margin
-            val cancelButtonParent = cancelButton.parent as View
-            val layoutParams = cancelButtonParent.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
-            layoutParams.topMargin = systemBarsInsets.top + 8 // 8dp base margin
-            cancelButtonParent.layoutParams = layoutParams
-
+        val content = findViewById<View>(R.id.pinUnlockContent)
+        val initialLeft = content.paddingLeft
+        val initialTop = content.paddingTop
+        val initialRight = content.paddingRight
+        val initialBottom = content.paddingBottom
+        ViewCompat.setOnApplyWindowInsetsListener(content) { view, insets ->
+            val safeArea = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            // Keep the entire keypad inside the safe area in both gesture and three-button navigation.
+            // Start from the original padding so repeated inset dispatches never accumulate spacing.
+            view.setPadding(
+                initialLeft + safeArea.left,
+                initialTop + safeArea.top,
+                initialRight + safeArea.right,
+                initialBottom + safeArea.bottom,
+            )
             insets
         }
+        ViewCompat.requestApplyInsets(content)
     }
 
     private fun initializeViews() {

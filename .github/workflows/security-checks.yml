@@ -1,0 +1,75 @@
+name: Security checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '37 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - apps/browser-extension
+          - apps/mobile-app
+          - apps/server/AliasVault.Admin
+          - apps/server/AliasVault.Client
+          - core/models
+          - core/vault
+          - docs
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - run: npm ci
+        working-directory: ${{ matrix.project }}
+      - run: node scripts/security/audit-npm.mjs '${{ matrix.project }}'
+      - if: matrix.project == 'apps/mobile-app' || matrix.project == 'docs'
+        run: node scripts/security/image-size.test.mjs '${{ matrix.project }}'
+      - if: matrix.project == 'apps/mobile-app'
+        run: node scripts/security/mobile-approval.test.mjs
+      - if: matrix.project == 'apps/mobile-app'
+        run: node scripts/security/mobile-unlock.test.mjs
+
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core/rust
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: cargo install cargo-audit --version 0.22.2 --locked
+      - run: cargo audit --deny warnings
+      - run: cargo test --locked --features uniffi,kdbx-testing
+
+  dotnet:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: security-regression-local-only
+          POSTGRES_DB: aliasvault_security_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd 'pg_isready -U postgres'
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      ALIASVAULT_SECURITY_TEST_DB: Host=127.0.0.1;Port=5432;Database=aliasvault_security_test;Username=postgres;Password=security-regression-local-only
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet workload restore apps/server/aliasvault.sln
+      - run: dotnet restore apps/server/aliasvault.sln -p:SecurityAudit=true -warnaserror:NU1900,NU1901,NU1902,NU1903,NU1904
+      - run: dotnet test apps/server/Tests/AliasVault.UnitTests/AliasVault.UnitTests.csproj --no-restore --filter 'Category!=NetworkTests'

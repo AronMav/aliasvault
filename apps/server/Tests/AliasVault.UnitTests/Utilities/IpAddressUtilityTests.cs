@@ -14,8 +14,35 @@ using Microsoft.AspNetCore.Http;
 /// <summary>
 /// Tests that the client IP used for access decisions cannot be chosen by the client.
 /// </summary>
+[NonParallelizable]
 public class IpAddressUtilityTests
 {
+    private string? _previousProxies;
+
+    /// <summary>Configures only the synthetic proxy used by these tests.</summary>
+    [SetUp]
+    public void SetUp()
+    {
+        _previousProxies = Environment.GetEnvironmentVariable("TRUSTED_APP_PROXIES");
+        Environment.SetEnvironmentVariable("TRUSTED_APP_PROXIES", "172.18.0.5");
+    }
+
+    /// <summary>Restores the process configuration.</summary>
+    [TearDown]
+    public void TearDown() => Environment.SetEnvironmentVariable("TRUSTED_APP_PROXIES", _previousProxies);
+
+    /// <summary>Other private peers do not inherit proxy privileges.</summary>
+    /// <param name="peer">The untrusted immediate peer.</param>
+    [TestCase("172.18.0.6")]
+    [TestCase("10.0.0.2")]
+    [TestCase("fd00::2")]
+    public void UntrustedPrivatePeerIsIgnored(string peer)
+    {
+        var context = CreateContext(peer);
+        context.Request.Headers["X-Real-IP"] = "198.51.100.7";
+        Assert.That(IpAddressUtility.GetRawIpAddressFromContext(context)?.ToString(), Is.EqualTo(peer));
+    }
+
     /// <summary>
     /// Tests that a client-supplied X-Forwarded-For header cannot override the real peer.
     /// </summary>

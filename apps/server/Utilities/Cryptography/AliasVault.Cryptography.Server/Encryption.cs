@@ -179,6 +179,48 @@ public static class Encryption
         return plaintext;
     }
 
+    /// <summary>Compares the public RSA parameters independently of JWK formatting.</summary>
+    /// <param name="first">The first public JWK.</param>
+    /// <param name="second">The second public JWK.</param>
+    /// <returns>Whether both keys represent the same public key.</returns>
+    public static bool AreSamePublicKey(string first, string second)
+    {
+        if (!IsValidRsaPublicKey(first) || !IsValidRsaPublicKey(second))
+        {
+            return false;
+        }
+
+        using var a = RSA.Create();
+        using var b = RSA.Create();
+        ImportPublicKey(a, first);
+        ImportPublicKey(b, second);
+        return a.ExportSubjectPublicKeyInfo().AsSpan().SequenceEqual(b.ExportSubjectPublicKeyInfo());
+    }
+
+    /// <summary>Verifies a purpose-bound approval signed by a vault's RSA private key.</summary>
+    /// <param name="publicKey">The registered public JWK.</param>
+    /// <param name="payload">The exact UTF-8 approval payload.</param>
+    /// <param name="signature">The base64 RSA-PSS SHA-256 signature.</param>
+    /// <returns>Whether the bounded signature is valid.</returns>
+    public static bool VerifyApproval(string publicKey, string payload, string? signature)
+    {
+        if (!IsValidRsaPublicKey(publicKey) || string.IsNullOrEmpty(signature) || signature.Length > 1400)
+        {
+            return false;
+        }
+
+        try
+        {
+            using var rsa = RSA.Create();
+            ImportPublicKey(rsa, publicKey);
+            return rsa.VerifyData(Encoding.UTF8.GetBytes(payload), Convert.FromBase64String(signature), HashAlgorithmName.SHA256, RSASignaturePadding.Pss);
+        }
+        catch (Exception ex) when (ex is FormatException or CryptographicException)
+        {
+            return false;
+        }
+    }
+
     /// <summary>
     /// Imports a public key from JWK format into an RSA provider.
     /// </summary>

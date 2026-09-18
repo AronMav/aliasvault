@@ -7,6 +7,8 @@
 
 namespace AliasVault.Api.Controllers.Security;
 
+using System.Data;
+using System.Security.Claims;
 using System.Text.Encodings.Web;
 using AliasServerDb;
 using AliasVault.Api.Controllers.Abstracts;
@@ -16,154 +18,158 @@ using Asp.Versioning;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
+using OtpNet;
 
-/// <summary>
-/// Two-factor authentication controller for handling two-factor authentication related actions.
-/// </summary>
-/// <param name="dbContextFactory">AliasServerDbContext instance.</param>
-/// <param name="urlEncoder">UrlEncoder instance.</param>
-/// <param name="authLoggingService">AuthLoggingService instance. This is used to log auth attempts to the database.</param>
-/// <param name="userManager">UserManager instance.</param>
+/// <summary>Manages session-bound 2FA setup and confirmed removal.</summary>
+/// <param name="db">The scoped identity database context.</param>
+/// <param name="cache">Short-lived, session-bound setup secrets.</param>
+/// <param name="urlEncoder">URL encoder.</param>
+/// <param name="authLoggingService">Authentication audit logger.</param>
+/// <param name="userManager">Identity user manager.</param>
 [Route("v{version:apiVersion}/[controller]")]
 [ApiController]
 [ApiVersion("1")]
-public class TwoFactorAuthController(IDbContextFactory<AliasServerDbContext> dbContextFactory, UrlEncoder urlEncoder, AuthLoggingService authLoggingService, UserManager<AliasVaultUser> userManager) : AuthenticatedRequestController(userManager)
+public class TwoFactorAuthController(AliasServerDbContext db, IMemoryCache cache, UrlEncoder urlEncoder, AuthLoggingService authLoggingService, UserManager<AliasVaultUser> userManager) : AuthenticatedRequestController(userManager)
 {
-    /// <summary>
-    /// Get two-factor authentication enabled status for a user.
-    /// </summary>
-    /// <returns>Task.</returns>
+    /// <summary>Returns whether 2FA is enabled.</summary>
+    /// <returns>The current status.</returns>
     [HttpGet("status")]
     public async Task<IActionResult> Status()
     {
         var user = await GetCurrentUserAsync();
-        if (user is null)
-        {
-            return Unauthorized();
-        }
-
-        var twoFactorEnabled = await GetUserManager().GetTwoFactorEnabledAsync(user);
-        return Ok(new { TwoFactorEnabled = twoFactorEnabled });
+        return user is null ? Unauthorized() : Ok(new { TwoFactorEnabled = user.TwoFactorEnabled });
     }
 
-    /// <summary>
-    /// Enable two-factor authentication for a user.
-    /// </summary>
-    /// <returns>Task.</returns>
+    /// <summary>Starts setup without exposing or replacing an active authenticator.</summary>
+    /// <returns>A temporary setup secret for this session only.</returns>
     [HttpPost("enable")]
     public async Task<IActionResult> Enable()
     {
         var user = await GetCurrentUserAsync();
-        if (user is null)
+        if (user is null || !Guid.TryParse(User.FindFirstValue("sid"), out _))
         {
             return Unauthorized();
         }
 
-        string? authenticatorKey;
-        authenticatorKey = await GetUserManager().GetAuthenticatorKeyAsync(user);
-
-        // Only reset (create new keys) if no key exists yet, avoiding duplicate key errors.
-        if (string.IsNullOrEmpty(authenticatorKey))
+        if (user.TwoFactorEnabled || await GetUserManager().IsLockedOutAsync(user))
         {
-            try
-            {
-                await GetUserManager().ResetAuthenticatorKeyAsync(user);
-                authenticatorKey = await GetUserManager().GetAuthenticatorKeyAsync(user);
-            }
-            catch (DbUpdateException)
-            {
-                // Key was most likely created by concurrent request, just get it.
-                authenticatorKey = await GetUserManager().GetAuthenticatorKeyAsync(user);
-            }
+            return Conflict("Two-factor authentication is already enabled or the account is locked.");
         }
 
-        var encodedKey = urlEncoder.Encode(authenticatorKey!);
-        var qrCodeUrl = $"otpauth://totp/{urlEncoder.Encode("AliasVault")}:{urlEncoder.Encode(user.UserName!)}?secret={encodedKey}&issuer={urlEncoder.Encode("AliasVault")}";
-
-        return Ok(new { Secret = authenticatorKey, QrCodeUrl = qrCodeUrl });
+        var secret = cache.GetOrCreate(SetupCacheKey(user.Id), entry =>
+        {
+            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(10);
+            return Base32Encoding.ToString(KeyGeneration.GenerateRandomKey(20));
+        })!;
+        var qrCodeUrl = $"otpauth://totp/{urlEncoder.Encode("AliasVault")}:{urlEncoder.Encode(user.UserName!)}?secret={urlEncoder.Encode(secret)}&issuer=AliasVault";
+        return Ok(new { Secret = secret, QrCodeUrl = qrCodeUrl });
     }
 
-    /// <summary>
-    /// Verify two-factor authentication setup.
-    /// </summary>
-    /// <param name="code">Code to verify if 2fa successfully works.</param>
-    /// <returns>Task.</returns>
+    /// <summary>Confirms the temporary authenticator and issues recovery codes once.</summary>
+    /// <param name="code">The six-digit authenticator code.</param>
+    /// <returns>Recovery codes on successful setup.</returns>
     [HttpPost("verify")]
-    public async Task<IActionResult> Verify([FromBody] string code)
+    public Task<IActionResult> Verify([FromBody] string code)
     {
-        var user = await GetCurrentUserAsync();
-        if (user is null)
+        return db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
-            return Unauthorized();
-        }
-
-        var isValid = await GetUserManager().VerifyTwoFactorTokenAsync(user, GetUserManager().Options.Tokens.AuthenticatorTokenProvider, code);
-
-        if (isValid)
-        {
-            try
-            {
-                await GetUserManager().SetTwoFactorEnabledAsync(user, true);
-
-                // Generate new recovery codes.
-                var recoveryCodes = await GetUserManager().GenerateNewTwoFactorRecoveryCodesAsync(user, 10);
-
-                await authLoggingService.LogAuthEventSuccessAsync(user.UserName!, AuthEventType.TwoFactorAuthEnable);
-
-                return Ok(new { RecoveryCodes = recoveryCodes });
-            }
-            catch (DbUpdateException)
-            {
-                // Likely a concurrent request already enabled 2FA, still return success.
-                var recoveryCodes = await GetUserManager().GenerateNewTwoFactorRecoveryCodesAsync(user, 10);
-                return Ok(new { RecoveryCodes = recoveryCodes });
-            }
-        }
-
-        return BadRequest("Invalid code.");
+            db.ChangeTracker.Clear();
+            return await VerifyCore(code);
+        });
     }
 
-    /// <summary>
-    /// Disable two-factor authentication for a user.
-    /// </summary>
-    /// <returns>Task.</returns>
+    /// <summary>Disables 2FA only after checking the current second factor.</summary>
+    /// <param name="code">The current six-digit authenticator code.</param>
+    /// <returns>Success when the authenticator was removed.</returns>
     [HttpPost("disable")]
-    public async Task<IActionResult> Disable()
+    public Task<IActionResult> Disable([FromBody] string code)
     {
+        return db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            db.ChangeTracker.Clear();
+            return await DisableCore(code);
+        });
+    }
+
+    private static bool IsCodeFormatValid(string? code) => code is { Length: 6 } && code.All(c => c is >= '0' and <= '9');
+
+    private async Task<IActionResult> VerifyCore(string code)
+    {
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
         var user = await GetCurrentUserAsync();
         if (user is null)
         {
             return Unauthorized();
         }
 
-        await using var context = await dbContextFactory.CreateDbContextAsync();
-
-        var strategy = context.Database.CreateExecutionStrategy();
-        await strategy.ExecuteAsync(async () =>
+        if (user.TwoFactorEnabled || await GetUserManager().IsLockedOutAsync(user))
         {
-            await using var transaction = await context.Database.BeginTransactionAsync();
+            return Conflict("Two-factor authentication is already enabled or the account is locked.");
+        }
 
-            try
-            {
-                // Disable 2FA and remove any existing authenticator key(s) and recovery codes.
-                await GetUserManager().SetTwoFactorEnabledAsync(user, false);
+        if (!cache.TryGetValue<string>(SetupCacheKey(user.Id), out var secret) || secret is null)
+        {
+            return BadRequest("Setup expired. Start setup again.");
+        }
 
-                context.UserTokens.RemoveRange(
-                    await context.UserTokens.Where(
-                        x => x.UserId == user.Id &&
-                             (x.Name == "AuthenticatorKey" || x.Name == "RecoveryCodes")).ToListAsync());
+        if (!IsCodeFormatValid(code) || !AliasVault.TotpGenerator.TotpGenerator.VerifyTotpCode(secret, code))
+        {
+            await GetUserManager().AccessFailedAsync(user);
+            await transaction.CommitAsync();
+            return BadRequest("Invalid code.");
+        }
 
-                await context.SaveChangesAsync();
-                await transaction.CommitAsync();
-            }
-            catch
-            {
-                await transaction.RollbackAsync();
-                throw;
-            }
-        });
+        var result = await GetUserManager().SetAuthenticationTokenAsync(user, "[AspNetUserStore]", "AuthenticatorKey", secret);
+        if (!result.Succeeded || !(await GetUserManager().SetTwoFactorEnabledAsync(user, true)).Succeeded)
+        {
+            return Conflict("Setup changed. Start setup again.");
+        }
 
+        var recoveryCodes = (await GetUserManager().GenerateNewTwoFactorRecoveryCodesAsync(user, 10))?.ToArray();
+        await GetUserManager().ResetAccessFailedCountAsync(user);
+        await transaction.CommitAsync();
+        cache.Remove(SetupCacheKey(user.Id));
+        await authLoggingService.LogAuthEventSuccessAsync(user.UserName!, AuthEventType.TwoFactorAuthEnable);
+        return Ok(new { RecoveryCodes = recoveryCodes });
+    }
+
+    private async Task<IActionResult> DisableCore(string code)
+    {
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+        var user = await GetCurrentUserAsync();
+        if (user is null)
+        {
+            return Unauthorized();
+        }
+
+        if (!user.TwoFactorEnabled || await GetUserManager().IsLockedOutAsync(user))
+        {
+            return BadRequest("Two-factor authentication is not enabled or the account is locked.");
+        }
+
+        if (!IsCodeFormatValid(code) || !await GetUserManager().VerifyTwoFactorTokenAsync(user, GetUserManager().Options.Tokens.AuthenticatorTokenProvider, code))
+        {
+            await GetUserManager().AccessFailedAsync(user);
+            await transaction.CommitAsync();
+            await authLoggingService.LogAuthEventFailAsync(user.UserName!, AuthEventType.TwoFactorAuthDisable, AuthFailureReason.InvalidTwoFactorCode);
+            return BadRequest("Invalid code.");
+        }
+
+        if (!(await GetUserManager().SetTwoFactorEnabledAsync(user, false)).Succeeded)
+        {
+            return Conflict("Authentication settings changed. Try again.");
+        }
+
+        db.UserTokens.RemoveRange(await db.UserTokens.Where(t => t.UserId == user.Id
+            && t.LoginProvider == "[AspNetUserStore]" && (t.Name == "AuthenticatorKey" || t.Name == "RecoveryCodes")).ToListAsync());
+        await db.SaveChangesAsync();
+        await GetUserManager().ResetAccessFailedCountAsync(user);
+        await transaction.CommitAsync();
+        cache.Remove(SetupCacheKey(user.Id));
         await authLoggingService.LogAuthEventSuccessAsync(user.UserName!, AuthEventType.TwoFactorAuthDisable);
         return Ok();
     }
+
+    private string SetupCacheKey(string userId) => $"2fa-setup:{userId}:{User.FindFirstValue("sid")}";
 }

@@ -20,6 +20,11 @@ using Microsoft.EntityFrameworkCore;
 public class MobileLoginRequest
 {
     /// <summary>
+    /// Gets or sets the session that approved this request. It must remain live until collection.
+    /// </summary>
+    public Guid? ApprovingSessionId { get; set; }
+
+    /// <summary>
     /// Gets or sets the unique identifier for this login request.
     /// </summary>
     public string Id { get; set; } = string.Empty;

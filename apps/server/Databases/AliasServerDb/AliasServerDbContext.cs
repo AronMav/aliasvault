@@ -42,6 +42,9 @@ public class AliasServerDbContext : WorkerStatusDbContext, IDataProtectionKeyCon
     /// </summary>
     public DbSet<DataProtectionKey> DataProtectionKeys { get; set; }
 
+    /// <summary>Gets or sets durable authentication sessions.</summary>
+    public DbSet<UserSession> UserSessions { get; set; }
+
     /// <summary>
     /// Gets or sets the AliasVaultUser DbSet.
     /// </summary>
@@ -276,6 +279,9 @@ public class AliasServerDbContext : WorkerStatusDbContext, IDataProtectionKeyCon
             .WithMany(c => c.Emails)
             .HasForeignKey(l => l.UserEncryptionKeyId)
             .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<UserEncryptionKey>().HasIndex(k => k.UserId)
+            .IsUnique().HasFilter("\"IsPrimary\" = TRUE");
 
         // Configure UserEncryptionKey - AliasVaultUser relationship
         modelBuilder.Entity<UserEncryptionKey>()

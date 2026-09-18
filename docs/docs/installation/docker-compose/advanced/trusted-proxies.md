@@ -23,7 +23,7 @@ Set `TRUSTED_PROXIES` in the `environment:` section of your `docker-compose.yml`
 
 | Value | Effect |
 |---|---|
-| _empty_ (default) | Trust all RFC1918 ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`). |
+| _empty_ (default) | Trust no upstream proxies. Use the direct peer IP. |
 | Comma-separated list of CIDRs/IPs | Trust only the listed proxies. **Recommended** when you know your upstream proxy address(es). |
 | `none` | Trust no upstream proxies. `X-Forwarded-For` is always ignored and the direct peer IP is logged. |
 
@@ -56,4 +56,10 @@ docker compose up -d
 
 ## Why narrow this down
 
-The default of all RFC1918 ranges is convenient. Most setups place AliasVault and its upstream proxy in the same private network. But it does mean that **any** request originating from a private IP can spoof `X-Forwarded-For` and appear in the logs as a different client. If you have other workloads on the same private network, set `TRUSTED_PROXIES` to your specific upstream proxy address(es) so only that proxy is trusted to set the header.
+Private addresses are not automatically trusted. List only actual upstream proxies; other workloads on the same network must not be able to select the client IP used by rate limits and access rules.
+
+## Application proxy peers
+
+The API and admin app also validate their immediate socket peer before accepting forwarding headers. `TRUSTED_APP_PROXIES` accepts comma-separated IPs, CIDRs or operator-controlled DNS names; loopback is always trusted. The multi-container compose explicitly trusts the `reverse-proxy` service. All-in-one uses loopback. DNS results are refreshed every minute; a lookup failure fails closed.
+
+When upgrading a custom deployment, set this to the actual nginx peer and set `TRUSTED_PROXIES` separately to any CDN or proxy upstream of nginx. Do not use entire private networks unless every host in that network is a trusted proxy.

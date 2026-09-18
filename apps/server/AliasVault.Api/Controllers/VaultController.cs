@@ -168,6 +168,23 @@ public class VaultController(ILogger<VaultController> logger, IAliasServerDbCont
         }
 
         // Retrieve latest vault of user which contains the current encryption settings.
+        if (!string.IsNullOrEmpty(model.EncryptionPublicKey))
+        {
+            if (!Cryptography.Server.Encryption.IsValidRsaPublicKey(model.EncryptionPublicKey))
+            {
+                return BadRequest("Invalid email encryption key.");
+            }
+
+            var primaryKey = await context.UserEncryptionKeys
+                .Where(k => k.UserId == user.Id && k.IsPrimary).Select(k => k.PublicKey).FirstOrDefaultAsync();
+            if (primaryKey is not null && !Cryptography.Server.Encryption.AreSamePublicKey(primaryKey, model.EncryptionPublicKey))
+            {
+                // Ordinary sync must never replace the trust anchor for incoming email.
+                return Conflict("The email encryption key cannot be changed during vault synchronization.");
+            }
+        }
+
+        // Retrieve latest vault of user which contains the current encryption settings.
         var latestVault = await context.Vaults
             .Where(x => x.UserId == user.Id)
             .OrderByDescending(x => x.RevisionNumber)
@@ -361,8 +378,13 @@ public class VaultController(ILogger<VaultController> logger, IAliasServerDbCont
         // Force revoke all user logged in sessions except current one.
         // This means that other clients which have not already updated to the new password will be logged out.
         // This ensures that all clients login again with the new password to refresh their encryption keys for future vault mutations.
-        var deviceIdentifier = AuthHelper.GenerateDeviceIdentifier(Request);
-        await context.AliasVaultUserRefreshTokens.Where(x => x.UserId == user.Id && x.DeviceIdentifier != deviceIdentifier).ExecuteDeleteAsync();
+        var currentSession = User.FindFirst("sid")?.Value;
+        if (Guid.TryParse(currentSession, out var currentSessionId))
+        {
+            await context.UserSessions.Where(s => s.UserId == user.Id && s.Id != currentSessionId)
+                .ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, timeProvider.UtcNow));
+            await context.AliasVaultUserRefreshTokens.Where(x => x.UserId == user.Id && x.SessionId != currentSessionId).ExecuteDeleteAsync();
+        }
 
         return Ok(new VaultUpdateResponse { Status = VaultStatus.Ok, NewRevisionNumber = newRevisionNumber });
     }
@@ -566,24 +588,18 @@ public class VaultController(ILogger<VaultController> logger, IAliasServerDbCont
     private async Task UpdateUserPublicKey(AliasServerDbContext context, string userId, string newPublicKey)
     {
         // Get all existing user public keys.
-        var publicKeyExists = await context.UserEncryptionKeys
-            .AnyAsync(x => x.UserId == userId && x.IsPrimary && x.PublicKey == newPublicKey);
+        var primaryKey = await context.UserEncryptionKeys
+            .FirstOrDefaultAsync(x => x.UserId == userId && x.IsPrimary);
 
         // If the public key already exists and is marked as primary (default), do nothing.
-        if (publicKeyExists)
+        if (primaryKey is not null)
         {
+            if (!Cryptography.Server.Encryption.AreSamePublicKey(primaryKey.PublicKey, newPublicKey))
+            {
+                throw new InvalidOperationException("Email key rotation requires a separate recovery operation.");
+            }
+
             return;
-        }
-
-        // Update all existing keys to not be primary.
-        var otherKeys = await context.UserEncryptionKeys
-            .Where(x => x.UserId == userId)
-            .ToListAsync();
-
-        foreach (var key in otherKeys)
-        {
-            key.IsPrimary = false;
-            key.UpdatedAt = timeProvider.UtcNow;
         }
 
         // Check if the new public key already exists but is not marked as primary.

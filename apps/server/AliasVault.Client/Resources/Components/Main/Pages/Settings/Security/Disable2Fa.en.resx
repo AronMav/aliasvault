@@ -110,4 +110,7 @@
     <value>Two-factor authentication is not enabled.</value>
     <comment>Error message when 2FA is not enabled</comment>
   </data>
+  <data name="VerificationCodeLabel" xml:space="preserve">
+    <value>Current authenticator code</value>
+  </data>
 </root>

@@ -39,6 +39,8 @@ services:
         restart: always
         env_file:
             - .env
+        environment:
+            TRUSTED_APP_PROXIES: reverse-proxy
         depends_on:
             postgres:
                 condition: service_healthy
@@ -54,6 +56,8 @@ services:
         restart: always
         env_file:
             - .env
+        environment:
+            TRUSTED_APP_PROXIES: reverse-proxy
         depends_on:
             postgres:
                 condition: service_healthy

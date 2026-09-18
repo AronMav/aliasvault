@@ -2,6 +2,7 @@
 <androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/pinUnlockContent"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="?android:attr/colorBackground"
@@ -220,11 +221,13 @@
             android:orientation="horizontal"
             android:gravity="center">
 
-            <!-- Empty space -->
+            <!-- Match button margins so all rows keep the same column widths. -->
             <View
                 android:layout_width="0dp"
                 android:layout_height="56dp"
-                android:layout_weight="1" />
+                android:layout_weight="1"
+                android:layout_marginStart="5dp"
+                android:layout_marginEnd="5dp" />
 
             <Button
                 android:id="@+id/btn0"

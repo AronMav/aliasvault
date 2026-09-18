@@ -4,6 +4,7 @@ import { View, StyleSheet } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import EncryptionUtility from '@/utils/EncryptionUtility';
+import { signMobileLoginApproval } from '@/utils/MobileLoginApproval';
 import { VaultUnlockHelper } from '@/utils/VaultUnlockHelper';
 
 import { useColors } from '@/hooks/useColorScheme';
@@ -15,6 +16,7 @@ import { ThemedContainer } from '@/components/themed/ThemedContainer';
 import { ThemedScrollView } from '@/components/themed/ThemedScrollView';
 import { ThemedText } from '@/components/themed/ThemedText';
 import { UsernameDisplay } from '@/components/ui/UsernameDisplay';
+import { useDb } from '@/context/DbContext';
 import { useDialog } from '@/context/DialogContext';
 import { useWebApi } from '@/context/WebApiContext';
 import NativeVaultManager from '@/specs/NativeVaultManager';
@@ -27,6 +29,7 @@ export default function MobileUnlockConfirmScreen() : React.ReactNode {
   const { t } = useTranslation();
   const { showAlert } = useDialog();
   const webApi = useWebApi();
+  const { sqliteClient } = useDb();
   const insets = useSafeAreaInsets();
   const { id, pk } = useLocalSearchParams<{ id: string; pk?: string }>();
   const [isProcessing, setIsProcessing] = useState(false);
@@ -85,7 +88,7 @@ export default function MobileUnlockConfirmScreen() : React.ReactNode {
   const handleMobileLogin = async (requestId: string, expectedPublicKeyHash?: string) : Promise<void> => {
     try {
       // Fetch the public key from server
-      const response = await webApi.authFetch<{ clientPublicKey: string }>(
+      const response = await webApi.authFetch<{ clientPublicKey: string; approvalPublicKey?: string }>(
         `auth/mobile-login/request/${requestId}`,
         { method: 'GET' }
       );
@@ -109,6 +112,16 @@ export default function MobileUnlockConfirmScreen() : React.ReactNode {
        */
       // Encrypt the decryption key using native module
       const encryptedKey = await NativeVaultManager.encryptDecryptionKeyForMobileLogin(publicKeyJWK);
+      const keys = await sqliteClient?.getAllEncryptionKeys();
+      const approvalParameters = response.approvalPublicKey ? JSON.parse(response.approvalPublicKey) : null;
+      const approvalKey = keys?.find(key => {
+        const candidate = JSON.parse(key.PublicKey);
+        return approvalParameters && candidate.n === approvalParameters.n && candidate.e === approvalParameters.e;
+      });
+      if (!approvalKey) {
+        throw new Error('No registered vault key is available to approve mobile login.');
+      }
+      const approvalSignature = await signMobileLoginApproval(requestId, publicKeyJWK, encryptedKey, approvalKey.PrivateKey);
 
       // Submit the encrypted key to the server
       await webApi.authFetch(
@@ -121,6 +134,7 @@ export default function MobileUnlockConfirmScreen() : React.ReactNode {
           body: JSON.stringify({
             requestId: requestId,
             encryptedDecryptionKey: encryptedKey,
+            approvalSignature,
           }),
         }
       );

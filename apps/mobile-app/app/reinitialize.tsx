@@ -156,6 +156,12 @@ export default function ReinitializeScreen() : React.ReactNode {
           }
         })();
 
+        /*
+         * The native unlock succeeded and migrations were checked. Update React state
+         * before tabs evaluate their access guard; background sync is not an unlock step.
+         */
+        dbContext.setDatabaseAvailable();
+
         // Navigate immediately
         navigation.navigateAfterUnlock();
       } catch (err) {

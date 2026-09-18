@@ -21,4 +21,7 @@ public class MobileLoginSubmitRequest
     /// Gets or sets the encrypted decryption key (base64 encoded).
     /// </summary>
     public required string EncryptedDecryptionKey { get; set; }
+
+    /// <summary>Gets or sets the vault-key signature approving this exact request and encrypted key.</summary>
+    public string? ApprovalSignature { get; set; }
 }

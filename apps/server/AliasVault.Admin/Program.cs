@@ -121,16 +121,20 @@ var app = builder.Build();
 // Configure forwarded headers
 var forwardedHeadersOptions = new ForwardedHeadersOptions
 {
-    ForwardedHeaders = ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedHost,
+    ForwardedHeaders = ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedFor,
     RequireHeaderSymmetry = false,
-    ForwardLimit = null,
+    ForwardLimit = 1,
     ForwardedProtoHeaderName = "X-Forwarded-Proto",
     ForwardedHostHeaderName = "X-Forwarded-Host",
     ForwardedForHeaderName = "X-Forwarded-For",
 };
 forwardedHeadersOptions.KnownIPNetworks.Clear();
 forwardedHeadersOptions.KnownProxies.Clear();
-app.UseForwardedHeaders(forwardedHeadersOptions);
+
+// Gate processing on the original socket peer before middleware rewrites it.
+app.UseWhen(
+    context => AliasVault.Auth.IpAddress.TrustedProxyUtility.IsTrusted(context.Connection.RemoteIpAddress),
+    branch => branch.UseForwardedHeaders(forwardedHeadersOptions));
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())

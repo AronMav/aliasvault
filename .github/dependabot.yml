@@ -7,7 +7,7 @@ version: 2
 updates:
     # Enable version updates for NuGet
     - package-ecosystem: "nuget"
-      directory: "/"
+      directory: "/apps/server"
       target-branch: "main"
       open-pull-requests-limit: 10
       labels:
@@ -50,22 +50,27 @@ updates:
           - dependency-name: "eslint"
             versions: [">=10"]
 
-    # Enable version updates for Docker
-    - package-ecosystem: "docker"
-      # Look for a `Dockerfile` in the `root` directory
-      directory: "/"
-      # Check for updates once a week
+    - package-ecosystem: "cargo"
+      directory: "/core/rust"
       schedule:
-          day: "monday"
-          time: "09:00"
           interval: "weekly"
 
-    # Enable version updates for Composer
-    - package-ecosystem: "composer"
-      # Look for a `Dockerfile` in the `root` directory
+    - package-ecosystem: "github-actions"
       directory: "/"
-      # Check for updates once a week
       schedule:
-          day: "monday"
-          time: "09:00"
+          interval: "weekly"
+
+    - package-ecosystem: "docker"
+      directories:
+          - "/dockerfiles/all-in-one"
+          - "/apps/server"
+          - "/apps/server/AliasVault.Api"
+          - "/apps/server/AliasVault.Admin"
+          - "/apps/server/AliasVault.Client"
+          - "/apps/server/Databases/AliasServerDb"
+          - "/apps/server/Services/AliasVault.SmtpService"
+          - "/apps/server/Services/AliasVault.TaskRunner"
+          - "/apps/server/Utilities/AliasVault.InstallCli"
+          - "/docs"
+      schedule:
           interval: "weekly"

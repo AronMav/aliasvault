@@ -8,7 +8,6 @@
 namespace AliasVault.Auth.IpAddress;
 
 using System.Net;
-using System.Net.Sockets;
 using Microsoft.AspNetCore.Http;
 
 /// <summary>
@@ -99,7 +98,7 @@ public static class IpAddressUtility
     /// Extracts the raw IP address string from the X-Real-IP header set by nginx, falling back to the connection's
     /// </summary>
     /// <remarks>
-    /// Only a reverse proxy reaching us over a private network may name the client. The bundled
+    /// Only an explicitly trusted reverse proxy may name the client. The bundled
     /// nginx sets X-Real-IP from the connection it accepted, so that value is trustworthy; the
     /// leftmost X-Forwarded-For entry is not, because nginx appends to whatever the client sent.
     /// Honouring it would let anyone pick their own address and walk past the IP block list and
@@ -109,12 +108,12 @@ public static class IpAddressUtility
     /// <returns>The raw IP address string, or null when it cannot be determined.</returns>
     private static string? ExtractRawIpString(HttpContext httpContext)
     {
-        // Only a reverse proxy reaching us over a private network may name the client
+        // Only an explicitly trusted reverse proxy may name the client
         // (see the remarks on ExtractRawIpString above). A request straight from the
         // internet that carries X-Real-IP must not get that header honoured: anyone
         // could set it and pick the address the block list and registration limits see.
         var peer = httpContext.Connection.RemoteIpAddress;
-        if (IsPrivatePeer(peer) && httpContext.Request.Headers.TryGetValue(RealIpHeader, out var realIp))
+        if (TrustedProxyUtility.IsTrusted(peer) && httpContext.Request.Headers.TryGetValue(RealIpHeader, out var realIp))
         {
             var lastEntry = realIp.ToString().Split(',')[^1].Trim();
 
@@ -133,46 +132,4 @@ public static class IpAddressUtility
         return httpContext.Connection.RemoteIpAddress?.ToString();
     }
 
-    /// <summary>
-    /// Determines whether the immediate peer sits on a private network, and may therefore be a
-    /// reverse proxy of ours rather than an arbitrary client from the internet.
-    /// </summary>
-    /// <param name="address">The address of the immediate peer.</param>
-    /// <returns>True when the peer address is loopback or in a private range.</returns>
-    private static bool IsPrivatePeer(IPAddress? address)
-    {
-        if (address is null)
-        {
-            return false;
-        }
-
-        if (IPAddress.IsLoopback(address))
-        {
-            return true;
-        }
-
-        if (address.IsIPv6LinkLocal || address.IsIPv6SiteLocal || address.IsIPv6UniqueLocal)
-        {
-            return true;
-        }
-
-        if (address.IsIPv4MappedToIPv6)
-        {
-            address = address.MapToIPv4();
-        }
-
-        if (address.AddressFamily != AddressFamily.InterNetwork)
-        {
-            return false;
-        }
-
-        var octets = address.GetAddressBytes();
-        return octets[0] switch
-        {
-            10 => true,
-            172 => octets[1] >= 16 && octets[1] <= 31,
-            192 => octets[1] == 168,
-            _ => false,
-        };
-    }
 }

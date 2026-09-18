@@ -41,9 +41,9 @@ public class SecurityController(IAliasServerDbContextFactory dbContextFactory, U
 
         await using var context = await dbContextFactory.CreateDbContextAsync();
 
-        var refreshTokenList = await context.AliasVaultUserRefreshTokens.Where(x => x.UserId == user.Id).Select(x => new RefreshTokenModel()
+        var refreshTokenList = await context.AliasVaultUserRefreshTokens.Where(x => x.UserId == user.Id && x.Session.RevokedAt == null).Select(x => new RefreshTokenModel()
             {
-                Id = x.Id,
+                Id = x.SessionId,
                 DeviceIdentifier = x.DeviceIdentifier,
                 ExpireDate = x.ExpireDate,
                 CreatedAt = x.CreatedAt,
@@ -52,7 +52,7 @@ public class SecurityController(IAliasServerDbContextFactory dbContextFactory, U
             .OrderByDescending(x => x.CreatedAt)
             .ToListAsync();
 
-        return Ok(refreshTokenList);
+        return Ok(refreshTokenList.DistinctBy(x => x.Id));
     }
 
     /// <summary>
@@ -72,14 +72,17 @@ public class SecurityController(IAliasServerDbContextFactory dbContextFactory, U
         await using var context = await dbContextFactory.CreateDbContextAsync();
 
         var refreshToken = await context.AliasVaultUserRefreshTokens
-            .FirstOrDefaultAsync(x => x.Id == id && x.UserId == user.Id);
+            .FirstOrDefaultAsync(x => (x.Id == id || x.SessionId == id) && x.UserId == user.Id);
 
         if (refreshToken == null)
         {
             return NotFound("Session not found or does not belong to the current user.");
         }
 
-        context.AliasVaultUserRefreshTokens.Remove(refreshToken);
+        await context.UserSessions.Where(s => s.UserId == user.Id && s.Id == refreshToken.SessionId)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, DateTime.UtcNow));
+        context.AliasVaultUserRefreshTokens.RemoveRange(
+            await context.AliasVaultUserRefreshTokens.Where(t => t.UserId == user.Id && t.SessionId == refreshToken.SessionId).ToListAsync());
         await context.SaveChangesAsync();
 
         return Ok();

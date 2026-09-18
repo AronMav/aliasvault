@@ -150,6 +150,12 @@ export default function Initialize() : React.ReactNode {
             }
           })();
 
+          /*
+           * Native PIN/password unlock bypasses DbContext.unlockVault. Publish the verified
+           * database state before entering tabs, even when sync is slow or offline.
+           */
+          dbContext.setDatabaseAvailable();
+
           // Navigate immediately - don't wait for sync
           navigation.navigateAfterUnlock();
         } catch (err) {

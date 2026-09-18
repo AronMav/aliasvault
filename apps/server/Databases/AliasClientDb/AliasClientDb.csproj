@@ -10,13 +10,11 @@
     <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
       <DocumentationFile>bin\Debug\net10.0\AliasClientDb.xml</DocumentationFile>
       <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-      <NoWarn>NU1903</NoWarn>
     </PropertyGroup>
 
     <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
       <DebugSymbols>true</DebugSymbols>
       <DocumentationFile>bin\Release\net10.0\AliasClientDb.xml</DocumentationFile>
-      <NoWarn>NU1903</NoWarn>
     </PropertyGroup>
 
     <ItemGroup>
@@ -27,6 +25,7 @@
       </PackageReference>
       <PackageReference Include="Microsoft.EntityFrameworkCore.Proxies" Version="10.0.10" />
       <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.10" />
+      <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
       <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.10" />
       <PackageReference Include="Microsoft.Extensions.Configuration.FileExtensions" Version="10.0.10" />
       <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.10" />

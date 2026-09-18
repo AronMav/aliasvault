@@ -35,6 +35,7 @@ public abstract class AuthenticatedRequestController(UserManager<AliasVaultUser>
     protected async Task<AliasVaultUser?> GetCurrentUserAsync()
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new InvalidOperationException("Unable to find user ID.");
-        return await userManager.FindByIdAsync(userId);
+        var user = await userManager.FindByIdAsync(userId);
+        return user is { Blocked: false } ? user : null;
     }
 }

@@ -104,4 +104,7 @@
     <value>Двухфакторная аутентификация не включена.</value>
     <comment>Error message when 2FA is not enabled</comment>
   </data>
+  <data name="VerificationCodeLabel" xml:space="preserve">
+    <value>Введите код из приложения-аутентификатора</value>
+  </data>
 </root>
