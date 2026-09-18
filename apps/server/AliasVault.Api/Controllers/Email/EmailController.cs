@@ -12,6 +12,7 @@ using AliasVault.Api.Controllers.Abstracts;
 using AliasVault.Auth.IpAddress;
 using AliasVault.Shared.Models.Enums;
 using AliasVault.Shared.Models.Spamok;
+using AliasVault.Shared.Models.WebApi;
 using AliasVault.Shared.Models.WebApi.Email;
 using Asp.Versioning;
 using Microsoft.AspNetCore.Identity;
