@@ -147,7 +147,12 @@ export default defineConfig({
       viteStaticCopy({
         targets: [
           {
-            src: path.resolve(CORE_DIR, 'client/wasm-extension/aliasvault_core_bg.wasm'),
+            /*
+             * The copy source has to be a forward-slash path: on Windows the plugin
+             * feeds this value to a glob, and a backslash-separated absolute path
+             * matches nothing, which fails the build with "No file was found to copy".
+             */
+            src: path.resolve(CORE_DIR, 'client/wasm-extension/aliasvault_core_bg.wasm').split(path.sep).join('/'),
             dest: 'src'
           }
         ]

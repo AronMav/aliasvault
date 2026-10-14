@@ -61,11 +61,11 @@ const buildArgs = args.length > 0 ? args : ["--browser-extension"];
 function buildEnv() {
   const env = { ...process.env };
   const llvmCandidates = [
-    env["ProgramFiles"] ? `${env["ProgramFiles"]}\LLVMin` : null,
-    env["ProgramFiles(x86)"] ? `${env["ProgramFiles(x86)"]}\LLVMin` : null,
+    env["ProgramFiles"] ? `${env["ProgramFiles"]}\\LLVM\\bin` : null,
+    env["ProgramFiles(x86)"] ? `${env["ProgramFiles(x86)"]}\\LLVM\\bin` : null,
   ].filter(Boolean);
   for (const bin of llvmCandidates) {
-    if (existsSync(`${bin}\clang.exe`)) {
+    if (existsSync(`${bin}\\clang.exe`)) {
       env["CC_wasm32_unknown_unknown"] = "clang";
       env["AR_wasm32_unknown_unknown"] = "llvm-ar";
       env["PATH"] = `${bin};${env["PATH"] ?? ""}`;
