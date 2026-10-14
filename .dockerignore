@@ -42,3 +42,10 @@ apps/web/dist
 apps/web/playwright-report
 apps/web/tests/test-results
 apps/web/public/appsettings.Development.json
+
+# Exclude Rust build output and local tooling (keeps the build context small)
+**/target
+.hermes
+tools/
+apps/browser-extension/dist
+apps/browser-extension/.output
