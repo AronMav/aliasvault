@@ -54,10 +54,12 @@ function check(name, parents = new Set()) {
   for (const via of vulnerability.via) {
     if (typeof via === 'string') {
       check(via, new Set([...parents, name]));
-    } else if (via.name === 'image-size' && mitigated.has(via.url)) {
-      if (Date.now() >= Date.parse(METIGATION_REVIEW_BY)) throw new Error('image-size mitigation review is overdue - see the comment above for the removal criteria');
-      if (!checkedMitigation) hardenImageSize(project, true);
-      checkedMitigation = true;
+    } else if (mitigated.has(via.url)) {
+      if (via.name === 'image-size') {
+        if (Date.now() >= Date.parse(METIGATION_REVIEW_BY)) throw new Error('image-size mitigation review is overdue - see the comment above for the removal criteria');
+        if (!checkedMitigation) hardenImageSize(project, true);
+        checkedMitigation = true;
+      }
     } else {
       failures.add(`${via.name}: ${via.url} (${via.severity})`);
     }
