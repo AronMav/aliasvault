@@ -506,27 +506,35 @@ build_android() {
     local toolchain="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$host_tag"
     local api_level=24  # Android 7.0 minimum
 
+    # The NDK ships its Windows compilers as .cmd wrappers; the extension-less
+    # files next to them are for POSIX hosts. Cargo cannot exec the extension-less
+    # form on Windows, so pick the suffix that matches the host.
+    local exe=""
+    if [ "$host_tag" = "windows-x86_64" ]; then
+        exe=".cmd"
+    fi
+
     # Build for each ABI
     # Note: Use only 'uniffi' feature for library builds (not uniffi-cli which includes heavy bindgen deps)
     echo -e "  Building for arm64-v8a..."
     AR="$toolchain/bin/llvm-ar" \
-    CC="$toolchain/bin/aarch64-linux-android${api_level}-clang" \
-    CXX="$toolchain/bin/aarch64-linux-android${api_level}-clang++" \
-    CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$toolchain/bin/aarch64-linux-android${api_level}-clang" \
+    CC="$toolchain/bin/aarch64-linux-android${api_level}-clang${exe}" \
+    CXX="$toolchain/bin/aarch64-linux-android${api_level}-clang++${exe}" \
+    CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$toolchain/bin/aarch64-linux-android${api_level}-clang${exe}" \
     cargo build $cargo_flags --target aarch64-linux-android --features uniffi
 
     echo -e "  Building for armeabi-v7a..."
     AR="$toolchain/bin/llvm-ar" \
-    CC="$toolchain/bin/armv7a-linux-androideabi${api_level}-clang" \
-    CXX="$toolchain/bin/armv7a-linux-androideabi${api_level}-clang++" \
-    CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$toolchain/bin/armv7a-linux-androideabi${api_level}-clang" \
+    CC="$toolchain/bin/armv7a-linux-androideabi${api_level}-clang${exe}" \
+    CXX="$toolchain/bin/armv7a-linux-androideabi${api_level}-clang++${exe}" \
+    CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$toolchain/bin/armv7a-linux-androideabi${api_level}-clang${exe}" \
     cargo build $cargo_flags --target armv7-linux-androideabi --features uniffi
 
     echo -e "  Building for x86_64..."
     AR="$toolchain/bin/llvm-ar" \
-    CC="$toolchain/bin/x86_64-linux-android${api_level}-clang" \
-    CXX="$toolchain/bin/x86_64-linux-android${api_level}-clang++" \
-    CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$toolchain/bin/x86_64-linux-android${api_level}-clang" \
+    CC="$toolchain/bin/x86_64-linux-android${api_level}-clang${exe}" \
+    CXX="$toolchain/bin/x86_64-linux-android${api_level}-clang++${exe}" \
+    CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$toolchain/bin/x86_64-linux-android${api_level}-clang${exe}" \
     cargo build $cargo_flags --target x86_64-linux-android --features uniffi
 
     # Copy libraries
@@ -570,12 +578,20 @@ build_android() {
     echo -e "    Building native library for bindgen..."
     cargo build --features uniffi --lib
 
+    # uniffi-bindgen is a native binary: under Git for Windows a POSIX-style
+    # out-dir reaches it unconverted (MSYS_NO_PATHCONV is a common global
+    # setting) and the bindings land in a phantom path instead of dist.
+    local bindgen_out="$ANDROID_DIR/kotlin"
+    if command -v cygpath >/dev/null 2>&1 && cygpath -w / >/dev/null 2>&1; then
+        bindgen_out="$(cygpath -w "$bindgen_out")"
+    fi
+
     # Generate bindings from native library
     cargo run --features uniffi-cli --bin uniffi-bindgen -- generate \
         "target/debug/$native_lib_name" \
         --language kotlin \
         --no-format \
-        --out-dir "$ANDROID_DIR/kotlin"
+        --out-dir "$bindgen_out"
 
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))
