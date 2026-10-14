@@ -31,6 +31,14 @@ function load(relative, dependencies, effects) {
       if (name === 'react/jsx-runtime') return { jsx: () => null, jsxs: () => null };
       if (name in dependencies) return dependencies[name];
       if (name.startsWith('@/components/')) return {};
+      // Screens grew hooks of their own (useForegroundSync in the tabs layout,
+      // called for its side effect only). A callable proxy that also answers
+      // every named import with a no-op keeps the VM double forward-compatible
+      // with hooks whose return value the screen does not use.
+      if (name.startsWith('@/hooks/')) {
+        const noop = () => undefined;
+        return new Proxy(noop, { get: () => noop });
+      }
       throw new Error(`Unexpected test dependency: ${name}`);
     },
     console: { log() {}, error() {} },
