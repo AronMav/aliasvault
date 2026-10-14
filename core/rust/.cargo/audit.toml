@@ -1,0 +1,14 @@
+# Local cargo-audit policy. Read by `cargo audit` when run from core/rust
+# (the security-checks workflow does exactly that).
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 (Marvin attack on the rsa crate): every stable 0.9.x
+    # release is affected, the fix only exists in the 0.10.0 release candidates
+    # (0.10.0-rc.*), and upstream tracks 0.9.10. The crate is used for
+    # RSA-OAEP-SHA256 *encryption* of account keys and manifest grants - public
+    # key operations - while the Marvin attack is a timing oracle on private-key
+    # operations. Moving the whole workspace to a release candidate of a crypto
+    # dependency is the bigger risk, so this stays ignored until rsa 0.10 ships
+    # stable. Revisit with every upstream sync.
+    "RUSTSEC-2023-0071",
+]

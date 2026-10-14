@@ -72,6 +72,14 @@ function buildEnv() {
       break;
     }
   }
+  // The local ~/.cargo/config.toml wraps rustc (and thereby the C compiler that
+  // cc-rs drives) in sccache. The sccache server does not inherit this environment,
+  // so it cannot find the LLVM clang named here and the SQLite wasm build fails.
+  // An explicit empty value disables the wrapper for this invocation only; the
+  // machine-wide cache keeps working for every other cargo build.
+  env["RUSTC_WRAPPER"] = "";
+  env["CARGO_BUILD_RUSTCWRAPPER"] = "";
+
   // The build script computes paths with POSIX pwd and hands them to wasm-pack and
   // cargo, which are native binaries. With MSYS path conversion disabled (a common
   // global setting: MSYS_NO_PATHCONV=1) those arrive as "/d/...", get resolved

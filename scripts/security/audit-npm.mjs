@@ -12,6 +12,25 @@ if (audit.error || !audit.vulnerabilities || audit.auditReportVersion !== 2) thr
 const mitigated = new Set([
   'https://github.com/advisories/GHSA-w3rx-r6r6-pgpr',
   'https://github.com/advisories/GHSA-5p2g-fcmc-qvqq',
+  /*
+   * braces GHSA-vfj7-8cjw-p6xm (published 2026-09/10): stack overflow through
+   * unbounded nesting in the expand parser. Every version up to and including
+   * 3.0.3 is affected and the maintainer rejected the report, so no patched
+   * release exists to move to. In these trees braces is reached only through
+   * dev tooling (vite/wxt/tailwind/micromatch chains), it does not ship in the
+   * extension bundle or any runtime code path that parses attacker input.
+   * Revisit when a patched braces (>3.0.3) is published.
+   */
+  'https://github.com/advisories/GHSA-vfj7-8cjw-p6xm',
+  /*
+   * node-forge GHSA-86w9-cpqp-85rv (published 2026-09): RSA PKCS#1 v1.5
+   * signature verification accepts malformed DigestAlgorithm sequences; no
+   * patched release exists (through 1.4.0, incomplete fix of CVE-2026-33894).
+   * In the mobile app node-forge comes with the Expo/Metro dev toolchain and
+   * never runs in a release build; signature verification with it is not part
+   * of any vault code path. Revisit when node-forge publishes a fix.
+   */
+  'https://github.com/advisories/GHSA-86w9-cpqp-85rv',
 ]);
 /*
  * image-size 2.0.3/2.0.4 (2026-09-14) contain the upstream fix for both advisories,

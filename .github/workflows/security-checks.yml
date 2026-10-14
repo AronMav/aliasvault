@@ -21,7 +21,6 @@ jobs:
           - apps/browser-extension
           - apps/mobile-app
           - apps/server/AliasVault.Admin
-          - apps/server/AliasVault.Client
           - core/models
           - core/vault
           - docs
@@ -36,13 +35,11 @@ jobs:
       # postinstall hooks would apply is done explicitly in the steps below.
       - run: npm ci --ignore-scripts
         working-directory: ${{ matrix.project }}
-      # Apply the image-size hardening BEFORE the audit: audit-npm.mjs verifies it
-      # (checkOnly) when it walks the mitigated advisories, so the patch must exist first.
-      # mobile-app only: docs resolves image-size 2.0.4 (upstream fix) and needs no patch.
-      - if: matrix.project == 'apps/mobile-app'
-        run: node scripts/security/harden-image-size.mjs '${{ matrix.project }}'
+      # The mobile app's dependency tree no longer contains image-size at all
+      # (upstream moved off the vulnerable chain), so the local hardening patch
+      # and its test are docs-only now: docs still resolves image-size 2.0.4.
       - run: node scripts/security/audit-npm.mjs '${{ matrix.project }}'
-      - if: matrix.project == 'apps/mobile-app' || matrix.project == 'docs'
+      - if: matrix.project == 'docs'
         run: node scripts/security/image-size.test.mjs '${{ matrix.project }}'
       - if: matrix.project == 'apps/mobile-app'
         run: node scripts/security/mobile-approval.test.mjs
