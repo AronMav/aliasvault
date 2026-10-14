@@ -5,12 +5,31 @@ import { View, Text, TextInput, TouchableOpacity, Modal, ScrollView, Pressable, 
 
 import { useColors } from '@/hooks/useColorScheme';
 
+import { ModalBackdrop } from '@/components/common/ModalBackdrop';
 import { ThemedText } from '@/components/themed/ThemedText';
 import { useDb } from '@/context/DbContext';
+
+/**
+ * The email domain lists the server published on the last sync.
+ */
+export type EmailDomains = {
+  publicEmailDomains: string[];
+  privateEmailDomains: string[];
+  hiddenPrivateEmailDomains: string[];
+};
+
+export const EMPTY_EMAIL_DOMAINS: EmailDomains = { publicEmailDomains: [], privateEmailDomains: [], hiddenPrivateEmailDomains: [] };
+
+/**
+ * Whether the domain is one the server serves aliases for.
+ */
+const isAliasDomain = (domain: string, domains: EmailDomains): boolean =>
+  domains.publicEmailDomains.includes(domain) || domains.privateEmailDomains.includes(domain) || domains.hiddenPrivateEmailDomains.includes(domain);
 
 type EmailDomainFieldProps = {
   value: string;
   onChange: (value: string) => void;
+  domains: EmailDomains;
   error?: string;
   required?: boolean;
   label: string;
@@ -31,6 +50,7 @@ type EmailDomainFieldProps = {
 export const EmailDomainField: React.FC<EmailDomainFieldProps> = ({
   value,
   onChange,
+  domains,
   error,
   required = false,
   label,
@@ -42,14 +62,15 @@ export const EmailDomainField: React.FC<EmailDomainFieldProps> = ({
   const { t } = useTranslation();
   const colors = useColors();
   const dbContext = useDb();
+  const { publicEmailDomains, privateEmailDomains, hiddenPrivateEmailDomains } = domains;
 
-  const [isCustomDomain, setIsCustomDomain] = useState(defaultEmailMode);
+  const [isCustomDomain, setIsCustomDomain] = useState(() => {
+    const at = value.indexOf('@');
+    return at >= 0 ? !isAliasDomain(value.substring(at + 1), domains) : defaultEmailMode;
+  });
   const [localPart, setLocalPart] = useState('');
   const [selectedDomain, setSelectedDomain] = useState('');
   const [isModalVisible, setIsModalVisible] = useState(false);
-  const [publicEmailDomains, setPublicEmailDomains] = useState<string[]>([]);
-  const [privateEmailDomains, setPrivateEmailDomains] = useState<string[]>([]);
-  const [hiddenPrivateEmailDomains, setHiddenPrivateEmailDomains] = useState<string[]>([]);
 
   /**
    * Tracks whether the user explicitly toggled mode via buttons.
@@ -57,29 +78,16 @@ export const EmailDomainField: React.FC<EmailDomainFieldProps> = ({
    */
   const modeToggledByUser = useRef(false);
 
-  // Get email domains from vault metadata
-  useEffect(() => {
-    /**
-     * Load email domains from vault metadata.
-     */
-    const loadDomains = async (): Promise<void> => {
-      try {
-        const metadata = await dbContext.getVaultMetadata();
-        setPublicEmailDomains(metadata?.publicEmailDomains ?? []);
-        setPrivateEmailDomains(metadata?.privateEmailDomains ?? []);
-        setHiddenPrivateEmailDomains(metadata?.hiddenPrivateEmailDomains ?? []);
-      } catch (err) {
-        console.error('Error loading email domains:', err);
-      }
-    };
-    loadDomains();
-  }, [dbContext]);
+  // Private domains that are available to the user to pick from
+  const selectablePrivateEmailDomains = useMemo(() => {
+    return privateEmailDomains.filter(domain => !hiddenPrivateEmailDomains.includes(domain));
+  }, [privateEmailDomains, hiddenPrivateEmailDomains]);
 
   // Check if private domains are available and valid
   const showPrivateDomains = useMemo(() => {
-    return privateEmailDomains.length > 0 &&
-           !(privateEmailDomains.length === 1 && (privateEmailDomains[0] === 'DISABLED.TLD' || privateEmailDomains[0] === ''));
-  }, [privateEmailDomains]);
+    return selectablePrivateEmailDomains.length > 0 &&
+           !(selectablePrivateEmailDomains.length === 1 && (selectablePrivateEmailDomains[0] === 'DISABLED.TLD' || selectablePrivateEmailDomains[0] === ''));
+  }, [selectablePrivateEmailDomains]);
 
   // Track previous defaultEmailMode to detect prop changes (e.g., when item type changes)
   const prevDefaultEmailModeRef = useRef(defaultEmailMode);
@@ -121,8 +129,8 @@ export const EmailDomainField: React.FC<EmailDomainFieldProps> = ({
           const userDefaultDomain = await dbContext.sqliteClient?.getDefaultEmailDomain();
           if (userDefaultDomain) {
             setSelectedDomain(userDefaultDomain);
-          } else if (showPrivateDomains && privateEmailDomains[0]) {
-            setSelectedDomain(privateEmailDomains[0]);
+          } else if (showPrivateDomains && selectablePrivateEmailDomains[0]) {
+            setSelectedDomain(selectablePrivateEmailDomains[0]);
           } else if (publicEmailDomains[0]) {
             setSelectedDomain(publicEmailDomains[0]);
           }
@@ -142,10 +150,7 @@ export const EmailDomainField: React.FC<EmailDomainFieldProps> = ({
        * hasn't explicitly toggled mode via the Email/Alias buttons.
        */
       if (!modeToggledByUser.current) {
-        const isKnownDomain = publicEmailDomains.includes(domain) ||
-                             privateEmailDomains.includes(domain) ||
-                             hiddenPrivateEmailDomains.includes(domain);
-        setIsCustomDomain(!isKnownDomain);
+        setIsCustomDomain(!isAliasDomain(domain, domains));
       }
     } else {
       setLocalPart(value);
@@ -158,8 +163,8 @@ export const EmailDomainField: React.FC<EmailDomainFieldProps> = ({
           const userDefaultDomain = await dbContext.sqliteClient?.getDefaultEmailDomain();
           if (userDefaultDomain) {
             setSelectedDomain(userDefaultDomain);
-          } else if (showPrivateDomains && privateEmailDomains[0]) {
-            setSelectedDomain(privateEmailDomains[0]);
+          } else if (showPrivateDomains && selectablePrivateEmailDomains[0]) {
+            setSelectedDomain(selectablePrivateEmailDomains[0]);
           } else if (publicEmailDomains[0]) {
             setSelectedDomain(publicEmailDomains[0]);
           }
@@ -167,35 +172,7 @@ export const EmailDomainField: React.FC<EmailDomainFieldProps> = ({
         loadDefaultDomain();
       }
     }
-  }, [value, publicEmailDomains, privateEmailDomains, hiddenPrivateEmailDomains, showPrivateDomains, selectedDomain, dbContext.sqliteClient]);
-
-  /*
-   * Re-check domain mode when domains finish loading.
-   * This handles the case where value was set before domains were loaded.
-   * Skip if the user has explicitly toggled mode via buttons.
-   */
-  useEffect(() => {
-    if (modeToggledByUser.current) {
-      return;
-    }
-
-    if (!value || !value.includes('@')) {
-      return;
-    }
-
-    const domain = value.split('@')[1];
-    if (!domain) {
-      return;
-    }
-
-    const isKnownDomain = publicEmailDomains.includes(domain) ||
-                         privateEmailDomains.includes(domain) ||
-                         hiddenPrivateEmailDomains.includes(domain);
-
-    if (isKnownDomain && isCustomDomain) {
-      setIsCustomDomain(false);
-    }
-  }, [publicEmailDomains, privateEmailDomains, hiddenPrivateEmailDomains, value, isCustomDomain]);
+  }, [value, domains, publicEmailDomains, selectablePrivateEmailDomains, showPrivateDomains, selectedDomain, dbContext.sqliteClient]);
 
   // Handle local part changes
   const handleLocalPartChange = useCallback((newText: string) => {
@@ -254,7 +231,7 @@ export const EmailDomainField: React.FC<EmailDomainFieldProps> = ({
       // Load the user's configured default domain
       const userDefaultDomain = await dbContext.sqliteClient?.getDefaultEmailDomain();
       const defaultDomain = userDefaultDomain ||
-        (showPrivateDomains && privateEmailDomains[0] ? privateEmailDomains[0] : publicEmailDomains[0]);
+        (showPrivateDomains && selectablePrivateEmailDomains[0] ? selectablePrivateEmailDomains[0] : publicEmailDomains[0]);
       if (defaultDomain) {
         setSelectedDomain(defaultDomain);
       }
@@ -265,7 +242,7 @@ export const EmailDomainField: React.FC<EmailDomainFieldProps> = ({
         onGenerateAlias();
       }
     }
-  }, [isCustomDomain, showPrivateDomains, publicEmailDomains, privateEmailDomains, onChange, onGenerateAlias, dbContext.sqliteClient]);
+  }, [isCustomDomain, showPrivateDomains, publicEmailDomains, selectablePrivateEmailDomains, onChange, onGenerateAlias, dbContext.sqliteClient]);
 
   const styles = StyleSheet.create({
     domainAt: {
@@ -418,7 +395,6 @@ export const EmailDomainField: React.FC<EmailDomainFieldProps> = ({
       paddingVertical: 12,
     },
     modalOverlay: {
-      backgroundColor: colors.modalBackground,
       flex: 1,
       justifyContent: 'flex-end',
     },
@@ -466,7 +442,7 @@ export const EmailDomainField: React.FC<EmailDomainFieldProps> = ({
               styles.switcherButton,
               isCustomDomain ? styles.switcherButtonActive : styles.switcherButtonInactive
             ]}>
-              {t('items.email')}
+              {t('common.email')}
             </Text>
           </TouchableOpacity>
           <Text style={styles.switcherSeparator}>/</Text>
@@ -478,7 +454,7 @@ export const EmailDomainField: React.FC<EmailDomainFieldProps> = ({
               styles.switcherButton,
               !isCustomDomain ? styles.switcherButtonActive : styles.switcherButtonInactive
             ]}>
-              {t('items.alias')}
+              {t('common.alias')}
             </Text>
           </TouchableOpacity>
           {required && <Text style={styles.requiredAsterisk}> *</Text>}
@@ -536,6 +512,7 @@ export const EmailDomainField: React.FC<EmailDomainFieldProps> = ({
         animationType="slide"
         onRequestClose={() => setIsModalVisible(false)}
       >
+        <ModalBackdrop />
         <Pressable style={styles.modalOverlay} onPress={() => setIsModalVisible(false)}>
           <Pressable style={styles.modalContent} onPress={(e) => e.stopPropagation()}>
             <View style={styles.modalHeader}>
@@ -565,7 +542,7 @@ export const EmailDomainField: React.FC<EmailDomainFieldProps> = ({
                     {t('items.privateEmailDescription')}
                   </Text>
                   <View style={styles.domainList}>
-                    {privateEmailDomains.filter(domain => !hiddenPrivateEmailDomains.includes(domain)).map((domain) => (
+                    {selectablePrivateEmailDomains.map((domain) => (
                       <TouchableOpacity
                         key={domain}
                         style={[

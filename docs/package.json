@@ -11,7 +11,7 @@
     "clear": "docusaurus clear",
     "swizzle": "docusaurus swizzle",
     "typecheck": "tsc",
-    "postinstall": "patch-package && node ../scripts/security/harden-image-size.mjs ."
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "@docusaurus/core": "^3.10.2",
@@ -32,11 +32,10 @@
     "typescript": "~5.6.2"
   },
   "overrides": {
-    "serialize-javascript": "^7.0.6",
+    "serialize-javascript": "^7.1.2",
     "uuid": "^11.1.1",
-    "js-yaml": "^4.2.0",
-    "http-proxy-middleware": "^3.0.7",
-    "qs": "^6.16.0"
+    "tinypool": "^2.2.0",
+    "postcss-selector-parser": "^7.1.6"
   },
   "browserslist": {
     "production": [
@@ -51,6 +50,6 @@
     ]
   },
   "engines": {
-    "node": ">=18.0"
+    "node": ">=20.0"
   }
 }

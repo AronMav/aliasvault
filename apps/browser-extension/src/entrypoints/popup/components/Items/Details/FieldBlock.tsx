@@ -1,17 +1,22 @@
+import { previousFieldValues } from '@aliasvault/client/utilities/FieldHistory';
+import { FieldTypes } from '@aliasvault/models/vault';
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { FormInputCopyToClipboard } from '@/entrypoints/popup/components/Forms/FormInputCopyToClipboard';
+import Icon from '@/entrypoints/popup/components/Icons/Icon';
 import { useDb } from '@/entrypoints/popup/context/DbContext';
 
-import type { ItemField } from '@/utils/dist/core/models/vault';
-import { FieldTypes } from '@/utils/dist/core/models/vault';
+import { logFailure } from '@/utils/Diagnostics';
 
 import FieldHistoryModal from './FieldHistoryModal';
+
+import type { ItemField } from '@aliasvault/models/vault';
 
 type FieldBlockProps = {
   field: ItemField;
   itemId?: string;
+  manifestId?: string;
   /** Whether to hide the label (useful when label is already shown as section header) */
   hideLabel?: boolean;
 }
@@ -84,7 +89,7 @@ const TextWithLinks: React.FC<{ text: string }> = ({ text }) => {
  * Dynamic field block component that renders based on field type.
  * Uses the same FormInputCopyToClipboard component as existing credential blocks.
  */
-const FieldBlock: React.FC<FieldBlockProps> = ({ field, itemId, hideLabel = false }) => {
+const FieldBlock: React.FC<FieldBlockProps> = ({ field, itemId, manifestId, hideLabel = false }) => {
   const { t } = useTranslation();
   const dbContext = useDb();
   const [showHistoryModal, setShowHistoryModal] = useState(false);
@@ -105,33 +110,16 @@ const FieldBlock: React.FC<FieldBlockProps> = ({ field, itemId, hideLabel = fals
    * 2. There is exactly 1 history record but its value differs from current value
    */
   useEffect(() => {
-    if (hasHistoryEnabled && itemId && dbContext?.sqliteClient) {
+    if (hasHistoryEnabled && itemId && manifestId && dbContext?.sqliteClient) {
       try {
-        const history = dbContext.sqliteClient.items.getFieldHistory(itemId, field.FieldKey);
+        const history = dbContext.sqliteClient.items.getFieldHistory({ Id: itemId, ManifestId: manifestId }, field.FieldKey);
 
-        if (history.length > 1) {
-          // Multiple history records - always show icon
-          setHistoryCount(history.length);
-        } else if (history.length === 1) {
-          // Single history record - check if value differs from current
-          const currentValues = Array.isArray(field.Value) ? field.Value : [field.Value];
-          const currentValueJson = JSON.stringify(currentValues.filter(v => v && v.trim() !== ''));
-          const historyValueJson = history[0].ValueSnapshot;
-
-          // Only show icon if history value differs from current value
-          if (currentValueJson !== historyValueJson) {
-            setHistoryCount(1);
-          } else {
-            setHistoryCount(0);
-          }
-        } else {
-          setHistoryCount(0);
-        }
+        setHistoryCount(previousFieldValues(history, field.Value).length);
       } catch (error) {
-        console.error('[FieldBlock] Error checking history:', error);
+        logFailure('[FieldBlock] Error checking history', error);
       }
     }
-  }, [hasHistoryEnabled, itemId, field.FieldKey, field.Value, dbContext?.sqliteClient]);
+  }, [hasHistoryEnabled, itemId, manifestId, field.FieldKey, field.Value, dbContext?.sqliteClient]);
 
   // Skip rendering if no value
   if (!field.Value || (typeof field.Value === 'string' && field.Value.trim() === '')) {
@@ -151,6 +139,8 @@ const FieldBlock: React.FC<FieldBlockProps> = ({ field, itemId, hideLabel = fals
             label={idx === 0 ? label : `${label} ${idx + 1}`}
             value={value}
             type={field.FieldType === FieldTypes.Password ? 'password' : 'text'}
+            itemId={itemId}
+            manifestId={manifestId}
           />
         ))}
       </div>
@@ -167,20 +157,20 @@ const FieldBlock: React.FC<FieldBlockProps> = ({ field, itemId, hideLabel = fals
       className="ml-2 inline-flex items-center text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 focus:outline-none"
       title={t('items.viewHistory')}
     >
-      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
-      </svg>
+      <Icon name="clock" className="h-4 w-4" />
     </button>
   ) : null;
 
   // History modal component
-  const HistoryModal = showHistoryModal && itemId ? (
+  const HistoryModal = showHistoryModal && itemId && manifestId ? (
     <FieldHistoryModal
       isOpen={showHistoryModal}
       onClose={() => setShowHistoryModal(false)}
       itemId={itemId}
+      manifestId={manifestId}
       fieldKey={field.FieldKey}
       fieldLabel={label}
+      currentValue={field.Value}
       fieldType={field.FieldType}
       isHidden={field.IsHidden}
     />
@@ -198,6 +188,8 @@ const FieldBlock: React.FC<FieldBlockProps> = ({ field, itemId, hideLabel = fals
             value={value}
             type="password"
             labelSuffix={HistoryButton}
+            itemId={itemId}
+            manifestId={manifestId}
           />
           {HistoryModal}
         </>
@@ -235,6 +227,8 @@ const FieldBlock: React.FC<FieldBlockProps> = ({ field, itemId, hideLabel = fals
             value={value}
             type="text"
             labelSuffix={HistoryButton}
+            itemId={itemId}
+            manifestId={manifestId}
           />
           {HistoryModal}
         </>

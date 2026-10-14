@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import net.aliasvault.app.utils.AppInfo
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -23,11 +24,14 @@ data class WebApiResponse(
     val body: String,
     /** The response headers as a map of key-value pairs. */
     val headers: Map<String, String>,
+    /** The body as raw bytes, set on a successful binary response when the request asked for raw bytes. */
+    val bodyBytes: ByteArray? = null,
 )
 
 /**
  * Native Kotlin WebAPI service for making HTTP requests to the AliasVault server.
  * This service handles authentication, token refresh, and all HTTP operations.
+ * Other platform implementations: WebApiService.ts (core/client), WebApiService.swift (iOS).
  */
 class WebApiService(private val context: Context) {
     companion object {
@@ -37,8 +41,13 @@ class WebApiService(private val context: Context) {
         private const val REFRESH_TOKEN_KEY = "refreshToken"
         private const val APP_INSTANCE_ID_KEY = "appInstanceId"
         private const val CUSTOM_PROXY_HEADERS_KEY = "customProxyHeaders"
-        private const val DEFAULT_API_URL = "https://app.aliasvault.com/api"
+        private const val DEFAULT_API_URL = AppInfo.DEFAULT_API_URL
         private const val SHARED_PREFS_NAME = "aliasvault"
+
+        /**
+         * Endpoints that name their own API version, e.g. "v1/Auth/login".
+         */
+        private val VERSIONED_ENDPOINT = Regex("^v[0-9]+/")
 
         /**
          * Connection-establishment timeout.
@@ -49,6 +58,11 @@ class WebApiService(private val context: Context) {
          * Read timeout. This is an inactivity timeout between successive reads.
          */
         private const val READ_TIMEOUT_MS = 15000
+
+        /**
+         * Read timeout of a request that carries vault ciphertext which can be larger and therefore can take longer to transfer.
+         */
+        private const val VAULT_TRANSFER_READ_TIMEOUT_MS = 180000
     }
 
     private val sharedPreferences = context.getSharedPreferences(SHARED_PREFS_NAME, Context.MODE_PRIVATE)
@@ -142,12 +156,26 @@ class WebApiService(private val context: Context) {
     }
 
     /**
-     * Get the base URL with /v1/ appended.
+     * Get the API root URL without a trailing slash.
+     */
+    private fun getRootUrl(): String {
+        return getApiUrl().trimEnd('/')
+    }
+
+    /**
+     * Get the base URL with /v2/ appended.
      */
     private fun getBaseUrl(): String {
-        val apiUrl = getApiUrl()
-        val trimmedUrl = apiUrl.trimEnd('/')
-        return "$trimmedUrl/v1/"
+        return "${getRootUrl()}/v2/"
+    }
+
+    /**
+     * Turn an endpoint into a full URL. If the endpoint starts with "v1/" or "v2/" etc,
+     * resolve it against the API root, otherwise resolve it against the base URL.
+     */
+    private fun resolveUrl(endpoint: String): String {
+        val path = endpoint.trimStart('/')
+        return if (VERSIONED_ENDPOINT.containsMatchIn(path)) "${getRootUrl()}/$path" else "${getBaseUrl()}$path"
     }
 
     // MARK: - Token Management
@@ -190,13 +218,20 @@ class WebApiService(private val context: Context) {
 
     /**
      * Execute a WebAPI request with support for authentication and token refresh.
+     * Pass largeTransfer for a request that carries vault ciphertext, which gets the longer transfer timeout.
+     * Pass bodyBytes to send raw bytes instead of the text body, and rawBinaryResponse to get a binary
+     * response as `bodyBytes` instead of as base64 `body` text.
      */
+    @Suppress("LongParameterList") // One argument per part of the request the callers vary
     suspend fun executeRequest(
         method: String,
         endpoint: String,
         body: String?,
         headers: Map<String, String>,
         requiresAuth: Boolean,
+        largeTransfer: Boolean = false,
+        bodyBytes: ByteArray? = null,
+        rawBinaryResponse: Boolean = false,
     ): WebApiResponse = withContext(Dispatchers.IO) {
         val requestHeaders = headers.toMutableMap()
 
@@ -217,6 +252,9 @@ class WebApiService(private val context: Context) {
             endpoint = endpoint,
             body = body,
             headers = requestHeaders,
+            largeTransfer = largeTransfer,
+            bodyBytes = bodyBytes,
+            rawBinaryResponse = rawBinaryResponse,
         )
 
         // Handle 401 Unauthorized - attempt token refresh
@@ -236,6 +274,9 @@ class WebApiService(private val context: Context) {
                     endpoint = endpoint,
                     body = body,
                     headers = retryHeaders,
+                    largeTransfer = largeTransfer,
+                    bodyBytes = bodyBytes,
+                    rawBinaryResponse = rawBinaryResponse,
                 )
 
                 return@withContext retryResponse
@@ -252,14 +293,17 @@ class WebApiService(private val context: Context) {
     /**
      * Execute a raw HTTP request without token refresh logic.
      */
+    @Suppress("LongParameterList") // One argument per part of the request the callers vary
     private suspend fun executeRawRequest(
         method: String,
         endpoint: String,
         body: String?,
         headers: Map<String, String>,
+        largeTransfer: Boolean = false,
+        bodyBytes: ByteArray? = null,
+        rawBinaryResponse: Boolean = false,
     ): WebApiResponse = withContext(Dispatchers.IO) {
-        val baseUrl = getBaseUrl()
-        val urlString = "$baseUrl$endpoint"
+        val urlString = resolveUrl(endpoint)
 
         var connection: HttpURLConnection? = null
         try {
@@ -267,7 +311,7 @@ class WebApiService(private val context: Context) {
             connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = method.uppercase()
             connection.connectTimeout = CONNECT_TIMEOUT_MS
-            connection.readTimeout = READ_TIMEOUT_MS
+            connection.readTimeout = if (largeTransfer) VAULT_TRANSFER_READ_TIMEOUT_MS else READ_TIMEOUT_MS
             connection.doInput = true
 
             // Add any custom proxy headers
@@ -280,7 +324,12 @@ class WebApiService(private val context: Context) {
             }
 
             // Set body if present
-            if (body != null && (method.uppercase() == "POST" || method.uppercase() == "PUT" || method.uppercase() == "PATCH")) {
+            val sendsBody = method.uppercase() == "POST" || method.uppercase() == "PUT" || method.uppercase() == "PATCH"
+            if (bodyBytes != null && sendsBody) {
+                connection.doOutput = true
+                connection.setFixedLengthStreamingMode(bodyBytes.size)
+                connection.outputStream.use { it.write(bodyBytes) }
+            } else if (body != null && sendsBody) {
                 connection.doOutput = true
                 OutputStreamWriter(connection.outputStream).use { writer ->
                     writer.write(body)
@@ -292,16 +341,20 @@ class WebApiService(private val context: Context) {
             val statusCode = connection.responseCode
 
             // Read response body
+            var responseBytes: ByteArray? = null
             val responseBody = try {
                 val acceptHeader = headers.entries.firstOrNull { it.key.equals("Accept", ignoreCase = true) }?.value ?: ""
                 val isBinary = acceptHeader.contains("application/octet-stream", ignoreCase = true)
 
                 if (statusCode in 200..299) {
-                    if (isBinary) {
+                    if (isBinary && rawBinaryResponse) {
+                        // The caller takes the bytes from bodyBytes
+                        responseBytes = connection.inputStream.use { it.readBytes() }
+                        ""
+                    } else if (isBinary) {
                         // Read binary data and encode as base64
                         connection.inputStream.use { inputStream ->
-                            val bytes = inputStream.readBytes()
-                            android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                            android.util.Base64.encodeToString(inputStream.readBytes(), android.util.Base64.NO_WRAP)
                         }
                     } else {
                         // Read text data
@@ -331,6 +384,7 @@ class WebApiService(private val context: Context) {
                 statusCode = statusCode,
                 body = responseBody,
                 headers = responseHeaders,
+                bodyBytes = responseBytes,
             )
         } catch (e: Exception) {
             Log.e(TAG, "Error executing request", e)
@@ -341,7 +395,9 @@ class WebApiService(private val context: Context) {
     }
 
     /**
-     * Refresh the access token using the refresh token.
+     * Refresh the access token using the refresh token. Returns null when the server refused the refresh (the
+     * session is over); a refresh that never reached the server throws, so the caller can go offline instead of
+     * treating a network blip as an expired session.
      */
     private suspend fun refreshAccessToken(): String? = withContext(Dispatchers.IO) {
         val refreshToken = getRefreshToken()
@@ -352,48 +408,47 @@ class WebApiService(private val context: Context) {
             return@withContext null
         }
 
-        try {
-            // Prepare refresh request body
-            val refreshBody = JSONObject()
-            refreshBody.put("token", accessToken)
-            refreshBody.put("refreshToken", refreshToken)
+        // Prepare refresh request body
+        val refreshBody = JSONObject()
+        refreshBody.put("token", accessToken)
+        refreshBody.put("refreshToken", refreshToken)
 
-            val headers = mutableMapOf(
-                "Content-Type" to "application/json",
-                "X-Ignore-Failure" to "true",
-            )
-            headers["X-AliasVault-Client"] = getClientVersionHeader()
-            headers["X-AliasVault-AppInstanceId"] = appInstanceId
+        val headers = mutableMapOf(
+            "Content-Type" to "application/json",
+            "X-Ignore-Failure" to "true",
+        )
+        headers["X-AliasVault-Client"] = getClientVersionHeader()
+        headers["X-AliasVault-AppInstanceId"] = appInstanceId
 
-            val response = executeRawRequest(
-                method = "POST",
-                endpoint = "Auth/refresh",
-                body = refreshBody.toString(),
-                headers = headers,
-            )
+        val response = executeRawRequest(
+            method = "POST",
+            endpoint = "Auth/refresh",
+            body = refreshBody.toString(),
+            headers = headers,
+        )
 
-            if (response.statusCode != 200) {
-                Log.w(TAG, "Token refresh failed with status ${response.statusCode}")
-                return@withContext null
-            }
-
-            // Parse the response JSON
-            val json = JSONObject(response.body)
-            val newToken = if (json.has("token")) json.getString("token") else null
-            val newRefreshToken = if (json.has("refreshToken")) json.getString("refreshToken") else null
-
-            if (newToken == null || newRefreshToken == null) {
-                Log.w(TAG, "Token refresh response missing tokens")
-                return@withContext null
-            }
-
-            // Update stored tokens
-            setAuthTokens(accessToken = newToken, refreshToken = newRefreshToken)
-            newToken
-        } catch (e: Exception) {
-            Log.e(TAG, "Token refresh failed", e)
-            null
+        if (response.statusCode == 401 || response.statusCode == 403) {
+            Log.w(TAG, "Token refresh refused with status ${response.statusCode}")
+            return@withContext null
         }
+        if (response.statusCode != 200) {
+            Log.w(TAG, "Token refresh failed with status ${response.statusCode}, treating the server as unreachable")
+            throw java.io.IOException("Token refresh failed with status ${response.statusCode}")
+        }
+
+        // Parse the response JSON
+        val json = JSONObject(response.body)
+        val newToken = if (json.has("token")) json.getString("token") else null
+        val newRefreshToken = if (json.has("refreshToken")) json.getString("refreshToken") else null
+
+        if (newToken == null || newRefreshToken == null) {
+            Log.w(TAG, "Token refresh response missing tokens")
+            return@withContext null
+        }
+
+        // Update stored tokens
+        setAuthTokens(accessToken = newToken, refreshToken = newRefreshToken)
+        newToken
     }
 
     // MARK: - Helper Methods
@@ -420,11 +475,14 @@ class WebApiService(private val context: Context) {
      */
     suspend fun extractFavicon(url: String): ByteArray? = withContext(Dispatchers.IO) {
         try {
+            val requestBody = JSONObject()
+            requestBody.put("url", url)
+
             val response = executeRequest(
-                method = "GET",
-                endpoint = "Favicon/Extract?url=$url",
-                body = null,
-                headers = emptyMap(),
+                method = "POST",
+                endpoint = "Favicon/Extract",
+                body = requestBody.toString(),
+                headers = mapOf("Content-Type" to "application/json"),
                 requiresAuth = true,
             )
 

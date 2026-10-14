@@ -1,15 +1,18 @@
+import { sliderToLength, lengthToSlider, SLIDER_MIN, SLIDER_MAX } from '@aliasvault/client/utilities/PasswordLengthSlider';
+import { getLanguageInfo, resolveDefaultLanguage } from '@aliasvault/i18n/languages';
+import { MIN_WORD_COUNT, MAX_WORD_COUNT, DEFAULT_WORD_COUNT } from '@aliasvault/models/defaults';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { MIN_WORD_COUNT, MAX_WORD_COUNT, DEFAULT_WORD_COUNT, getLanguageInfo, resolveDefaultLanguage } from '@/utils/dist/core/models/defaults';
+import Icon from '@/entrypoints/popup/components/Icons/Icon';
+
 import type {
   PasswordSettings,
   PasswordGeneratorType,
   DicewareCapitalization,
   DicewareSeparator,
   DicewareSalt
-} from '@/utils/dist/core/models/vault';
-import { sliderToLength, lengthToSlider, SLIDER_MIN, SLIDER_MAX } from '@/utils/PasswordLengthSlider';
+} from '@aliasvault/models/vault';
 
 const CAPITALIZATION_OPTIONS: DicewareCapitalization[] = ['Lowercase', 'TitleCase', 'Uppercase'];
 const SEPARATOR_OPTIONS: DicewareSeparator[] = ['Dash', 'Space', 'Underscore', 'Dot', 'None'];
@@ -131,7 +134,7 @@ const PasswordConfigForm: React.FC<IPasswordConfigFormProps> = ({
                   : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
               }`}
             >
-              {mode === 'basic' ? t('items.passwordTypeBasic') : t('items.passwordTypeDiceware')}
+              {mode === 'basic' ? t('common.password') : t('items.passwordTypeDiceware')}
             </button>
           );
         })}
@@ -153,9 +156,7 @@ const PasswordConfigForm: React.FC<IPasswordConfigFormProps> = ({
               className="px-3 py-2 text-sm text-gray-500 dark:text-white bg-gray-200 hover:bg-gray-300 focus:ring-4 focus:outline-none focus:ring-gray-300 font-medium rounded-lg dark:bg-gray-600 dark:hover:bg-gray-700 dark:focus:ring-gray-800"
               title={t('common.generate')}
             >
-              <svg className="w-4 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-              </svg>
+              <Icon name="refresh" className="w-4 h-6" />
             </button>
           </div>
         </div>
@@ -195,7 +196,7 @@ const PasswordConfigForm: React.FC<IPasswordConfigFormProps> = ({
                     ? 'bg-primary-600 text-white hover:bg-primary-700'
                     : 'bg-gray-200 text-gray-700 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600'
                 }`}
-                title={t('items.includeLowercase')}
+                title={t('items.includeLowercaseLetters')}
               >
                 <span className="font-mono text-base">a-z</span>
               </button>
@@ -209,7 +210,7 @@ const PasswordConfigForm: React.FC<IPasswordConfigFormProps> = ({
                     ? 'bg-primary-600 text-white hover:bg-primary-700'
                     : 'bg-gray-200 text-gray-700 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600'
                 }`}
-                title={t('items.includeUppercase')}
+                title={t('items.includeUppercaseLetters')}
               >
                 <span className="font-mono text-base">A-Z</span>
               </button>
@@ -223,7 +224,7 @@ const PasswordConfigForm: React.FC<IPasswordConfigFormProps> = ({
                     ? 'bg-primary-600 text-white hover:bg-primary-700'
                     : 'bg-gray-200 text-gray-700 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600'
                 }`}
-                title={t('items.includeNumbers')}
+                title={t('items.includeDigits')}
               >
                 <span className="font-mono text-base">0-9</span>
               </button>
@@ -237,7 +238,7 @@ const PasswordConfigForm: React.FC<IPasswordConfigFormProps> = ({
                     ? 'bg-primary-600 text-white hover:bg-primary-700'
                     : 'bg-gray-200 text-gray-700 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600'
                 }`}
-                title={t('items.includeSpecialChars')}
+                title={t('items.includeSpecialCharacters')}
               >
                 <span className="font-mono text-base">!@#</span>
               </button>
@@ -253,8 +254,25 @@ const PasswordConfigForm: React.FC<IPasswordConfigFormProps> = ({
                 className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded dark:bg-gray-700 dark:border-gray-600"
               />
               <label htmlFor="use-non-ambiguous" className="ml-2 text-sm text-gray-700 dark:text-gray-300">
-                {t('items.avoidAmbiguousChars')}
+                {t('items.avoidAmbiguousCharacters')}
               </label>
+            </div>
+
+            {/* Excluded characters */}
+            <div>
+              <label htmlFor="excluded-chars" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                {t('items.excludedCharsLabel')}
+              </label>
+              <input
+                id="excluded-chars"
+                type="text"
+                autoComplete="off"
+                spellCheck={false}
+                value={settings.ExcludedChars ?? ''}
+                onChange={(e) => onSettingChange('ExcludedChars', e.target.value)}
+                className="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md text-gray-900 dark:text-white font-mono focus:ring-primary-500 focus:border-primary-500"
+              />
+              <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{t('items.excludedCharsDescription')}</p>
             </div>
           </div>
         )}

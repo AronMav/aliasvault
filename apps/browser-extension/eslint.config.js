@@ -12,7 +12,6 @@ export default [
         ignores: [
             "dist/**",
             "node_modules/**",
-            "src/utils/dist/**",
         ]
     },
     js.configs.recommended,
@@ -67,7 +66,8 @@ export default [
                 "ignoreComments": false
             }],
             "no-multiple-empty-lines": ["error", { "max": 1, "maxEOF": 1, "maxBOF": 0 }],
-            "no-console": ["error", { allow: ["warn", "error", "info", "debug"] }],
+            // Log through the Diagnostics utility helper instead of raw console.error.
+            "no-console": ["error", { allow: ["warn", "info", "debug"] }],
             "jsdoc/require-jsdoc": ["error", {
                 "require": {
                     "FunctionDeclaration": true,
@@ -159,6 +159,40 @@ export default [
             react: {
                 version: "detect",
             },
+        },
+    },
+    {
+        // Brand style enforcement.
+        files: ["src/**/*.{ts,tsx}"],
+        ignores: ["src/entrypoints/popup/components/Icons/Icon.tsx", "src/entrypoints/popup/components/Logo.tsx", "src/utils/constants/logo.ts", "src/**/__tests__/**"],
+        rules: {
+            "no-restricted-syntax": ["error",
+                { selector: "JSXOpeningElement[name.name='svg']", message: "Use the Icon component with an icon from core/assets/icons instead of inline SVG." },
+                { selector: "TemplateElement[value.raw=/<svg/]", message: "Use uiIconSvg() from @aliasvault/models/icons instead of inline SVG markup." },
+                { selector: "Literal[value=/<svg/]", message: "Use uiIconSvg() from @aliasvault/models/icons instead of inline SVG markup." },
+                { selector: "Literal[value=/(orange|indigo)-[0-9]/]", message: "Use the primary-* brand colors (core/assets/colors) instead of Tailwind orange or indigo; use amber for warnings." },
+                { selector: "TemplateElement[value.raw=/(orange|indigo)-[0-9]/]", message: "Use the primary-* brand colors (core/assets/colors) instead of Tailwind orange or indigo; use amber for warnings." },
+            ],
+        },
+    },
+    {
+        // Content scripts have no storage.local access (setAccessLevel in ContentSettingsHandler), these calls need to go through the background.
+        files: ["src/entrypoints/content.ts", "src/entrypoints/contentScript/**/*.ts", "src/utils/TotpClipboard.ts"],
+        ignores: ["src/**/__tests__/**"],
+        rules: {
+            "no-restricted-imports": ["error", {
+                paths: [
+                    { name: "#imports", importNames: ["storage"], message: "Content scripts cannot use storage.local; add a background message (see ContentSettingsHandler)." },
+                    { name: "@/utils/LocalPreferencesService", message: "Content scripts cannot use storage.local; use GET_CONTENT_SETTINGS or add a background message." },
+                ],
+            }],
+        },
+    },
+    {
+        // The dev-only trace channel is the only module allowed to reach the console directly.
+        files: ["src/utils/devLogger/DevLogger.ts"],
+        rules: {
+            "no-console": "off",
         },
     },
     {

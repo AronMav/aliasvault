@@ -4,7 +4,7 @@ import { router } from 'expo-router';
 import { useAuth } from '@/context/AuthContext';
 import { useWebApi } from '@/context/WebApiContext';
 
-import { logoutEventEmitter } from '@/events/LogoutEventEmitter';
+import { logoutEventEmitter } from '@aliasvault/client/api/LogoutEventEmitter';
 
 import i18n from '@/i18n';
 
@@ -23,7 +23,7 @@ type AppContextType = {
   setAutoLockTimeout: (timeout: number) => Promise<void>;
   setOfflineMode: (isOffline: boolean) => void;
   verifyPassword: (password: string) => Promise<string | null>;
-  getEncryptionKeyDerivationParams: () => Promise<{ salt: string; encryptionType: string; encryptionSettings: string } | null>;
+  getUnlockKeyDerivationParams: () => Promise<{ salt: string; encryptionType: string; encryptionSettings: string } | null>;
   // Autofill methods
   shouldShowAutofillReminder: boolean;
   markAutofillConfigured: () => Promise<void>;
@@ -43,7 +43,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   /**
    * Logout the user (forced logout path - e.g., 401, token revocation).
-   * Uses clearAuthForced to preserve vault data for potential RPO recovery.
+   * Uses clearAuthForced, which clears the vault but keeps the username for the login prefill.
    * Prevents recursive logout calls by tracking logout state.
    */
   const logout = useCallback(async (errorMessage?: string): Promise<void> => {
@@ -55,7 +55,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       isLoggingOutRef.current = true;
       await webApi.revokeTokens();
-      // Use forced logout to preserve vault data for recovery
+      // Use forced logout, which keeps the username for the login prefill
       await auth.clearAuthForced(errorMessage);
     } catch (error) {
       console.error('Error during logout:', error);
@@ -68,8 +68,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    * Subscribe to logout events from WebApiService.
    */
   useEffect(() => {
-    const unsubscribe = logoutEventEmitter.subscribe(async (errorKey: string) => {
-      await logout(i18n.t(errorKey));
+    const unsubscribe = logoutEventEmitter.subscribe(async (messageKey) => {
+      await logout(i18n.t(messageKey));
     });
 
     return unsubscribe;
@@ -108,7 +108,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setAutoLockTimeout: auth.setAutoLockTimeout,
     setOfflineMode: auth.setOfflineMode,
     verifyPassword: auth.verifyPassword,
-    getEncryptionKeyDerivationParams: auth.getEncryptionKeyDerivationParams,
+    getUnlockKeyDerivationParams: auth.getUnlockKeyDerivationParams,
     markAutofillConfigured: auth.markAutofillConfigured,
   }), [
     auth.isInitialized,
@@ -124,7 +124,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     auth.setAutoLockTimeout,
     auth.setOfflineMode,
     auth.verifyPassword,
-    auth.getEncryptionKeyDerivationParams,
+    auth.getUnlockKeyDerivationParams,
     auth.markAutofillConfigured,
     logout
   ]);

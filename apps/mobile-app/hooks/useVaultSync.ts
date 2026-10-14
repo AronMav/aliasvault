@@ -6,14 +6,17 @@ import { useTranslation } from '@/hooks/useTranslation';
 import { useApp } from '@/context/AppContext';
 import { useDb } from '@/context/DbContext';
 import NativeVaultManager from '@/specs/NativeVaultManager';
-import { VaultVersionIncompatibleError } from '@/utils/types/errors/VaultVersionIncompatibleError';
+import emitter from '@/utils/EventEmitter';
+import { VaultVersionIncompatibleError } from '@aliasvault/client/api/errors/VaultVersionIncompatibleError';
+import { hasUserVisibleScope, type VaultMutationScope } from '@aliasvault/client/sync/VaultMutationScope';
 import {
   AppErrorCode,
   getAppErrorCode,
   extractErrorCode,
   formatErrorWithCode,
   getErrorTranslationKey,
-} from '@/utils/types/errors/AppErrorCodes';
+  isErrorCode,
+} from '@aliasvault/client/api/errors/AppErrorCodes';
 
 /**
  * Sync state tracking for race detection and offline support.
@@ -97,7 +100,8 @@ export const useVaultSync = (): {
 
       // Handle logout requirement from status check
       if (statusCheck.requiresLogout) {
-        const errorMessage = statusCheck.errorKey ? t(getErrorTranslationKey(extractErrorCode(statusCheck.errorKey) ?? AppErrorCode.UNKNOWN_ERROR)) : undefined;
+        const errorCode = statusCheck.errorCode && isErrorCode(statusCheck.errorCode) ? statusCheck.errorCode : AppErrorCode.UNKNOWN_ERROR;
+        const errorMessage = statusCheck.errorCode ? t(getErrorTranslationKey(errorCode)) : undefined;
         await app.logout(errorMessage);
         return false;
       }
@@ -116,7 +120,8 @@ export const useVaultSync = (): {
       // Show appropriate indicator based on what sync will do
       if (statusCheck.hasNewerVault) {
         dbContext.setIsSyncing(true);
-      } else if (statusCheck.hasDirtyChanges && !statusCheck.isOffline) {
+      } else if (statusCheck.hasDirtyChanges && !statusCheck.isOffline && hasUserVisibleScope((await NativeVaultManager.getSyncState()).dirtyScopes as VaultMutationScope[])) {
+        // Silent scopes (usage statistics) upload without the indicator.
         dbContext.setIsUploading(true);
       }
 
@@ -132,9 +137,10 @@ export const useVaultSync = (): {
       if (!result.success) {
         // Check for specific error conditions
         if (result.error) {
+          console.error(`[useVaultSync] Sync failed (${result.error}): ${result.errorMessage ?? 'no detail'}`);
           const errorCode = extractErrorCode(result.error) ?? getAppErrorCode(result.error);
           if (errorCode) {
-            return await handleSyncError(result.error, errorCode, app, dbContext, t, onError, onOffline);
+            return await handleSyncError(result.errorMessage, errorCode, app, dbContext, t, onError, onOffline);
           }
         }
 
@@ -207,9 +213,9 @@ export const useVaultSync = (): {
         }
 
         // Extract the specific error code from native layer if available
-        // This preserves detailed error info (E-501 to E-511) for debugging
+        // This preserves detailed error info for debugging
         const nativeErrorCode = getAppErrorCode(err);
-        const errorCode = nativeErrorCode ?? AppErrorCode.NATIVE_UNLOCK_FAILED;
+        const errorCode = nativeErrorCode ?? AppErrorCode.VAULT_UNLOCK_FAILED;
 
         console.error(`Failed to unlock vault (${errorCode}):`, err);
 
@@ -250,6 +256,7 @@ export const useVaultSync = (): {
     } finally {
       syncInProgressRef.current = false;
       await dbContext.refreshSyncState();
+      emitter.emit('vaultSynced');
       dbContext.setIsSyncing(false);
       dbContext.setIsUploading(false);
     }
@@ -264,11 +271,9 @@ export const useVaultSync = (): {
  * For critical errors requiring logout (auth, version), we ALWAYS use app.logout(message)
  * which shows a native Alert.alert that persists through navigation on both platforms.
  * The onError callback is only used for non-critical errors that don't require logout.
- *
- * Error codes are included in messages to help users report issues for debugging.
  */
 async function handleSyncError(
-  _err: unknown,
+  detail: unknown,
   errorCode: AppErrorCode,
   app: ReturnType<typeof useApp>,
   dbContext: ReturnType<typeof useDb>,
@@ -301,10 +306,8 @@ async function handleSyncError(
       await app.logout(messageWithCode);
       return false;
 
-    // Network errors - set offline mode, don't logout
-    case AppErrorCode.SERVER_UNAVAILABLE:
+    // Server unreachable: offline mode, don't logout.
     case AppErrorCode.NETWORK_ERROR:
-    case AppErrorCode.TIMEOUT:
       await dbContext.setIsOffline(true);
       onOffline?.();
       // Return true to continue with local vault
@@ -312,7 +315,15 @@ async function handleSyncError(
 
     // All other errors - show error with code for debugging
     default:
-      onError?.(messageWithCode);
+      onError?.(withTechnicalDetail(messageWithCode, detail));
       return false;
   }
+}
+
+/**
+ * Append the technical detail of a failure to its translated message if available.
+ */
+function withTechnicalDetail(message: string, detail: unknown): string {
+  const text = typeof detail === 'string' ? detail : detail instanceof Error ? detail.message : '';
+  return text && text !== message ? `${message}\n${text}` : message;
 }

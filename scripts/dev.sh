@@ -8,7 +8,7 @@
 #
 # Usage:
 #   ./scripts/dev.sh                 # interactive menu (pick an app)
-#   ./scripts/dev.sh <app>           # start one app: api | client | admin | smtp | taskrunner | ext | mobile
+#   ./scripts/dev.sh <app>           # start one app: api | web | admin | smtp | taskrunner | ext | mobile
 #   ./scripts/dev.sh db-start        # start (only) the dev database
 #   ./scripts/dev.sh db-stop         # stop & remove this instance's dev database
 #   ./scripts/dev.sh ports           # print the resolved port map and exit
@@ -57,11 +57,9 @@ AV_INSTANCE=$1
 AV_BASE_PORT=$DEFAULT_BASE_PORT
 AV_PORT_STRIDE=$DEFAULT_PORT_STRIDE
 
-# UseDebugEncryptionKey for the Blazor client. 'true' uses a fixed debug
-# encryption key so local logins skip the slow key derivation, speeds up dev.
-# Note: this can conflict with some things like password verification steps.
-# Switch to 'false' to use the actual user unlock flow compatible with production.
-AV_USE_DEBUG_ENCRYPTION_KEY=true
+# Whether new users can register without an invite link (API + web app). 'false'
+# requires an invite created in the admin panel (Users > + Invite).
+AV_PUBLIC_REGISTRATION_ENABLED=true
 ENV
 }
 
@@ -81,10 +79,9 @@ set +a
 AV_INSTANCE="${AV_INSTANCE:-0}"
 AV_BASE_PORT="${AV_BASE_PORT:-$DEFAULT_BASE_PORT}"
 AV_PORT_STRIDE="${AV_PORT_STRIDE:-$DEFAULT_PORT_STRIDE}"
-# Default true for pre-existing dev.env files that predate this setting.
-AV_USE_DEBUG_ENCRYPTION_KEY="${AV_USE_DEBUG_ENCRYPTION_KEY:-true}"
+AV_PUBLIC_REGISTRATION_ENABLED="${AV_PUBLIC_REGISTRATION_ENABLED:-true}"
 case "$AV_INSTANCE" in (*[!0-9]*|"") die "AV_INSTANCE must be a non-negative integer (got '$AV_INSTANCE').";; esac
-case "$AV_USE_DEBUG_ENCRYPTION_KEY" in true|false) ;; (*) die "AV_USE_DEBUG_ENCRYPTION_KEY must be 'true' or 'false' (got '$AV_USE_DEBUG_ENCRYPTION_KEY').";; esac
+case "$AV_PUBLIC_REGISTRATION_ENABLED" in (true|false) ;; (*) die "AV_PUBLIC_REGISTRATION_ENABLED must be 'true' or 'false' (got '$AV_PUBLIC_REGISTRATION_ENABLED').";; esac
 
 # --- Resolve effective ports ---------------------------------------------------
 SERVICE_COUNT=10   # block width (offsets 0..9); DB sits last so it ends in 9
@@ -95,12 +92,12 @@ case "$AV_BASE_PORT" in (*[!0-9]*|"") die "AV_BASE_PORT must be a positive integ
 BLOCK_BASE=$(( AV_BASE_PORT + AV_INSTANCE * AV_PORT_STRIDE ))
 # Dev only serves HTTP, so each web app reserves a single port.
 API_HTTP=$((    BLOCK_BASE + 0 ))
-CLIENT_HTTP=$(( BLOCK_BASE + 1 ))
 ADMIN_HTTP=$((  BLOCK_BASE + 2 ))
 EXT_PORT=$((    BLOCK_BASE + 3 ))
 EXPO_PORT=$((   BLOCK_BASE + 4 ))
+WEB_PORT=$((    BLOCK_BASE + 5 ))
 # DB sits at the last offset so its port always ends in 9 (e.g. 5109) — easy to
-# remember. Offsets 5..8 are left free as spare slots inside the block.
+# remember. Offsets 1 and 6..8 are left free as spare slots inside the block.
 DB_PORT=$((     BLOCK_BASE + 9 ))
 
 # One dev DB container per instance, with the published port in the project
@@ -118,7 +115,7 @@ print_ports() {
   printf "%sAliasVault dev — instance %s%s (base %s, stride %s → block %s..%s)\n" \
     "$BOLD" "$AV_INSTANCE" "$NC" "$AV_BASE_PORT" "$AV_PORT_STRIDE" "$BLOCK_BASE" "$((BLOCK_BASE + SERVICE_COUNT - 1))"
   printf "  %-14s http://localhost:%s\n" "API"         "$API_HTTP"
-  printf "  %-14s http://localhost:%s\n" "Client"      "$CLIENT_HTTP"
+  printf "  %-14s http://localhost:%s\n" "Web"         "$WEB_PORT"
   printf "  %-14s http://localhost:%s\n" "Admin"       "$ADMIN_HTTP"
   printf "  %-14s localhost:%s\n"      "Postgres DB"    "$DB_PORT"
   printf "  %-14s :%s\n"                             "Browser ext" "$EXT_PORT"
@@ -140,23 +137,19 @@ banner() {
 
 require() { command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not installed."; }
 
-# Generate the Blazor client's dev config.
-write_client_dev_settings() {
-  local target="$ROOT_DIR/apps/server/AliasVault.Client/wwwroot/appsettings.Development.json"
+# Generate the React web app's dev config. Vite serves everything in public/, and the app prefers
+# this file over the checked-in appsettings.json while running in dev mode.
+write_web_dev_settings() {
+  local target="$ROOT_DIR/apps/web/public/appsettings.Development.json"
   cat > "$target" <<JSON
 {
     "ApiUrl": "http://localhost:$API_HTTP",
-    "PrivateEmailDomains": ["example.tld", "example2.tld", "aliasvault.net", "disabled.tld"],
-    "HiddenPrivateEmailDomains": ["disabled.tld"],
     "SupportEmail": "support@example.tld",
-    "PublicRegistrationEnabled": "true",
-    "DeploymentMode": "dev",
-    "UseDebugEncryptionKey": "$AV_USE_DEBUG_ENCRYPTION_KEY",
-    "CryptographyOverrideType": "Argon2Id",
-    "CryptographyOverrideSettings": "{\"DegreeOfParallelism\":1,\"MemorySize\":1024,\"Iterations\":1}"
+    "PublicRegistrationEnabled": "$AV_PUBLIC_REGISTRATION_ENABLED",
+    "DeploymentMode": "dev"
 }
 JSON
-  info "Wrote client dev config → ApiUrl http://localhost:$API_HTTP (UseDebugEncryptionKey=$AV_USE_DEBUG_ENCRYPTION_KEY)"
+  info "Wrote web dev config → ApiUrl http://localhost:$API_HTTP"
 }
 
 db_running() {
@@ -216,7 +209,7 @@ DEV_HIDDEN_PRIVATE_EMAIL_DOMAINS="${HIDDEN_PRIVATE_EMAIL_DOMAINS:-disabled.tld}"
 start_api() {
   JWT_KEY="$DEV_JWT_KEY" \
   DATA_PROTECTION_CERT_PASS="$DEV_DATA_PROTECTION_CERT_PASS" \
-  PUBLIC_REGISTRATION_ENABLED="true" \
+  PUBLIC_REGISTRATION_ENABLED="$AV_PUBLIC_REGISTRATION_ENABLED" \
   PRIVATE_EMAIL_DOMAINS="$DEV_PRIVATE_EMAIL_DOMAINS" \
   HIDDEN_PRIVATE_EMAIL_DOMAINS="$DEV_HIDDEN_PRIVATE_EMAIL_DOMAINS" \
   IP_LOGGING_ENABLED="true" \
@@ -230,10 +223,6 @@ start_admin() {
   IP_LOGGING_ENABLED="true" \
     run_dotnet "AliasVault.Admin" "$ADMIN_HTTP"
 }
-start_client() {
-  write_client_dev_settings
-  run_dotnet "AliasVault.Client" "$CLIENT_HTTP"
-}
 
 # Background workers (no HTTP port).
 run_worker() {
@@ -243,8 +232,18 @@ run_worker() {
   ConnectionStrings__AliasServerDbContext="$CONN_STR" \
     dotnet watch --project "$ROOT_DIR/apps/server/$proj"
 }
-start_smtp()       { run_worker "Services/AliasVault.SmtpService"; }
-start_taskrunner() { run_worker "Services/AliasVault.TaskRunner"; }
+start_smtp()       { run_worker "AliasVault.SmtpService"; }
+start_taskrunner() { run_worker "AliasVault.TaskRunner"; }
+
+start_web() {
+  require npm
+  write_web_dev_settings
+  banner "Web app (Vite dev)" \
+    "Dev server  http://localhost:$WEB_PORT" \
+    "API         http://localhost:$API_HTTP"
+  cd "$ROOT_DIR/apps/web"
+  npm run dev -- --port "$WEB_PORT" --strictPort
+}
 
 start_ext() {
   require npm
@@ -278,7 +277,7 @@ menu() {
   fi
   local options=(
     "api:API"
-    "client:Client"
+    "web:Web (React)"
     "admin:Admin"
     "ext:Browser extension"
     "mobile:Mobile (Expo)"
@@ -300,7 +299,7 @@ menu() {
 dispatch() {
   case "${1:-}" in
     api)        start_api ;;
-    client)     start_client ;;
+    web)        start_web ;;
     admin)      start_admin ;;
     smtp)       start_smtp ;;
     taskrunner) start_taskrunner ;;
@@ -314,7 +313,7 @@ dispatch() {
     "")         menu ;;
     -h|--help|help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//' ;;
     *)          die "Unknown command '$1'.
-  start: api/client/admin/smtp/taskrunner/ext/mobile
+  start: api/web/admin/smtp/taskrunner/ext/mobile
   db:    db (toggle) / db-start / db-stop" ;;
   esac
 }

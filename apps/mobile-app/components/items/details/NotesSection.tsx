@@ -1,8 +1,8 @@
 import { useTranslation } from 'react-i18next';
 import { View, Text, StyleSheet, Linking } from 'react-native';
 
-import type { Item } from '@/utils/dist/core/models/vault';
-import { getFieldValue, FieldKey } from '@/utils/dist/core/models/vault';
+import type { Item } from '@aliasvault/models/vault';
+import { getFieldValue, FieldKey } from '@aliasvault/models/vault';
 
 import { useColors } from '@/hooks/useColorScheme';
 
@@ -107,7 +107,7 @@ export const NotesSection: React.FC<NotesSectionProps> = ({ item }) : React.Reac
 
   return (
     <ThemedView style={styles.section}>
-      <ThemedText type="subtitle">{t('items.notes')}</ThemedText>
+      <ThemedText type="subtitle">{t('common.notes')}</ThemedText>
       <View style={styles.notesContainer}>
         {parts.map((part, index) => {
           if (part.type === 'url') {

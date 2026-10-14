@@ -5,7 +5,6 @@
 // </copyright>
 //-----------------------------------------------------------------------
 
-using System.Net;
 using System.Reflection;
 using AliasServerDb;
 using AliasServerDb.Configuration;
@@ -15,9 +14,8 @@ using AliasVault.Admin.Main;
 using AliasVault.Admin.Middleware;
 using AliasVault.Admin.Services;
 using AliasVault.Auth;
-using AliasVault.Cryptography.Server;
+using AliasVault.Cryptography;
 using AliasVault.Logging;
-using AliasVault.RazorComponents.Services;
 using AliasVault.Shared.Models.Configuration;
 using AliasVault.Shared.Server.Services;
 using AliasVault.Shared.Server.Utilities;
@@ -26,6 +24,10 @@ using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+
+var hostStopped = false;
+AppDomain.CurrentDomain.UnhandledException += (_, e) => Console.Error.WriteLine($"[FATAL] Unhandled exception (terminating: {e.IsTerminating}): {e.ExceptionObject}");
+AppDomain.CurrentDomain.ProcessExit += (_, _) => Console.Error.WriteLine($"[EXIT] Process exiting, host stopped normally: {hostStopped}");
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Configuration.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
@@ -76,6 +78,8 @@ builder.Services.AddScoped<AuthLoggingService>();
 builder.Services.AddScoped<ConfirmModalService>();
 builder.Services.AddMemoryCache();
 builder.Services.AddScoped<ServerSettingsService>();
+builder.Services.AddScoped<RegistrationInviteService>();
+builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddTransient<StatisticsService>();
 builder.Services.AddSingleton(new VersionedContentService(Directory.GetCurrentDirectory() + "/wwwroot"));
 builder.Services.AddApexCharts();
@@ -105,7 +109,6 @@ builder.Services.AddIdentityCore<AdminUser>(options =>
         options.Lockout.MaxFailedAccessAttempts = 10;
         options.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(30);
     })
-    .AddRoles<AdminRole>()
     .AddEntityFrameworkStores<AliasServerDbContext>()
     .AddSignInManager()
     .AddDefaultTokenProviders();
@@ -184,11 +187,12 @@ using (var scope = app.Services.CreateScope())
         await db.WaitForDatabaseReadyAsync(logger);
     }
 
-    await StartupTasks.CreateRolesIfNotExist(scope.ServiceProvider);
     await StartupTasks.SetAdminUser(scope.ServiceProvider);
 }
 
+app.Lifetime.ApplicationStopping.Register(() => Console.Error.WriteLine($"[EXIT] Host stopping requested. Stack:{Environment.NewLine}{Environment.StackTrace}"));
 await app.RunAsync();
+hostStopped = true;
 
 namespace AliasVault.Admin
 {

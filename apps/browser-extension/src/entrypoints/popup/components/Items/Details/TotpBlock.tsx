@@ -1,79 +1,43 @@
-import  * as OTPAuth from 'otpauth';
+import { generateTotpCode, getTotpElapsedPercentage, getTotpRemainingSeconds } from '@aliasvault/client/items/TotpUtility';
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useDb } from '@/entrypoints/popup/context/DbContext';
 
-import type { TotpCode } from '@/utils/dist/core/models/vault';
+import { logExpected, logFailure } from '@/utils/Diagnostics';
 import { sendMessage } from '@/utils/messaging/ExtensionMessaging';
 
+import type { TotpCode } from '@aliasvault/models/vault';
+
 /**
- * Formats a TOTP code as "XXX XXX" with a space in the middle for better readability.
+ * Formats a TOTP code with a space in the middle for better readability, e.g. "XXX XXX" or "XXXX XXXX".
  */
 const formatTotpCode = (code: string | undefined): string => {
   if (!code) {
     return '';
   }
-  if (code.length === 6) {
-    return `${code.slice(0, 3)} ${code.slice(3)}`;
+  if (code.length % 2 === 0) {
+    const half = code.length / 2;
+    return `${code.slice(0, half)} ${code.slice(half)}`;
   }
   return code;
 };
 
 type TotpBlockProps = {
   itemId: string;
+  manifestId: string;
 }
 
 /**
  * This component shows TOTP codes for an item.
  */
-const TotpBlock: React.FC<TotpBlockProps> = ({ itemId }) => {
+const TotpBlock: React.FC<TotpBlockProps> = ({ itemId, manifestId }) => {
   const { t } = useTranslation();
   const [totpCodes, setTotpCodes] = useState<TotpCode[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentCodes, setCurrentCodes] = useState<Record<string, string>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const dbContext = useDb();
-
-  /**
-   * Gets the remaining seconds for the TOTP code.
-   */
-  const getRemainingSeconds = (step = 30): number => {
-    const totp = new OTPAuth.TOTP({
-      secret: 'dummy', // We only need this for timing calculations
-      algorithm: 'SHA1',
-      digits: 6,
-      period: step
-    });
-    return totp.period - (Math.floor(Date.now() / 1000) % totp.period);
-  };
-
-  /**
-   * Gets the remaining percentage for the TOTP code.
-   */
-  const getRemainingPercentage = (): number => {
-    const remaining = getRemainingSeconds();
-    // Invert the percentage so it counts down instead of up
-    return Math.floor(((30.0 - remaining) / 30.0) * 100);
-  };
-
-  /**
-   * Generates a TOTP code for a given secret key.
-   */
-  const generateTotpCode = (secretKey: string): string => {
-    try {
-      const totp = new OTPAuth.TOTP({
-        secret: secretKey,
-        algorithm: 'SHA1',
-        digits: 6,
-        period: 30
-      });
-      return totp.generate();
-    } catch (error) {
-      console.error('Error generating TOTP code:', error);
-      return 'Error';
-    }
-  };
 
   /**
    * Copies a TOTP code to the clipboard.
@@ -86,12 +50,20 @@ const TotpBlock: React.FC<TotpBlockProps> = ({ itemId }) => {
       // Notify background script that clipboard was copied
       await sendMessage('CLIPBOARD_COPIED');
 
+      /*
+       * Record the use against the item. The auto-copy that follows an autofill deliberately does not go
+       * through here: that interaction is already counted as an autofill, and would otherwise count twice.
+       */
+      sendMessage('RECORD_ITEM_USAGE', { itemId, manifestId, action: 'copy' }).catch(() => {
+        // Ignore errors
+      });
+
       // Reset copied state after 2 seconds
       setTimeout(() => {
         setCopiedId(null);
       }, 2000);
     } catch (error) {
-      console.error('Failed to copy:', error);
+      logExpected('[Clipboard] Copying the TOTP code failed', error);
     }
   };
 
@@ -105,51 +77,37 @@ const TotpBlock: React.FC<TotpBlockProps> = ({ itemId }) => {
       }
 
       try {
-        const codes = dbContext.sqliteClient.settings.getTotpCodesForItem(itemId);
+        const codes = dbContext.sqliteClient.items.getTotpCodesForItem({ Id: itemId, ManifestId: manifestId });
         setTotpCodes(codes);
       } catch (error) {
-        console.error('Error loading TOTP codes:', error);
+        logFailure('Error loading TOTP codes', error);
       } finally {
         setLoading(false);
       }
     };
 
     loadTotpCodes();
-  }, [itemId, dbContext?.sqliteClient]);
+  }, [itemId, manifestId, dbContext?.sqliteClient]);
 
   useEffect(() => {
+    let cancelled = false;
+
     /**
-     * Updates the current TOTP codes.
+     * Regenerates the codes; a failed code keeps its previous value so a single bad tick does not empty the displayed value.
      */
-    const updateTotpCodes = (prevCodes: Record<string, string>): Record<string, string> => {
-      const newCodes: Record<string, string> = {};
-      totpCodes.forEach(code => {
-        const generatedCode = generateTotpCode(code.SecretKey);
-        // Only update if we have a valid code
-        if (generatedCode !== 'Error') {
-          newCodes[code.Id] = generatedCode;
-        } else {
-        // Keep the previous code if there's an error
-          newCodes[code.Id] = prevCodes[code.Id] ?? 'Error';
-        }
-      });
-      return newCodes;
+    const refreshCodes = async (): Promise<void> => {
+      const generated = await Promise.all(totpCodes.map(async code => [code.Id, await generateTotpCode(code.SecretKey, code)] as const));
+      if (cancelled) {
+        return;
+      }
+      setCurrentCodes(prevCodes => Object.fromEntries(generated.map(([id, code]) => [id, code ?? prevCodes[id] ?? 'Error'])));
     };
 
-    // Generate initial codes
-    const initialCodes: Record<string, string> = {};
-    totpCodes.forEach(code => {
-      initialCodes[code.Id] = generateTotpCode(code.SecretKey);
-    });
-    setCurrentCodes(initialCodes);
+    void refreshCodes();
+    const intervalId = setInterval(() => void refreshCodes(), 1000);
 
-    // Set up interval to refresh codes
-    const intervalId = setInterval(() => {
-      setCurrentCodes(updateTotpCodes);
-    }, 1000);
-
-    // Clean up interval on unmount or when totpCodes change
     return () : void => {
+      cancelled = true;
       clearInterval(intervalId);
     };
   }, [totpCodes]);
@@ -190,16 +148,16 @@ const TotpBlock: React.FC<TotpBlockProps> = ({ itemId }) => {
                     </span>
                     <div className="text-xs">
                       {copiedId === totpCode.Id ? (
-                        <span className="text-green-600 dark:text-green-400">{t('common.copied')}</span>
+                        <span className="text-green-600 dark:text-green-400">{t('common.copiedShort')}</span>
                       ) : (
-                        <span className="text-gray-500 dark:text-gray-400">{getRemainingSeconds()}s</span>
+                        <span className="text-gray-500 dark:text-gray-400">{getTotpRemainingSeconds(totpCode)}s</span>
                       )}
                     </div>
                   </div>
                   <div className="w-1 h-6 bg-gray-200 rounded-full dark:bg-gray-600">
                     <div
-                      className="bg-blue-600 rounded-full transition-all"
-                      style={{ height: `${getRemainingPercentage()}%`, width: '100%' }}
+                      className="bg-primary-500 rounded-full transition-all"
+                      style={{ height: `${getTotpElapsedPercentage(totpCode)}%`, width: '100%' }}
                     />
                   </div>
                 </div>

@@ -11,6 +11,7 @@
 import type { Page } from '@playwright/test';
 
 import { FieldSelectors } from './selectors';
+import { waitForVaultReady, Timeouts } from './waits';
 
 // Re-export all waits
 export {
@@ -56,4 +57,33 @@ export async function getPasswordValue(popup: Page): Promise<string> {
  */
 export async function getNotesValue(popup: Page): Promise<string> {
   return getFieldValue(popup, FieldSelectors.LOGIN_NOTES);
+}
+
+/**
+ * Wait until the popup has opened the vault after a login or unlock, failing if it lands on the upgrade gate instead.
+ *
+ * Test accounts are created on the current storage format, so only the vault upgrade specs (90.x) may walk the gate.
+ *
+ * @param popup - The popup page
+ * @param timeout - Timeout in milliseconds
+ */
+export async function waitForVaultOpen(popup: Page, timeout: number = Timeouts.LONG): Promise<void> {
+  /*
+   * The popup hops through `/reinitialize` before it routes on, and that route already renders the
+   * bottom nav, so a visible `#nav-vault` on its own is no proof that the app has settled. The hash
+   * route is: wait until it is either the gate, or anything past it showing the vault UI.
+   */
+  await popup.waitForFunction(
+    () => window.location.hash.startsWith('#/upgrade') ||
+      (!window.location.hash.startsWith('#/reinitialize') && document.querySelector('#nav-vault') !== null),
+    undefined,
+    { timeout }
+  );
+
+  const hash = await popup.evaluate(() => window.location.hash);
+  if (hash.startsWith('#/upgrade')) {
+    throw new Error('The popup landed on the vault upgrade gate, but test accounts are created on the current storage format. Only the vault upgrade specs (90.x) should reach it.');
+  }
+
+  await waitForVaultReady(popup, timeout);
 }

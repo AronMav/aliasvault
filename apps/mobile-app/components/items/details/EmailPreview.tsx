@@ -1,12 +1,18 @@
 import { MaterialIcons } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { View, StyleSheet, TouchableOpacity, Linking, AppState } from 'react-native';
 
-import { AppInfo } from '@/utils/AppInfo';
-import type { ApiErrorResponse, MailboxEmail } from '@/utils/dist/core/models/webapi';
-import EncryptionUtility from '@/utils/EncryptionUtility';
+import { apiErrorCodeOf } from '@aliasvault/client/api/errors/ApiRequestError';
+import { type AliasOwnerNotice, aliasOwnerErrorText, aliasOwnerNotice, moveAliasHere } from '@aliasvault/client/email/AliasOwner';
+import { SpamOkClient } from '@aliasvault/client/email/SpamOkClient';
+import { familySharingText } from '@aliasvault/client/sharing/FamilySharingView';
+import { AppInfo } from '@aliasvault/client/platform/AppInfo';
+import { logExpected } from '@aliasvault/client/utilities/Diagnostics';
+import { mailboxPollDelayMs } from '@aliasvault/client/utilities/PollBackoff';
+import type { ApiErrorResponse, Mailbox, MailboxEmail } from '@aliasvault/models/webapi';
+import { decryptEmailList } from '@aliasvault/client/email/EmailDecryption';
 
 import { useColors } from '@/hooks/useColorScheme';
 
@@ -14,16 +20,21 @@ import { PulseDot } from '@/components/PulseDot';
 import { ThemedText } from '@/components/themed/ThemedText';
 import { ThemedView } from '@/components/themed/ThemedView';
 import { useDb } from '@/context/DbContext';
+import { useDialog } from '@/context/DialogContext';
 import { useWebApi } from '@/context/WebApiContext';
+
+/** Client for the SpamOK mailboxes of the public email domains. */
+const spamOk = new SpamOkClient('av-mobile', AppInfo.VERSION);
 
 type EmailPreviewProps = {
   email: string | undefined;
+  manifestId: string;
 };
 
 /**
  * Email preview component.
  */
-export const EmailPreview: React.FC<EmailPreviewProps> = ({ email }) : React.ReactNode => {
+export const EmailPreview: React.FC<EmailPreviewProps> = ({ email, manifestId }) : React.ReactNode => {
   const [emails, setEmails] = useState<MailboxEmail[]>([]);
   const [displayedEmails, setDisplayedEmails] = useState<MailboxEmail[]>([]);
   const [loading, setLoading] = useState(true);
@@ -33,10 +44,13 @@ export const EmailPreview: React.FC<EmailPreviewProps> = ({ email }) : React.Rea
   const [error, setError] = useState<string | null>(null);
   const [isSupportedDomain, setIsSupportedDomain] = useState(false);
   const [displayedCount, setDisplayedCount] = useState(2);
+  const [ownerNotice, setOwnerNotice] = useState<AliasOwnerNotice | null>(null);
+  const { showConfirm } = useDialog();
   const webApi = useWebApi();
   const dbContext = useDb();
   const colors = useColors();
   const { t } = useTranslation();
+  const consecutiveFailuresRef = useRef(0);
 
   const emailsPerLoad = 3;
   const canLoadMore = displayedCount < emails.length;
@@ -108,6 +122,21 @@ export const EmailPreview: React.FC<EmailPreviewProps> = ({ email }) : React.Rea
   );
 
   useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    /**
+     * Record that a poll failed for the exponential backoff to work.
+     * @param reason - what did not work
+     * @param error - the underlying error, when there is one
+     */
+    const markPollFailed = (reason: string, error?: unknown): void => {
+      if (consecutiveFailuresRef.current === 0) {
+        logExpected(`[EmailPreview] ${reason}`, error);
+      }
+      consecutiveFailuresRef.current++;
+    };
+
     /**
      * Load the emails.
      */
@@ -119,7 +148,8 @@ export const EmailPreview: React.FC<EmailPreviewProps> = ({ email }) : React.Rea
 
         const isPublic = await isPublicDomain(email);
         const isPrivate = await isPrivateDomain(email);
-        const isSupported = isPublic || isPrivate;
+        const isRoutable = !isPrivate || (await dbContext.sqliteClient?.items.isEmailAddressRoutable(email) ?? false);
+        const isSupported = (isPublic || isPrivate) && isRoutable;
 
         setIsSpamOk(isPublic);
         setIsSupportedDomain(isSupported);
@@ -138,24 +168,12 @@ export const EmailPreview: React.FC<EmailPreviewProps> = ({ email }) : React.Rea
         if (isPublic) {
           // For public domains (SpamOK), use the SpamOK API directly
           const emailPrefix = email.split('@')[0];
-          const response = await fetch(`https://api.spamok.com/v2/EmailBox/${emailPrefix}`, {
-            headers: {
-              'X-Asdasd-Platform-Id': 'av-mobile',
-              'X-Asdasd-Platform-Version': AppInfo.VERSION,
-            }
-          });
-
-          if (!response.ok) {
+          const allMails = await spamOk.getMailbox(emailPrefix);
+          if (!allMails) {
+            markPollFailed('The mailbox request failed');
             setError(t('items.emailLoadError'));
             return;
           }
-
-          const data = await response.json();
-
-          // Store all emails, sorted by date
-          const allMails = data?.mails
-            ?.sort((a: MailboxEmail, b: MailboxEmail) =>
-              new Date(b.dateSystem).getTime() - new Date(a.dateSystem).getTime()) ?? [];
 
           if (loading && allMails.length > 0) {
             setLastEmailId(allMails[0].id);
@@ -163,6 +181,7 @@ export const EmailPreview: React.FC<EmailPreviewProps> = ({ email }) : React.Rea
 
           setEmails(allMails);
           updateDisplayedEmails(allMails, displayedCount);
+          consecutiveFailuresRef.current = 0;
         } else if (isPrivate) {
           // For private domains, use existing encrypted email logic
           if (!dbContext?.sqliteClient) {
@@ -171,12 +190,13 @@ export const EmailPreview: React.FC<EmailPreviewProps> = ({ email }) : React.Rea
 
           try {
             // Get all encryption keys
-            const encryptionKeys = await dbContext.sqliteClient.getAllEncryptionKeys();
+            const encryptionKeys = await dbContext.sqliteClient.encryptionKeys.getAll();
 
             // Use single emailbox operator instead of bulk
             const response = await webApi.authFetch(`EmailBox/${email}`, { method: 'GET' }, true, false);
             try {
-              const data = response as { mails: MailboxEmail[] };
+              const data = response as Mailbox;
+              setOwnerNotice(aliasOwnerNotice(email, data, manifestId, await dbContext.sqliteClient.getPersonalManifestId(), await dbContext.sqliteClient.folders.getAll()));
 
               // Store all emails, sorted by date
               const allMails = data.mails
@@ -184,8 +204,9 @@ export const EmailPreview: React.FC<EmailPreviewProps> = ({ email }) : React.Rea
 
               if (allMails) {
                 // Loop through all emails and decrypt them locally
-                const decryptedEmails = await EncryptionUtility.decryptEmailList(
+                const decryptedEmails = await decryptEmailList(
                   allMails,
+                  data.publicKeys,
                   encryptionKeys
                 );
 
@@ -198,6 +219,7 @@ export const EmailPreview: React.FC<EmailPreviewProps> = ({ email }) : React.Rea
 
                 // Reset error
                 setError(null);
+                consecutiveFailuresRef.current = 0;
               }
             } catch {
               // Try to parse as error response instead
@@ -210,35 +232,48 @@ export const EmailPreview: React.FC<EmailPreviewProps> = ({ email }) : React.Rea
                 return;
               }
 
-              setError(t(`apiErrors.${apiErrorResponse?.code}`));
+              markPollFailed(`The server rejected the mailbox request: ${apiErrorResponse?.code ?? 'unknown'}`);
+              setError(aliasOwnerErrorText(apiErrorResponse?.code) ?? t(`apiErrors.${apiErrorResponse?.code}`, { defaultValue: t('common.errors.unknownErrorTryAgain') }));
               return;
             }
-          } catch {
+          } catch (err) {
             // Suppress errors while vault has unsynced changes
             if (dbContext.shouldSuppressEmailErrors()) {
               return;
             }
 
+            markPollFailed('The mailbox request failed', err);
             setError(t('items.emailLoadError'));
           }
         }
       } catch (err) {
-        console.error('Error loading emails:', err);
+        markPollFailed('Loading the mailbox failed', err);
         setError(t('items.emailUnexpectedError'));
       } finally {
         setLoading(false);
       }
     };
 
-    loadEmails();
-    // Set up auto-refresh interval only when component is visible
-    const interval = isComponentVisible ? setInterval(loadEmails, 2000) : null;
+    /**
+     * Poll, then schedule the next poll while the component is on screen.
+     */
+    const poll = async () : Promise<void> => {
+      await loadEmails();
+      if (cancelled || !isComponentVisible) {
+        return;
+      }
+      timer = setTimeout(poll, mailboxPollDelayMs(consecutiveFailuresRef.current));
+    };
+
+    void poll();
+
     return () : void => {
-      if (interval) {
-        clearInterval(interval);
+      cancelled = true;
+      if (timer) {
+        clearTimeout(timer);
       }
     };
-  }, [email, loading, webApi, dbContext, isPublicDomain, isPrivateDomain, isComponentVisible, t, displayedCount, updateDisplayedEmails]);
+  }, [email, manifestId, loading, webApi, dbContext, isPublicDomain, isPrivateDomain, isComponentVisible, t, displayedCount, updateDisplayedEmails]);
 
   const styles = StyleSheet.create({
     date: {
@@ -277,6 +312,31 @@ export const EmailPreview: React.FC<EmailPreviewProps> = ({ email }) : React.Rea
       marginTop: 8,
       paddingHorizontal: 16,
       paddingVertical: 10,
+    },
+    moveButton: {
+      alignSelf: 'flex-start',
+      backgroundColor: colors.primary,
+      borderRadius: 8,
+      marginTop: 8,
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+    },
+    moveButtonText: {
+      color: colors.primarySurfaceText,
+      fontSize: 14,
+      fontWeight: '600',
+    },
+    ownerNotice: {
+      backgroundColor: colors.accentBackground,
+      borderColor: colors.accentBorder,
+      borderRadius: 8,
+      borderWidth: 1,
+      marginTop: 8,
+      padding: 12,
+    },
+    ownerNoticeText: {
+      color: colors.text,
+      fontSize: 14,
     },
     loadMoreText: {
       color: colors.textMuted,
@@ -321,6 +381,32 @@ export const EmailPreview: React.FC<EmailPreviewProps> = ({ email }) : React.Rea
     return null;
   }
 
+  /**
+   * Move the alias to this item's vault after confirmation, then reload.
+   */
+  const confirmMoveHere = (moveConfirm: string): void => {
+    showConfirm(familySharingText.aliasOwner.moveHere, moveConfirm, t('common.confirm'), async () => {
+      try {
+        await moveAliasHere(webApi, email, manifestId);
+        setOwnerNotice(null);
+        setLoading(true);
+      } catch (err) {
+        setError(aliasOwnerErrorText(apiErrorCodeOf(err)) ?? t(`apiErrors.${apiErrorCodeOf(err)}`, { defaultValue: t('common.errors.unknownErrorTryAgain') }));
+      }
+    });
+  };
+
+  const ownerNoticeBlock = ownerNotice && (
+    <View style={styles.ownerNotice}>
+      <ThemedText style={styles.ownerNoticeText}>{ownerNotice.notice}</ThemedText>
+      {ownerNotice.canMove && (
+        <TouchableOpacity style={styles.moveButton} onPress={() => confirmMoveHere(ownerNotice.moveConfirm)} testID="move-alias-here">
+          <ThemedText style={styles.moveButtonText}>{familySharingText.aliasOwner.moveHere}</ThemedText>
+        </TouchableOpacity>
+      )}
+    </View>
+  );
+
   // Don't render anything if the domain is not supported
   if (!isSupportedDomain) {
     return null;
@@ -331,9 +417,9 @@ export const EmailPreview: React.FC<EmailPreviewProps> = ({ email }) : React.Rea
     return (
       <ThemedView style={styles.section}>
         <View style={styles.titleContainer}>
-          <ThemedText type="title" style={styles.title}>{t('items.recentEmails')}</ThemedText>
+          <ThemedText type="title" style={styles.title}>{t('common.recentEmails')}</ThemedText>
         </View>
-        <ThemedText style={styles.placeholderText}>{t('items.offlineEmailsMessage')}</ThemedText>
+        <ThemedText style={styles.placeholderText}>{t('emails.offlineMessage')}</ThemedText>
       </ThemedView>
     );
   }
@@ -342,7 +428,7 @@ export const EmailPreview: React.FC<EmailPreviewProps> = ({ email }) : React.Rea
     return (
       <ThemedView style={styles.section}>
         <View style={styles.titleContainer}>
-          <ThemedText type="title" style={styles.title}>{t('items.recentEmails')}</ThemedText>
+          <ThemedText type="title" style={styles.title}>{t('common.recentEmails')}</ThemedText>
         </View>
         <View style={styles.errorContainer}>
           <ThemedText style={styles.errorText}>{error}</ThemedText>
@@ -355,10 +441,10 @@ export const EmailPreview: React.FC<EmailPreviewProps> = ({ email }) : React.Rea
     return (
       <ThemedView style={styles.section}>
         <View style={styles.titleContainer}>
-          <ThemedText type="title" style={styles.title}>{t('items.recentEmails')}</ThemedText>
+          <ThemedText type="title" style={styles.title}>{t('common.recentEmails')}</ThemedText>
           <PulseDot />
         </View>
-        <ThemedText style={styles.placeholderText}>{t('items.loadingEmails')}</ThemedText>
+        <ThemedText style={styles.placeholderText}>{t('common.loadingEmails')}</ThemedText>
       </ThemedView>
     );
   }
@@ -367,9 +453,10 @@ export const EmailPreview: React.FC<EmailPreviewProps> = ({ email }) : React.Rea
     return (
       <ThemedView style={styles.section}>
         <View style={styles.titleContainer}>
-          <ThemedText type="title" style={styles.title}>{t('items.recentEmails')}</ThemedText>
+          <ThemedText type="title" style={styles.title}>{t('common.recentEmails')}</ThemedText>
           <PulseDot />
         </View>
+        {ownerNoticeBlock}
         <ThemedText style={styles.placeholderText}>{t('items.noEmailsYet')}</ThemedText>
       </ThemedView>
     );
@@ -378,9 +465,10 @@ export const EmailPreview: React.FC<EmailPreviewProps> = ({ email }) : React.Rea
   return (
     <ThemedView style={styles.section}>
       <View style={styles.titleContainer}>
-        <ThemedText type="title" style={styles.title}>{t('items.recentEmails')}</ThemedText>
+        <ThemedText type="title" style={styles.title}>{t('common.recentEmails')}</ThemedText>
         <PulseDot />
       </View>
+      {ownerNoticeBlock}
       {displayedEmails.map((mail) => (
         <TouchableOpacity
           key={mail.id}
@@ -391,7 +479,7 @@ export const EmailPreview: React.FC<EmailPreviewProps> = ({ email }) : React.Rea
           onPress={() => {
             if (isSpamOk) {
               const emailPrefix = email.split('@')[0];
-              Linking.openURL(`https://spamok.com/${emailPrefix}/${mail.id}`);
+              Linking.openURL(`https://spamok.com/${encodeURIComponent(emailPrefix)}/${mail.id}`);
             } else {
               router.push(`/(tabs)/items/email/${mail.id}`);
             }

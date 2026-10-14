@@ -2,12 +2,13 @@ import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import Slider from '@react-native-community/slider';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Platform, StyleSheet, TouchableOpacity, View } from 'react-native';
+import { Platform, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
 
-import type { PasswordSettings, DicewareCapitalization, DicewareSeparator, DicewareSalt } from '@/utils/dist/core/models/vault';
-import { MIN_WORD_COUNT, MAX_WORD_COUNT, DEFAULT_WORD_COUNT, getLanguageInfo, resolveDefaultLanguage } from '@/utils/dist/core/models/defaults';
-import { sliderToLength, lengthToSlider, SLIDER_MIN, SLIDER_MAX } from '@/utils/PasswordLengthSlider';
-import * as PasswordGenerator from '@/utils/PasswordGeneratorUtility';
+import type { PasswordSettings, PasswordGeneratorType, DicewareCapitalization, DicewareSeparator, DicewareSalt } from '@aliasvault/models/vault';
+import { getLanguageInfo, resolveDefaultLanguage } from '@aliasvault/i18n/languages';
+import { MIN_WORD_COUNT, MAX_WORD_COUNT, DEFAULT_WORD_COUNT } from '@aliasvault/models/defaults';
+import { sliderToLength, lengthToSlider, SLIDER_MIN, SLIDER_MAX } from '@aliasvault/client/utilities/PasswordLengthSlider';
+import * as RustCore from '@aliasvault/client/rust/RustCore';
 
 import { useColors } from '@/hooks/useColorScheme';
 
@@ -52,7 +53,7 @@ export function PasswordGeneratorPanel({ initialSettings, onSettingsChange, onPr
 
   const generatePreview = useCallback(async (currentSettings: PasswordSettings, seed: string): Promise<void> => {
     try {
-      const password = await PasswordGenerator.generatePassword(currentSettings, seed);
+      const password = await RustCore.generatePassword(currentSettings, seed);
       setPreviewPassword(password);
       onPreviewChange?.(password);
     } catch (error) {
@@ -62,10 +63,10 @@ export function PasswordGeneratorPanel({ initialSettings, onSettingsChange, onPr
 
   // Initialize the seed + preview on mount, and load the available languages.
   useEffect(() => {
-    seedRef.current = PasswordGenerator.generateSeed();
+    seedRef.current = RustCore.generateSeed();
     void generatePreview(initialSettings, seedRef.current);
     let cancelled = false;
-    void PasswordGenerator.getDicewareLanguages().then((languages) => {
+    void RustCore.getDicewareLanguages().then((languages) => {
       if (!cancelled) {
         setDicewareLanguages(languages);
       }
@@ -93,7 +94,7 @@ export function PasswordGeneratorPanel({ initialSettings, onSettingsChange, onPr
    * Draw a fresh seed and regenerate the preview (a genuinely new password).
    */
   const handleRefreshPreview = useCallback((): void => {
-    seedRef.current = PasswordGenerator.generateSeed();
+    seedRef.current = RustCore.generateSeed();
     void generatePreview(settings, seedRef.current);
   }, [generatePreview, settings]);
 
@@ -109,13 +110,13 @@ export function PasswordGeneratorPanel({ initialSettings, onSettingsChange, onPr
 
   const styles = useMemo(() => StyleSheet.create({
     card: {
-      backgroundColor: colors.accentBackground,
+      backgroundColor: colors.modalSurfaceRaised,
       borderRadius: 10,
       marginBottom: 16,
       paddingHorizontal: 16,
     },
     chip: {
-      backgroundColor: colors.background,
+      backgroundColor: colors.modalSurface,
       borderColor: colors.accentBorder,
       borderRadius: 6,
       borderWidth: 1,
@@ -135,6 +136,28 @@ export function PasswordGeneratorPanel({ initialSettings, onSettingsChange, onPr
       flexDirection: 'row',
       justifyContent: 'space-between',
       paddingVertical: 12,
+    },
+    excludedDescription: {
+      color: colors.textMuted,
+      fontSize: 13,
+      lineHeight: 18,
+      marginTop: 8,
+    },
+    excludedInput: {
+      backgroundColor: colors.modalSurface,
+      borderColor: colors.accentBorder,
+      borderRadius: 6,
+      borderWidth: 1,
+      color: colors.text,
+      fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+      fontSize: 15,
+      marginTop: 8,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+    },
+    excludedSection: {
+      paddingBottom: 14,
+      paddingTop: 10,
     },
     languageValue: {
       alignItems: 'center',
@@ -172,7 +195,7 @@ export function PasswordGeneratorPanel({ initialSettings, onSettingsChange, onPr
     },
     previewContainer: {
       alignItems: 'center',
-      backgroundColor: colors.accentBackground,
+      backgroundColor: colors.modalSurfaceRaised,
       borderColor: colors.accentBorder,
       borderRadius: 6,
       borderWidth: 1,
@@ -235,7 +258,7 @@ export function PasswordGeneratorPanel({ initialSettings, onSettingsChange, onPr
       backgroundColor: colors.primary,
     },
     tabRow: {
-      backgroundColor: colors.accentBackground,
+      backgroundColor: colors.modalSurfaceRaised,
       borderRadius: 10,
       flexDirection: 'row',
       marginBottom: 16,
@@ -256,7 +279,7 @@ export function PasswordGeneratorPanel({ initialSettings, onSettingsChange, onPr
       paddingVertical: 10,
     },
     valuePill: {
-      backgroundColor: colors.background,
+      backgroundColor: colors.modalSurface,
       borderColor: colors.accentBorder,
       borderRadius: 6,
       borderWidth: 1,
@@ -303,7 +326,7 @@ export function PasswordGeneratorPanel({ initialSettings, onSettingsChange, onPr
               activeOpacity={0.7}
             >
               <ThemedText style={[styles.tabText, active && styles.tabTextActive]}>
-                {mode === 'basic' ? t('items.passwordTypeBasic') : t('items.passwordTypeDiceware')}
+                {mode === 'basic' ? t('common.password') : t('items.passwordTypeDiceware')}
               </ThemedText>
             </TouchableOpacity>
           );
@@ -362,6 +385,21 @@ export function PasswordGeneratorPanel({ initialSettings, onSettingsChange, onPr
               </TouchableOpacity>
             </View>
           ))}
+
+          {/* Excluded characters. */}
+          <View style={[styles.excludedSection, styles.rowDivider]}>
+            <ThemedText style={styles.sliderLabel}>{t('items.excludedCharsLabel')}</ThemedText>
+            <TextInput
+              style={styles.excludedInput}
+              value={settings.ExcludedChars ?? ''}
+              onChangeText={(text) => applyChange({ ExcludedChars: text })}
+              autoCapitalize="none"
+              autoCorrect={false}
+              spellCheck={false}
+              testID="excluded-chars-input"
+            />
+            <ThemedText style={styles.excludedDescription}>{t('items.excludedCharsDescription')}</ThemedText>
+          </View>
         </View>
       ) : (
         <View style={styles.card}>

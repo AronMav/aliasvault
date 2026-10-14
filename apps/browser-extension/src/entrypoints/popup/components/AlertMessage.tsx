@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 
 export type AlertType = 'error' | 'success' | 'warning' | 'info';
 
@@ -17,6 +17,13 @@ interface IAlertMessageProps {
  * @returns The rendered alert message component.
  */
 const AlertMessage: React.FC<IAlertMessageProps> = ({ type, message, className = '' }) => {
+  const alertRef = useRef<HTMLDivElement>(null);
+
+  // A message that appears outside the visible part of a scrolled page would otherwise go unnoticed.
+  useEffect(() => {
+    alertRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  }, [message]);
+
   /**
    * Get the appropriate CSS classes based on alert type.
    * @returns CSS class string.
@@ -30,7 +37,7 @@ const AlertMessage: React.FC<IAlertMessageProps> = ({ type, message, className =
       case 'success':
         return `${baseClasses} bg-green-100 dark:bg-green-900/30 border-green-300 dark:border-green-700 text-green-800 dark:text-green-300`;
       case 'warning':
-        return `${baseClasses} bg-yellow-100 dark:bg-yellow-900/30 border-yellow-300 dark:border-yellow-700 text-yellow-800 dark:text-yellow-300`;
+        return `${baseClasses} bg-amber-100 dark:bg-amber-500/10 border-amber-300 dark:border-amber-500/40 text-amber-900 dark:text-amber-100`;
       case 'info':
         return `${baseClasses} bg-blue-100 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700 text-blue-800 dark:text-blue-300`;
       default:
@@ -39,7 +46,7 @@ const AlertMessage: React.FC<IAlertMessageProps> = ({ type, message, className =
   };
 
   return (
-    <div className={`${getAlertClasses()} ${className}`}>
+    <div ref={alertRef} className={`${getAlertClasses()} scroll-mt-16 ${className}`}>
       {message}
     </div>
   );

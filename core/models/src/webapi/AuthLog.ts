@@ -3,11 +3,6 @@
  */
 export type AuthLogModel = {
   /**
-   * Gets or sets the primary key for the auth log entry.
-   */
-  id: number;
-
-  /**
    * Gets or sets the timestamp of the auth log entry.
    */
   timestamp: string;
@@ -15,7 +10,7 @@ export type AuthLogModel = {
   /**
    * Gets or sets the type of authentication event.
    */
-  eventType: number;
+  eventType: string;
 
   /**
    * Gets or sets the username associated with the auth log entry.
@@ -41,4 +36,14 @@ export type AuthLogModel = {
    * Gets or sets a value indicating whether the authentication attempt was successful.
    */
   isSuccess: boolean;
+}
+
+/**
+ * Response of GET /v2/Security/authlogs.
+ */
+export type AuthLogsResponse = {
+  /**
+   * The most recent auth log entries, newest first.
+   */
+  authLogs: AuthLogModel[];
 }

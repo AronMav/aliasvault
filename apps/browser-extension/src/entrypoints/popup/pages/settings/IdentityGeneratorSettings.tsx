@@ -1,3 +1,5 @@
+import * as RustCore from '@aliasvault/client/rust/RustCore';
+import { getLanguageInfo } from '@aliasvault/i18n/languages';
 import React, { useEffect, useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -5,9 +7,6 @@ import PageTitle from '@/entrypoints/popup/components/PageTitle';
 import { useDb } from '@/entrypoints/popup/context/DbContext';
 import { useLoading } from '@/entrypoints/popup/context/LoadingContext';
 import { useVaultMutate } from '@/entrypoints/popup/hooks/useVaultMutate';
-
-import { getLanguageInfo } from '@/utils/dist/core/models/defaults';
-import * as RustCore from '@/utils/RustCore';
 
 /**
  * Identity Generator Settings page component.
@@ -104,12 +103,12 @@ const IdentityGeneratorSettings: React.FC = () => {
       {/* Language Section */}
       <section>
         <h3 className="text-md font-semibold text-gray-900 dark:text-white mb-3">
-          {t('settings.identityGeneratorSettings.languageSection')}
+          {t('settings.language')}
         </h3>
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700">
           <div className="p-4">
             <p className="font-medium text-gray-900 dark:text-white mb-2">
-              {t('settings.identityGeneratorSettings.languageSection')}
+              {t('settings.language')}
             </p>
             <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
               {t('settings.identityGeneratorSettings.languageDescription')}
@@ -135,12 +134,12 @@ const IdentityGeneratorSettings: React.FC = () => {
       {/* Gender Section */}
       <section>
         <h3 className="text-md font-semibold text-gray-900 dark:text-white mb-3">
-          {t('settings.identityGeneratorSettings.genderSection')}
+          {t('fieldLabels.alias.gender')}
         </h3>
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700">
           <div className="p-4">
             <p className="font-medium text-gray-900 dark:text-white mb-2">
-              {t('settings.identityGeneratorSettings.genderSection')}
+              {t('fieldLabels.alias.gender')}
             </p>
             <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
               {t('settings.identityGeneratorSettings.genderDescription')}

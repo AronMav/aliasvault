@@ -7,6 +7,8 @@
 
 namespace AliasServerDb;
 
+using System.ComponentModel.DataAnnotations;
+using AliasVault.Shared.Models.Enums;
 using Microsoft.EntityFrameworkCore;
 
 /// <summary>
@@ -20,9 +22,9 @@ using Microsoft.EntityFrameworkCore;
 public class MobileLoginRequest
 {
     /// <summary>
-    /// Gets or sets the session that approved this request. It must remain live until collection.
+    /// Maximum length of the client description columns.
     /// </summary>
-    public Guid? ApprovingSessionId { get; set; }
+    public const int ClientDescriptionMaxLength = 100;
 
     /// <summary>
     /// Gets or sets the unique identifier for this login request.
@@ -30,15 +32,28 @@ public class MobileLoginRequest
     public string Id { get; set; } = string.Empty;
 
     /// <summary>
+    /// Gets or sets the algorithm <see cref="ClientPublicKey"/> is for, which is what the mobile app must
+    /// encrypt <see cref="EncryptedAccountKey"/> with.
+    /// </summary>
+    [StringLength(30)]
+    public VaultKeyAlgorithm Algorithm { get; set; } = VaultKeyAlgorithm.RsaOaepSha256;
+
+    /// <summary>
     /// Gets or sets the public key from the client (base64 encoded).
     /// </summary>
     public string ClientPublicKey { get; set; } = string.Empty;
 
     /// <summary>
-    /// Gets or sets the encrypted decryption key from the mobile app (base64 encoded).
+    /// Gets or sets the SHA-256 hash (base64) of the poll secret that only the initiating client holds.
+    /// </summary>
+    [StringLength(44)]
+    public string PollSecretHash { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Gets or sets the Account Key from the mobile app, encrypted with <see cref="ClientPublicKey"/> (base64 encoded).
     /// Will be null until mobile app responds.
     /// </summary>
-    public string? EncryptedDecryptionKey { get; set; }
+    public string? EncryptedAccountKey { get; set; }
 
     /// <summary>
     /// Gets or sets the created timestamp.
@@ -51,13 +66,18 @@ public class MobileLoginRequest
     public DateTime? FulfilledAt { get; set; }
 
     /// <summary>
+    /// Gets or sets the declined timestamp (when the mobile app refused the request).
+    /// </summary>
+    public DateTime? DeclinedAt { get; set; }
+
+    /// <summary>
     /// Gets or sets the retrieved timestamp (when client successfully retrieved and decrypted).
     /// </summary>
     public DateTime? RetrievedAt { get; set; }
 
     /// <summary>
     /// Gets or sets the timestamp when sensitive data was cleared from this record.
-    /// Sensitive data (ClientPublicKey, EncryptedDecryptionKey, Salt, etc.) is cleared
+    /// Sensitive data (ClientPublicKey, EncryptedAccountKey) is cleared
     /// after a timeout period to minimize risk if server is compromised.
     /// </summary>
     public DateTime? ClearedAt { get; set; }
@@ -66,6 +86,24 @@ public class MobileLoginRequest
     /// Gets or sets the IP address of the client that initiated the request.
     /// </summary>
     public string? ClientIpAddress { get; set; }
+
+    /// <summary>
+    /// Gets or sets the X-AliasVault-Client header of the client that initiated the request, e.g. "chrome-0.30.0".
+    /// </summary>
+    [StringLength(ClientDescriptionMaxLength)]
+    public string? ClientName { get; set; }
+
+    /// <summary>
+    /// Gets or sets the browser of the client that initiated the request, derived from its user agent.
+    /// </summary>
+    [StringLength(ClientDescriptionMaxLength)]
+    public string? ClientBrowser { get; set; }
+
+    /// <summary>
+    /// Gets or sets the operating system of the client that initiated the request, derived from its user agent.
+    /// </summary>
+    [StringLength(ClientDescriptionMaxLength)]
+    public string? ClientOperatingSystem { get; set; }
 
     /// <summary>
     /// Gets or sets the IP address of the mobile device that fulfilled the request.

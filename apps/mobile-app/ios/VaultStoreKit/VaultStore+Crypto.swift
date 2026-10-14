@@ -2,7 +2,7 @@ import Foundation
 import CryptoKit
 import LocalAuthentication
 import Security
-import SignalArgon2
+import RustCoreFramework
 import VaultUtils
 
 /// Extension for the VaultStore class to handle encryption/decryption
@@ -12,109 +12,148 @@ extension VaultStore {
                                      salt: String,
                                      encryptionType: String,
                                      encryptionSettings: String) throws -> Data {
-        guard encryptionType == "Argon2Id" else {
+        // Both types derive the unlock key with Argon2id; they differ only in how the SRP input is made from it.
+        guard encryptionType == "Argon2Id" || encryptionType == "Argon2IdHkdf" else {
             throw NSError(domain: "VaultStore", code: 13, userInfo: [NSLocalizedDescriptionKey: "Unsupported encryption type: \(encryptionType)"])
         }
 
-        // Parse encryption settings JSON
-        guard let settingsData = encryptionSettings.data(using: .utf8),
-              let settings = try? JSONSerialization.jsonObject(with: settingsData, options: []) as? [String: Any],
-              let iterations = settings["Iterations"] as? UInt32,
-              let memorySize = settings["MemorySize"] as? UInt32,
-              let parallelism = settings["DegreeOfParallelism"] as? UInt32 else {
-            throw NSError(domain: "VaultStore", code: 14, userInfo: [NSLocalizedDescriptionKey: "Invalid encryption settings"])
-        }
-
-        // Convert password and salt to Data
-        guard let passwordData = password.data(using: .utf8) else {
-            throw NSError(domain: "VaultStore", code: 16, userInfo: [NSLocalizedDescriptionKey: "Invalid password"])
-        }
-
-        guard let saltData = salt.data(using: .utf8) else {
-            throw NSError(domain: "VaultStore", code: 15, userInfo: [NSLocalizedDescriptionKey: "Invalid salt"])
-        }
-
-        // Use SignalArgon2 to hash the password via Argon2id
-        guard let derivedKeyTuple = try? Argon2.hash(
-            iterations: iterations,
-            memoryInKiB: memorySize,
-            threads: parallelism,
-            password: passwordData,
-            salt: saltData,
-            desiredLength: 32,
-            variant: .id,
-            version: .v13
-        ) else {
+        guard let derivedKey = try? RustCoreFramework.argon2DeriveKey(password: password, salt: salt, encryptionSettings: encryptionSettings) else {
             throw NSError(domain: "VaultStore", code: 17, userInfo: [NSLocalizedDescriptionKey: "Argon2 hashing failed"])
         }
 
-        // Return only the raw Data from the tuple
-        return derivedKeyTuple.raw
+        return derivedKey
     }
 
-    /// Store the encryption key in memory only (no keychain persistence).
-    /// Use this to test if a password-derived key is valid before persisting.
-    public func storeEncryptionKeyInMemory(base64Key: String) throws {
+    /// Open a session in memory with the unlock key or the Account Key, without keychain persistence.
+    /// Use this to test if a key is valid before persisting.
+    public func storeAccountKeyInMemory(base64Key: String) throws {
         guard let keyData = Data(base64Encoded: base64Key) else {
             throw NSError(domain: "VaultStore", code: 6, userInfo: [NSLocalizedDescriptionKey: "Invalid base64 key"])
         }
 
-        guard keyData.count == 32 else {
+        try openSession(with: keyData)
+        print("Opened session in memory only (no keychain persistence)")
+    }
+
+    /// Clear the Account Key from memory.
+    /// This forces getEncryptionKey() to fetch the Account Key from keychain on next access.
+    public func clearEncryptionKeyFromMemory() {
+        self.accountKey = nil
+        clearLastSuccessfulAuth()
+        print("Cleared Account Key from memory")
+    }
+
+    /// Open a session in memory with the unlock key or the Account Key AND persist the Account Key to keychain if Face ID is enabled.
+    public func storeAccountKey(base64Key: String) throws {
+        // First open the session in memory
+        try storeAccountKeyInMemory(base64Key: base64Key)
+
+        // Then persist to keychain if Face ID is enabled AND keystore is available
+        if self.enabledAuthMethods.contains(.faceID), let keyData = self.accountKey {
+            if isKeystoreAvailable() {
+                try storeKeyInKeychain(keyData)
+                print("Opened session and persisted Account Key to keychain")
+            } else {
+                print("Opened session in memory (keystore unavailable - device passcode not set, skipping keychain)")
+            }
+        } else {
+            print("Opened session in memory (Face ID not enabled, skipping keychain)")
+        }
+    }
+
+    /// Open a session with a key that opens the cached account key chain; the session keeps the Account Key it yields.
+    internal func openSession(with key: Data) throws {
+        guard key.count == 32 else {
             throw NSError(domain: "VaultStore", code: 7, userInfo: [NSLocalizedDescriptionKey: "Invalid key length. Expected 32 bytes"])
         }
 
-        self.encryptionKey = keyData
-        print("Stored key in memory only (no keychain persistence)")
-    }
-
-    /// Clear the encryption key from memory.
-    /// This forces getEncryptionKey() to fetch from keychain on next access.
-    public func clearEncryptionKeyFromMemory() {
-        self.encryptionKey = nil
-        clearLastSuccessfulAuth()
-        print("Cleared encryption key from memory")
-    }
-
-    /// Store the encryption key in memory AND persist to keychain if Face ID is enabled.
-    public func storeEncryptionKey(base64Key: String) throws {
-        // First store in memory
-        try storeEncryptionKeyInMemory(base64Key: base64Key)
-
-        // Then persist to keychain if Face ID is enabled AND keystore is available
-        if self.enabledAuthMethods.contains(.faceID), let keyData = self.encryptionKey {
-            if isKeystoreAvailable() {
-                try storeKeyInKeychain(keyData)
-                print("Stored key in memory and persisted to keychain")
-            } else {
-                print("Stored key in memory (keystore unavailable - device passcode not set, skipping keychain)")
-            }
-        } else {
-            print("Stored key in memory (Face ID not enabled, skipping keychain)")
-        }
+        self.accountKey = try openAccountKeyChain(with: key).accountKey
     }
 
     /// Store the key derivation parameters used for deriving the encryption key from the plain text password
-    public func storeEncryptionKeyDerivationParams(_ keyDerivationParams: String) throws {
+    public func storeUnlockKeyDerivationParams(_ keyDerivationParams: String) throws {
         // Store the key derivation params in memory
         self.keyDerivationParams = keyDerivationParams
 
         // Store the key derivation params in UserDefaults
-        self.userDefaults.set(keyDerivationParams, forKey: VaultConstants.encryptionKeyDerivationParamsKey)
+        self.userDefaults.set(keyDerivationParams, forKey: VaultConstants.unlockKeyDerivationParamsKey)
 
         print("Stored key derivation params in UserDefaults")
     }
 
     /// Get the key derivation parameters used for deriving the encryption key from the plain text password
-    public func getEncryptionKeyDerivationParams() -> String? {
+    public func getUnlockKeyDerivationParams() -> String? {
         return self.keyDerivationParams
     }
 
-    /// Verify password and return encryption key if correct
-    /// Returns nil if password is incorrect
+    /// Store the account-key chain the native password unlock unwraps.
+    public func storeAccountKeyChain(_ chainJson: String?) {
+        if let chainJson = chainJson, !chainJson.isEmpty {
+            self.userDefaults.set(chainJson, forKey: VaultConstants.accountKeyChainKey)
+        } else {
+            self.userDefaults.removeObject(forKey: VaultConstants.accountKeyChainKey)
+        }
+        self.userDefaults.synchronize()
+    }
+
+    /// The stored account-key chain JSON, or nil for a legacy account.
+    public func getAccountKeyChain() -> String? {
+        return self.userDefaults.string(forKey: VaultConstants.accountKeyChainKey)
+    }
+
+    /// The keys an opened account key chain gives.
+    internal struct SessionKeys {
+        /// The key that encrypts and decrypts the vault.
+        let vaultEncryptionKey: Data
+        /// The account private key (JWK), nil when the account has no keypair or it does not open.
+        let accountPrivateKey: String?
+        /// The Account Key to keep, in place of the key the chain was opened with.
+        let accountKey: Data
+    }
+
+    /// Open the cached account key chain with the Account Key or the unlock key (Rust `openAccountKeyChain`).
+    internal func openAccountKeyChain(with key: Data) throws -> SessionKeys {
+        guard let chainJson = getAccountKeyChain(),
+              let chainData = chainJson.data(using: .utf8),
+              let chain = try? JSONSerialization.jsonObject(with: chainData) as? [String: Any],
+              let encryptedAccountKey = chain["encryptedAccountKey"] as? String, !encryptedAccountKey.isEmpty else {
+            return SessionKeys(vaultEncryptionKey: key, accountPrivateKey: nil, accountKey: key)
+        }
+
+        guard let encryptedVek = chain["encryptedVek"] as? String, !encryptedVek.isEmpty else {
+            throw NSError(domain: "VaultStore", code: 41, userInfo: [NSLocalizedDescriptionKey: "Account key chain is missing the encrypted VEK"])
+        }
+
+        // A private key that does not open must not fail the unlock; grants stay closed until the next login.
+        let encryptedPrivateKey = (chain["encryptedAccountPrivateKey"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        do {
+            let keys = try RustCoreFramework.openAccountKeyChain(
+                storedKey: key, encryptedAccountKey: encryptedAccountKey, encryptedVek: encryptedVek, encryptedAccountPrivateKey: encryptedPrivateKey
+            )
+            return SessionKeys(vaultEncryptionKey: keys.vaultEncryptionKey, accountPrivateKey: keys.accountPrivateKey, accountKey: keys.accountKey)
+        } catch KeyChainError.UnlockKeyRejected {
+            throw AppError.unlockKeyRejected
+        } catch KeyChainError.KeyChainUnreadable(let message) {
+            // The account key opened, so this is a damaged chain and never a wrong password.
+            throw AppError.keyChainUnreadable(message: message)
+        }
+    }
+
+    /// Decrypt base64 RSA-OAEP ciphertext with the session's account private key as UTF-8 text, or nil when the session holds
+    /// no private key or it does not open the ciphertext.
+    public func decryptWithAccountPrivateKey(_ base64Ciphertext: String) -> String? {
+        guard let privateKey = accountPrivateKey, let plaintext = try? RustCoreFramework.rsaDecrypt(base64Ciphertext: base64Ciphertext, privateKeyJwk: privateKey) else {
+            return nil
+        }
+        return String(data: plaintext, encoding: .utf8)
+    }
+
+    /// Verify the password and return its unlock key (base64) if correct. Callers derive the SRP input from it for the
+    /// account's encryption type; `storeAccountKey` turns it into the Account Key.
     public func verifyPassword(_ password: String) -> String? {
         do {
             // Get encryption key derivation parameters
-            guard let paramsString = getEncryptionKeyDerivationParams(),
+            guard let paramsString = getUnlockKeyDerivationParams(),
                   let paramsData = paramsString.data(using: .utf8),
                   let params = try? JSONSerialization.jsonObject(with: paramsData) as? [String: Any],
                   let salt = params["salt"] as? String,
@@ -123,8 +162,9 @@ extension VaultStore {
                 return nil
             }
 
-            // Derive key from password
+            // Derive the unlock key from the password and unwrap the chain; a wrong password fails the unwrap.
             let derivedKey = try deriveKeyFromPassword(password, salt: salt, encryptionType: encryptionType, encryptionSettings: encryptionSettings)
+            let vaultEncryptionKey = try openAccountKeyChain(with: derivedKey).vaultEncryptionKey
 
             // Try to decrypt the vault to verify the password is correct
             guard let encryptedDbBase64 = getEncryptedDatabase(),
@@ -133,11 +173,11 @@ extension VaultStore {
             }
 
             // Test decryption
-            let key = SymmetricKey(data: derivedKey)
+            let key = SymmetricKey(data: vaultEncryptionKey)
             let sealedBox = try AES.GCM.SealedBox(combined: encryptedDbData)
             _ = try AES.GCM.open(sealedBox, using: key)
 
-            // If decryption succeeded, return the key as base64
+            // If decryption succeeded, return the unlock key as base64
             return derivedKey.base64EncodedString()
         } catch {
             // Password incorrect or decryption failed
@@ -164,7 +204,7 @@ extension VaultStore {
             let decryptedData = try AES.GCM.open(sealedBox, using: key)
 
             /*
-             * If the decryption succeeds, try to persist the used encryption key in the keychain.
+             * If the decryption succeeds, try to persist the Account Key in the keychain.
              * This makes sure that on future password unlock attempts, only successful decryptions
              * will be remembered and used so failed re-authentication attempts won't overwrite
              * a previous successful decryption key stored in the keychain.
@@ -172,9 +212,9 @@ extension VaultStore {
              * We only attempt this if Face ID is enabled AND keystore is available.
              * If keystore is not available (no device passcode), we silently skip this step.
              */
-            if self.enabledAuthMethods.contains(.faceID) && isKeystoreAvailable() {
+            if self.enabledAuthMethods.contains(.faceID) && isKeystoreAvailable(), let accountKey = self.accountKey {
                 do {
-                    try storeKeyInKeychain(encryptionKey)
+                    try storeKeyInKeychain(accountKey)
                 } catch {
                     // Don't fail the decryption if we can't store to keychain
                     // This can happen if device passcode is removed after Face ID was enabled
@@ -186,7 +226,7 @@ extension VaultStore {
         } catch {
             print("Decryption failed: \(error)")
 
-            // Note: We intentionally do NOT clear the encryption key here.
+            // Note: We intentionally do not clear the encryption key here.
             // The key may be valid for a different vault (e.g., after password change
             // during login, the new key is stored but the old vault can't be decrypted).
             // Clearing it would break the subsequent sync that downloads the new vault.
@@ -214,16 +254,38 @@ extension VaultStore {
         #endif
     }
 
+    /// The vault encryption key as base64, for the sync engine.
+    public func getEncryptionKeyBase64() throws -> String {
+        return try getEncryptionKey().base64EncodedString()
+    }
+
     /// Get the encryption key - the key used to encrypt and decrypt the vault.
-    /// This method is meant to only be used internally by the VaultStore class and not
-    /// be exposed to the public API or React Native for security reasons.
     internal func getEncryptionKey() throws -> Data {
-        // If key is already in memory, return it immediately
-        // This is the common case during normal operation
-        if let key = self.encryptionKey {
+        let key = try getAccountKey()
+        let keys = try openAccountKeyChain(with: key)
+        if keys.accountKey != key {
+            // A legacy key, see `VaultStore+LegacyKeyConversion`.
+            self.accountKey = keys.accountKey
+            convertLegacyKeychainKey(keychainKey: key, accountKey: keys.accountKey)
+        }
+        return keys.vaultEncryptionKey
+    }
+
+    /// Get the Account Key, opening the session from the keychain when none is in memory.
+    internal func getAccountKey() throws -> Data {
+        if let key = self.accountKey {
             return key
         }
 
+        try openSessionFromKeychain()
+        guard let key = self.accountKey else {
+            throw AppError.keystoreKeyNotFound
+        }
+        return key
+    }
+
+    /// Open a session with the Account Key the keychain holds, behind a biometric prompt.
+    private func openSessionFromKeychain() throws {
         // Key not in memory - check if we should try keychain retrieval
         // Only attempt keychain retrieval if Face ID is enabled AND keystore is available
         if self.enabledAuthMethods.contains(.faceID) && isKeystoreAvailable() {
@@ -253,15 +315,28 @@ extension VaultStore {
             #endif
 
             print("Attempting to get encryption key from keychain as Face ID is enabled and keystore is available")
+            let keyData: Data
             do {
-                let keyData = try retrieveKeyFromKeychain(context: context)
-                self.encryptionKey = keyData
-                return keyData
+                keyData = try retrieveKeyFromKeychain(context: context)
             } catch let vaultError as AppError {
                 throw vaultError
             } catch {
                 throw AppError.keystoreKeyNotFound
             }
+
+            do {
+                try openSession(with: keyData)
+                if let accountKey = self.accountKey {
+                    convertLegacyKeychainKey(keychainKey: keyData, accountKey: accountKey)
+                }
+            } catch let vaultError as AppError {
+                print("The Account Key from the keychain does not open the account key chain: \(vaultError.message)")
+                throw vaultError
+            } catch {
+                print("The Account Key from the keychain does not open the account key chain: \(error)")
+                throw AppError.unlockKeyRejected
+            }
+            return
         }
 
         // Key not in memory and cannot retrieve from keychain
@@ -309,7 +384,7 @@ extension VaultStore {
         return status == errSecSuccess
     }
 
-    /// Store the encryption key in the keychain
+    /// Store the Account Key in the keychain
     internal func storeKeyInKeychain(_ keyData: Data) throws {
         // Check if keystore is available (device passcode must be set)
         guard isKeystoreAvailable() else {
@@ -331,7 +406,7 @@ extension VaultStore {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: VaultConstants.keychainService,
-            kSecAttrAccount as String: VaultConstants.encryptionKeyKey,
+            kSecAttrAccount as String: VaultConstants.accountKeyKey,
             kSecAttrAccessGroup as String: VaultConstants.keychainAccessGroup,
             kSecValueData as String: keyData,
             kSecAttrAccessControl as String: accessControl
@@ -350,7 +425,7 @@ extension VaultStore {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: VaultConstants.keychainService,
-            kSecAttrAccount as String: VaultConstants.encryptionKeyKey,
+            kSecAttrAccount as String: VaultConstants.accountKeyKey,
             kSecAttrAccessGroup as String: VaultConstants.keychainAccessGroup
         ]
 
@@ -362,7 +437,7 @@ extension VaultStore {
 
     // MARK: - Private Keychain Methods
 
-    /// Retrieve the encryption key from the keychain
+    /// Retrieve the Account Key from the keychain
     private func retrieveKeyFromKeychain(context: LAContext) throws -> Data {
         // Ensure interaction is allowed so system can prompt for biometric authentication
         context.interactionNotAllowed = false
@@ -375,7 +450,7 @@ extension VaultStore {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: VaultConstants.keychainService,
-            kSecAttrAccount as String: VaultConstants.encryptionKeyKey,
+            kSecAttrAccount as String: VaultConstants.accountKeyKey,
             kSecAttrAccessGroup as String: VaultConstants.keychainAccessGroup,
             kSecReturnData as String: true,
             kSecUseAuthenticationContext as String: context,

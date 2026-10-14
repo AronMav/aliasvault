@@ -8,23 +8,12 @@ namespace AliasServerDb;
 
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
-using Microsoft.AspNetCore.Identity;
-using Microsoft.EntityFrameworkCore;
 
 /// <summary>
-/// Refresh tokens for users.
+/// Refresh tokens for users. Only a hash of the token is stored; the token itself lives on the client.
 /// </summary>
-[Index(nameof(UserId), nameof(SessionId))]
 public class AliasVaultUserRefreshToken
 {
-    /// <summary>
-    /// Gets or sets the stable session identity shared by all rotations of a refresh token.
-    /// </summary>
-    public Guid SessionId { get; set; } = Guid.NewGuid();
-
-    /// <summary>Gets or sets the durable session, retained across token rotations.</summary>
-    public virtual UserSession Session { get; set; } = null!;
-
     /// <summary>
     /// Gets or sets Refresh Token ID.
     /// </summary>
@@ -55,18 +44,16 @@ public class AliasVaultUserRefreshToken
     public string? IpAddress { get; set; }
 
     /// <summary>
-    /// Gets or sets the SHA-256 hash of the token value. The token itself is only ever held by the
-    /// client, so reading this table does not yield anything that can be presented as a session.
+    /// Gets or sets the SHA-256 hash (lowercase hex) of the token value the client holds.
     /// </summary>
-    [StringLength(255)]
-    public string Value { get; set; } = null!;
+    [StringLength(64)]
+    public string TokenHash { get; set; } = null!;
 
     /// <summary>
-    /// Gets or sets the hash of the token that was replaced by the current one (optional), which
-    /// records what a rotation replaced.
+    /// Gets or sets the hash of the token this one replaced on rotation, if any.
     /// </summary>
-    [StringLength(255)]
-    public string? PreviousTokenValue { get; set; }
+    [StringLength(64)]
+    public string? PreviousTokenHash { get; set; }
 
     /// <summary>
     /// Gets or sets the expiration date.

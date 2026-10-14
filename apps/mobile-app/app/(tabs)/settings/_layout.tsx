@@ -1,3 +1,4 @@
+import { familySharingText } from '@aliasvault/client/sharing/FamilySharingView';
 import { Stack } from 'expo-router';
 import { useTranslation } from 'react-i18next';
 import { Platform, Text } from 'react-native';
@@ -16,14 +17,14 @@ export default function SettingsLayout(): React.ReactNode {
       <Stack.Screen
         name="index"
         options={{
-          title: t('settings.title'),
+          title: t('common.settings'),
           headerShown: Platform.OS === 'android',
           /**
            * On Android, we use a custom header component that includes the AliasVault logo.
            * On iOS, we don't show the header as a custom collapsible header is used.
            * @returns {React.ReactNode} The header component
            */
-          headerTitle: (): React.ReactNode => Platform.OS === 'android' ? <AndroidHeader title={t('settings.title')} /> : <Text>{t('settings.title')}</Text>,
+          headerTitle: (): React.ReactNode => Platform.OS === 'android' ? <AndroidHeader title={t('common.settings')} /> : <Text>{t('common.settings')}</Text>,
           ...defaultHeaderOptions,
         }}
       />
@@ -31,7 +32,7 @@ export default function SettingsLayout(): React.ReactNode {
         name="ios-autofill"
         options={{
           title: t('settings.autofill'),
-          headerBackTitle: t('settings.title'),
+          headerBackTitle: t('common.settings'),
           ...defaultHeaderOptions,
         }}
       />
@@ -39,7 +40,7 @@ export default function SettingsLayout(): React.ReactNode {
         name="android-autofill"
         options={{
           title: t('settings.autofill'),
-          headerBackTitle: t('settings.title'),
+          headerBackTitle: t('common.settings'),
           ...defaultHeaderOptions,
         }}
       />
@@ -47,7 +48,7 @@ export default function SettingsLayout(): React.ReactNode {
         name="vault-unlock"
         options={{
           title: t('settings.vaultUnlock'),
-          headerBackTitle: t('settings.title'),
+          headerBackTitle: t('common.settings'),
           ...defaultHeaderOptions,
         }}
       />
@@ -55,7 +56,7 @@ export default function SettingsLayout(): React.ReactNode {
         name="auto-lock"
         options={{
           title: t('settings.autoLock'),
-          headerBackTitle: t('settings.title'),
+          headerBackTitle: t('common.settings'),
           ...defaultHeaderOptions,
         }}
       />
@@ -63,7 +64,7 @@ export default function SettingsLayout(): React.ReactNode {
         name="clipboard-clear"
         options={{
           title: t('settings.clipboardClear'),
-          headerBackTitle: t('settings.title'),
+          headerBackTitle: t('common.settings'),
           ...defaultHeaderOptions,
         }}
       />
@@ -71,7 +72,7 @@ export default function SettingsLayout(): React.ReactNode {
         name="password-generator"
         options={{
           title: t('settings.passwordGenerator'),
-          headerBackTitle: t('settings.title'),
+          headerBackTitle: t('common.settings'),
           ...defaultHeaderOptions,
         }}
       />
@@ -79,14 +80,14 @@ export default function SettingsLayout(): React.ReactNode {
         name="identity-generator"
         options={{
           title: t('settings.identityGenerator'),
-          headerBackTitle: t('settings.title'),
+          headerBackTitle: t('common.settings'),
           ...defaultHeaderOptions,
         }}
       />
       <Stack.Screen
         name="identity-generator-language"
         options={{
-          title: t('settings.identityGeneratorSettings.languageSection'),
+          title: t('settings.language'),
           headerBackTitle: t('settings.identityGenerator'),
           ...defaultHeaderOptions,
         }}
@@ -95,15 +96,23 @@ export default function SettingsLayout(): React.ReactNode {
         name="import-export"
         options={{
           title: t('settings.importExport'),
-          headerBackTitle: t('settings.title'),
+          headerBackTitle: t('common.settings'),
+          ...defaultHeaderOptions,
+        }}
+      />
+      <Stack.Screen
+        name="family-sharing"
+        options={{
+          title: familySharingText.title,
+          headerBackTitle: t('common.settings'),
           ...defaultHeaderOptions,
         }}
       />
       <Stack.Screen
         name="security/index"
         options={{
-          title: t('settings.securitySettings.title'),
-          headerBackTitle: t('settings.title'),
+          title: t('settings.accountSecurity'),
+          headerBackTitle: t('common.settings'),
           ...defaultHeaderOptions,
         }}
       />
@@ -131,16 +140,30 @@ export default function SettingsLayout(): React.ReactNode {
       <Stack.Screen
         name="security/delete-account"
         options={{
-          title: t('settings.securitySettings.deleteAccountTitle'),
+          title: t('settings.securitySettings.deleteAccount.deleteAccount'),
           ...defaultHeaderOptions,
         }}
       />
-      {/* Developer only screen. Note: not required to be translated. */}
+      {/* Developer only screens. Note: not required to be translated. */}
       <Stack.Screen
-        name="developer-tools"
+        name="developer-tools/index"
         options={{
           title: 'Developer tools',
-          headerBackTitle: t('settings.title'),
+          headerBackTitle: t('common.settings'),
+          ...defaultHeaderOptions,
+        }}
+      />
+      <Stack.Screen
+        name="developer-tools/app-review"
+        options={{
+          title: 'App review',
+          ...defaultHeaderOptions,
+        }}
+      />
+      <Stack.Screen
+        name="developer-tools/sync-logs"
+        options={{
+          title: 'Sync logs',
           ...defaultHeaderOptions,
         }}
       />
@@ -152,7 +175,7 @@ export default function SettingsLayout(): React.ReactNode {
         }}
       />
       <Stack.Screen
-        name="mobile-unlock/[id]"
+        name="mobile-unlock/confirm"
         options={{
           title: t('settings.qrScanner.mobileLogin.confirmTitle'),
           ...defaultHeaderOptions,

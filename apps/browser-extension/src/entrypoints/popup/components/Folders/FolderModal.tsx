@@ -1,9 +1,10 @@
+import { hasErrorCode, getErrorMessage } from '@aliasvault/client/api/errors/AppErrorCodes';
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import ModalWrapper from '@/entrypoints/popup/components/Dialogs/ModalWrapper';
 
-import { hasErrorCode, getErrorMessage } from '@/utils/types/errors/AppErrorCodes';
+import { logFailure } from '@/utils/Diagnostics';
 
 type FolderModalProps = {
   isOpen: boolean;
@@ -43,7 +44,7 @@ const FolderModal: React.FC<FolderModalProps> = ({
 
     const trimmedName = folderName.trim();
     if (!trimmedName) {
-      setError(t('items.folderNameRequired'));
+      setError(t('items.folders.folderNameRequired'));
       return;
     }
 
@@ -59,7 +60,7 @@ const FolderModal: React.FC<FolderModalProps> = ({
       } else {
         setError(t('common.errors.unknownErrorTryAgain'));
       }
-      console.error('Error saving folder:', err);
+      logFailure('Error saving folder', err);
     } finally {
       setIsSubmitting(false);
     }
@@ -69,7 +70,7 @@ const FolderModal: React.FC<FolderModalProps> = ({
     <ModalWrapper
       isOpen={isOpen}
       onClose={onClose}
-      title={mode === 'create' ? t('items.createFolder') : t('items.editFolder')}
+      title={mode === 'create' ? t('items.folders.createFolder') : t('items.folders.editFolder')}
       footer={
         <div className="flex justify-end gap-3">
           <button
@@ -101,7 +102,7 @@ const FolderModal: React.FC<FolderModalProps> = ({
           htmlFor="folderName"
           className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
         >
-          {t('items.folderName')}
+          {t('items.folders.folderName')}
         </label>
         <input
           id="folderName"

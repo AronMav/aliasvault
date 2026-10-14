@@ -1,0 +1,307 @@
+package net.aliasvault.app.vaultstore
+
+import android.util.Log
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import net.aliasvault.app.rustcore.JnaInitializer
+import net.aliasvault.app.utils.AppInfo
+import net.aliasvault.app.vaultstore.storageprovider.StorageProvider
+import net.aliasvault.app.webapi.WebApiService
+import org.json.JSONArray
+import org.json.JSONObject
+import uniffi.aliasvault_core.VaultSyncSession
+import java.net.SocketTimeoutException
+
+/**
+ * Drives one operation of the Rust vault sync engine against this vault store.
+ *
+ * The engine owns the sync algorithm and emits commands (HTTP, state, SQLite, vault storage); this class carries
+ * each one out and feeds the response back until the engine reports `done`. See the `vault_sync` module in
+ * `core/rust` for the command and response contract.
+ * Other platform implementations: VaultSyncEngine.ts (core/client), VaultSyncEngine.swift (iOS).
+ */
+class VaultSyncEngine(
+    private val vaultStore: VaultStore,
+    private val storageProvider: StorageProvider,
+    private val webApiService: WebApiService,
+) {
+    companion object {
+        private const val TAG = "VaultSyncEngine"
+
+        /** Engine state keys mirrored into the native account-key chain, so the native password unlock can unwrap it. */
+        private const val ENCRYPTED_ACCOUNT_KEY_STATE_KEY = "encryptedAccountKey"
+        private const val ENCRYPTED_VEK_STATE_KEY = "encryptedVek"
+        private const val ENCRYPTED_ACCOUNT_PRIVATE_KEY_STATE_KEY = "encryptedAccountPrivateKey"
+
+        /** Engine state key that lives in the native store instead (the login writes it there), routed on read and write. */
+        private const val DERIVATION_PARAMS_STATE_KEY = "encryptionKeyDerivationParams"
+    }
+
+    /** Whether the live vault was written to since the last store went through. */
+    private var localMutated = false
+    private var runLog = VaultSyncRunLog("")
+
+    /**
+     * Run one engine operation (`fullSync`, `statusCheck`, `migrationStatus`, `migrateManifest`, `resolveVaultKey`, or a
+     * sharing operation) and return its result.
+     */
+    suspend fun run(operation: String, forcePull: Boolean = false, encryptionKey: String? = null, sharing: JSONObject? = null): JSONObject {
+        JnaInitializer.ensureInitialized()
+        val log = VaultSyncRunLog(operation)
+        runLog = log
+        var success: Boolean? = null
+        val session = VaultSyncSession(buildRequest(operation, forcePull, encryptionKey, sharing))
+        try {
+            while (true) {
+                val commandJson = log.engine { session.nextCommand() }
+                val command = log.json { JSONObject(commandJson) }
+                val kind = command.optString("kind")
+                if (kind == "done") {
+                    val result = command.optJSONObject("result") ?: JSONObject()
+                    success = if (result.has("success")) result.optBoolean("success") else null
+                    return result
+                }
+                val startNanos = System.nanoTime()
+                val commandBytes = if (kind == "http" && command.optBoolean("binaryBody", false)) log.engine { session.commandBytes() } else null
+                val (response, bytes) = respond(kind, command, commandBytes)
+                log.recordCommand(kind, command, response, bytes, System.nanoTime() - startNanos)
+                val responseJson = log.json { response.toString() }
+                log.engine { session.resume(responseJson, bytes) }
+            }
+        } finally {
+            discardLocalDatabaseIfNeeded()
+            session.destroy()
+            log.finish(success, storageProvider)
+        }
+    }
+
+    // region Request
+
+    private fun buildRequest(operation: String, forcePull: Boolean, encryptionKey: String?, sharing: JSONObject?): String {
+        val metadata = vaultStore.metadata.getVaultMetadataObject()
+        val syncState = vaultStore.getSyncState()
+        val request = JSONObject().apply {
+            put("operation", operation)
+            put("username", vaultStore.getUsername() ?: "")
+            put("isDirty", syncState.isDirty)
+            put("mutationSequence", syncState.mutationSequence)
+            put("dirtyScopes", JSONArray(if (syncState.isDirty) vaultStore.metadata.getDirtyScopes() else emptyList<String>()))
+            put("privateEmailDomains", JSONArray(metadata?.privateEmailDomains ?: emptyList<String>()))
+            put("forcePull", forcePull)
+            put("minServerVersion", AppInfo.MIN_SERVER_VERSION)
+            put("isOfflineMode", vaultStore.getOfflineMode())
+        }
+        (encryptionKey ?: vaultStore.getEncryptionKeyBase64())?.let { request.put("encryptionKey", it) }
+        (state("accountPublicKey") as? String)?.let { request.put("accountPublicKey", it) }
+        vaultStore.accountPrivateKey?.let { request.put("accountPrivateKey", it) }
+        vaultStore.accountKeyBase64?.let { request.put("accountKey", it) }
+        sharing?.let { request.put("sharing", it) }
+        return request.toString()
+    }
+
+    // endregion
+
+    // region Commands
+
+    /**
+     * The JSON response to one command.
+     */
+    @Suppress("TooGenericExceptionCaught")
+    private suspend fun respond(kind: String, command: JSONObject, commandBytes: ByteArray?): Pair<JSONObject, ByteArray?> {
+        if (kind == "http") {
+            return http(command, commandBytes)
+        }
+        if (kind != "dbExport") {
+            return Pair(handle(kind, command), null)
+        }
+        return try {
+            Pair(JSONObject(), vaultStore.database.export())
+        } catch (e: Exception) {
+            Pair(errorResponse(kind, e), null)
+        }
+    }
+
+    @Suppress("TooGenericExceptionCaught")
+    private suspend fun handle(kind: String, command: JSONObject): JSONObject {
+        return try {
+            when (kind) {
+                "stateGet" -> JSONObject().put("value", state(command.optString("key")) ?: JSONObject.NULL)
+                "stateSet" -> {
+                    setState(command.optString("key"), command.opt("value"))
+                    JSONObject()
+                }
+                "stateRemove" -> {
+                    setState(command.optString("key"), null)
+                    JSONObject()
+                }
+                "dbQuery" -> {
+                    val params = (command.optJSONArray("params") ?: JSONArray()).toString()
+                    JSONObject().put("rows", JSONArray(vaultStore.database.connection().query(command.optString("sql"), params)))
+                }
+                "dbExec" -> {
+                    vaultStore.database.connection().exec((command.optJSONArray("statements") ?: JSONArray()).toString())
+                    localMutated = true
+                    JSONObject()
+                }
+                "vaultStore" -> storeVault(command)
+                "vaultLoad" -> JSONObject().put("encryptedBlob", if (vaultStore.hasEncryptedDatabase()) vaultStore.getEncryptedDatabase() else JSONObject.NULL)
+                "markClean" -> {
+                    val cleared = vaultStore.markVaultClean(command.optInt("mutationSeqAtStart"), vaultStore.metadata.getVaultRevisionNumber())
+                    JSONObject().put("cleared", cleared)
+                }
+                "log" -> {
+                    runLog.engineLine(command.optString("level", "log"), command.optString("message"))
+                    JSONObject()
+                }
+                else -> JSONObject().put("error", "Unknown engine command $kind")
+            }
+        } catch (e: Exception) {
+            errorResponse(kind, e)
+        }
+    }
+
+    /**
+     * The `{ "error": ... }` response for a failed command.
+     */
+    private fun errorResponse(kind: String, e: Exception): JSONObject {
+        Log.w(TAG, "Engine command $kind failed", e)
+        return JSONObject().put("error", e.message ?: e.toString())
+    }
+
+    /**
+     * An API request. On success a binary response returns its body as raw bytes instead of as `body` text in the JSON.
+     */
+    @Suppress("TooGenericExceptionCaught")
+    private suspend fun http(command: JSONObject, commandBytes: ByteArray?): Pair<JSONObject, ByteArray?> = withContext(Dispatchers.IO) {
+        val body = if (command.has("body") && !command.isNull("body")) command.getString("body") else null
+        val binaryResponse = command.optBoolean("binaryResponse", false)
+        val binaryBody = command.optBoolean("binaryBody", false)
+        val headers = mutableMapOf("Accept" to if (binaryResponse) "application/octet-stream" else "application/json")
+        if (binaryBody) {
+            headers["Content-Type"] = "application/octet-stream"
+        } else if (body != null) {
+            headers["Content-Type"] = "application/json"
+        }
+        try {
+            val response = webApiService.executeRequest(
+                method = command.optString("method", "GET"),
+                endpoint = command.optString("path"),
+                body = body,
+                headers = headers,
+                requiresAuth = command.optBoolean("auth", true),
+                largeTransfer = command.optBoolean("largeTransfer", false),
+                bodyBytes = if (binaryBody) commandBytes ?: ByteArray(0) else null,
+                rawBinaryResponse = binaryResponse,
+            )
+            val bytes = response.bodyBytes
+            if (binaryResponse && bytes != null) {
+                Pair(JSONObject().put("status", response.statusCode), bytes)
+            } else {
+                Pair(JSONObject().put("status", response.statusCode).put("body", response.body), null)
+            }
+        } catch (e: SocketTimeoutException) {
+            Pair(JSONObject().put("status", 0).put("transportError", e.toString()).put("timedOut", true), null)
+        } catch (e: Exception) {
+            Pair(JSONObject().put("status", 0).put("transportError", e.toString()).put("timedOut", false), null)
+        }
+    }
+
+    // endregion
+
+    // region State
+
+    /** Engine state is stored as the JSON text of `{"v": value}`, so any JSON value round-trips. */
+    private fun state(key: String): Any? {
+        if (key == DERIVATION_PARAMS_STATE_KEY) {
+            return storageProvider.getKeyDerivationParams().takeIf { it.isNotBlank() }?.let { JSONObject(it) }
+        }
+        val json = storageProvider.getSyncEngineState(key) ?: return null
+        return JSONObject(json).opt("v")?.takeIf { it != JSONObject.NULL }
+    }
+
+    private fun setState(key: String, value: Any?) {
+        if (key == DERIVATION_PARAMS_STATE_KEY) {
+            (value as? JSONObject)?.let { storageProvider.setKeyDerivationParams(it.toString()) }
+            return
+        }
+        if (value == null || value == JSONObject.NULL) {
+            storageProvider.setSyncEngineState(key, null)
+        } else {
+            storageProvider.setSyncEngineState(key, JSONObject().put("v", value).toString())
+        }
+        if (key == ENCRYPTED_ACCOUNT_KEY_STATE_KEY || key == ENCRYPTED_VEK_STATE_KEY || key == ENCRYPTED_ACCOUNT_PRIVATE_KEY_STATE_KEY) {
+            mirrorAccountKeyChain()
+        }
+    }
+
+    /**
+     * Keep the native account-key chain in step with the engine's cached key blobs.
+     */
+    private fun mirrorAccountKeyChain() {
+        val encryptedAccountKey = state(ENCRYPTED_ACCOUNT_KEY_STATE_KEY) as? String
+        val encryptedVek = state(ENCRYPTED_VEK_STATE_KEY) as? String
+        if (encryptedAccountKey == null || encryptedVek == null) {
+            vaultStore.storeAccountKeyChain(null)
+            return
+        }
+        val chain = JSONObject().put("encryptedAccountKey", encryptedAccountKey).put("encryptedVek", encryptedVek)
+        (state(ENCRYPTED_ACCOUNT_PRIVATE_KEY_STATE_KEY) as? String)?.let { chain.put("encryptedAccountPrivateKey", it) }
+        vaultStore.storeAccountKeyChain(chain.toString())
+    }
+
+    // endregion
+
+    // region Vault storage
+
+    private fun storeVault(command: JSONObject): JSONObject {
+        val encryptedBlob = command.getString("encryptedBlob")
+        val result = vaultStore.storeEncryptedVaultWithSyncState(
+            encryptedVault = encryptedBlob,
+            markDirty = command.optBoolean("markDirty", false),
+            serverRevision = optionalInt(command, "revision"),
+            expectedMutationSeq = optionalInt(command, "expectedMutationSeq"),
+        )
+        if (result.success) {
+            // The stored vault is now what the live database holds, so nothing is left to discard.
+            localMutated = false
+        }
+        if (result.success && vaultStore.isVaultUnlocked()) {
+            // The contract: after a store, the live database is the vault just stored.
+            val reloadStartNanos = System.nanoTime()
+            vaultStore.unlockVault()
+            runLog.note("Live vault reloaded (decrypt and open) in ${VaultSyncRunLog.elapsedMsSince(reloadStartNanos)}ms")
+        }
+        return JSONObject().put("success", result.success).put("mutationSequence", result.mutationSequence)
+    }
+
+    private fun optionalInt(command: JSONObject, key: String): Int? {
+        return if (command.has(key) && !command.isNull(key)) command.getInt(key) else null
+    }
+
+    // endregion
+
+    // region SQLite
+
+    /**
+     * Reload the stored vault when the run left changes in the live database that no store persisted, so the
+     * vault the app reads from is the one on disk rather than a half-finished sync.
+     */
+    @Suppress("TooGenericExceptionCaught")
+    private fun discardLocalDatabaseIfNeeded() {
+        if (!localMutated) {
+            return
+        }
+        localMutated = false
+        if (!vaultStore.isVaultUnlocked()) {
+            return
+        }
+        try {
+            vaultStore.unlockVault()
+            runLog.note("Discarded unpersisted local vault changes; reloaded the stored vault")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to reload the stored vault after discarding unpersisted changes", e)
+        }
+    }
+
+    // endregion
+}

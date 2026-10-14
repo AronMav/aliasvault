@@ -227,8 +227,8 @@ else
 EOF
 fi
 
-# Append the shared TLS policy so every deployment — AIO and multi-container
-# alike — gets the same modern cipher suite. Keep in sync with the AIO
+# Append the shared TLS policy so every deployment - AIO and multi-container
+# alike - gets the same modern cipher suite. Keep in sync with the AIO
 # s6-scripts/nginx/run block.
 cat >> /etc/nginx/ssl.conf << 'SSLEOF'
     ssl_session_timeout 1d;

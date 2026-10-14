@@ -1,8 +1,8 @@
 import { useTranslation } from 'react-i18next';
 
-import { IdentityHelperUtils } from '@/utils/dist/core/models/identity';
-import type { Item } from '@/utils/dist/core/models/vault';
-import { getFieldValue, FieldKey } from '@/utils/dist/core/models/vault';
+import { IdentityHelperUtils } from '@aliasvault/models/identity';
+import type { Item } from '@aliasvault/models/vault';
+import { getFieldValue, FieldKey } from '@aliasvault/models/vault';
 
 import FormInputCopyToClipboard from '@/components/form/FormInputCopyToClipboard';
 import { ThemedText } from '@/components/themed/ThemedText';
@@ -30,28 +30,32 @@ export const AliasDetails: React.FC<AliasDetailsProps> = ({ item }) : React.Reac
 
   return (
     <ThemedView style={styles.section}>
-      <ThemedText type="subtitle">{t('items.alias')}</ThemedText>
+      <ThemedText type="subtitle">{t('common.alias')}</ThemedText>
       {hasName && (
         <FormInputCopyToClipboard
+          item={item}
           label={t('items.fullName')}
           value={fullName}
         />
       )}
       {firstName && (
         <FormInputCopyToClipboard
-          label={t('items.firstName')}
+          item={item}
+          label={t('fieldLabels.alias.first_name')}
           value={firstName}
         />
       )}
       {lastName && (
         <FormInputCopyToClipboard
-          label={t('items.lastName')}
+          item={item}
+          label={t('fieldLabels.alias.last_name')}
           value={lastName}
         />
       )}
       {IdentityHelperUtils.isValidBirthDate(birthDate) && (
         <FormInputCopyToClipboard
-          label={t('items.birthDate')}
+          item={item}
+          label={t('fieldLabels.alias.birthdate')}
           value={IdentityHelperUtils.normalizeBirthDate(birthDate!)}
         />
       )}

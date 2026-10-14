@@ -1,20 +1,22 @@
-import * as OTPAuth from 'otpauth';
+import { isSameItem, scopedKey } from '@aliasvault/client/database/ItemRef';
+import { SqliteClient } from '@aliasvault/client/database/SqliteClient';
+import { getTotpRemainingSeconds } from '@aliasvault/client/items/TotpUtility';
+import { createUiIconElement, ItemTypeIconSvgs, uiIconSvg } from '@aliasvault/models/icons';
 
 import { fillItem, fillTotpCode } from '@/entrypoints/contentScript/Form';
 
-import { ItemTypeIconSvgs } from '@/utils/dist/core/models/icons';
-import type { Item } from '@/utils/dist/core/models/vault';
-import { FieldKey, getFieldValue } from '@/utils/dist/core/models/vault';
-import { LocalPreferencesService } from '@/utils/LocalPreferencesService';
-import { sendMessage } from '@/utils/messaging/ExtensionMessaging';
+import { DEFAULT_POPUP_TYPE, type PopupType } from '@/utils/autofill/PopupTypes';
+import { sendMessage, type TotpCodePreview } from '@/utils/messaging/ExtensionMessaging';
 import { ClickValidator } from '@/utils/security/ClickValidator';
 import { ServiceDetectionUtility } from '@/utils/serviceDetection/ServiceDetectionUtility';
-import { SqliteClient } from '@/utils/SqliteClient';
+import type { AutofillItemSummary } from '@/utils/types/messaging/ItemsResponse';
 
 import { t } from '@/i18n/StandaloneI18n';
 
 import { getCurrentAutofillFrameUrl } from './AutofillFrameUrl';
 import { completeConditionalWithPasskey, getConditionalPasskeyOptions, hasPendingConditionalRequest } from './ConditionalPasskey';
+
+import type { ItemRef } from '@aliasvault/client/database/ItemRef';
 
 /**
  * The input element the autofill popup was most recently shown for. Used as a fallback fill
@@ -27,6 +29,28 @@ let lastAutofillInput: HTMLInputElement | null = null;
  */
 export function getLastAutofillInput(): HTMLInputElement | null {
   return lastAutofillInput;
+}
+
+/**
+ * How long after the user clicked a "vault locked" popup an unlock still reopens the autofill popup.
+ */
+const UNLOCK_RESUME_WINDOW_MS = 5 * 60 * 1000;
+
+/**
+ * The field whose "vault locked" popup the user clicked, to reopen its autofill popup once the vault is unlocked.
+ */
+let pendingUnlockResume: { input: HTMLInputElement; popupType: PopupType; expiresAt: number } | null = null;
+
+/**
+ * Take the field to reopen the autofill popup for after an unlock, or null when there is none (or it is gone).
+ */
+export function consumeUnlockResume(): { input: HTMLInputElement; popupType: PopupType } | null {
+  const resume = pendingUnlockResume;
+  pendingUnlockResume = null;
+  if (!resume || Date.now() > resume.expiresAt || isAnchorGone(resume.input)) {
+    return null;
+  }
+  return resume;
 }
 
 /*
@@ -85,29 +109,18 @@ function cleanupTotpInterval(): void {
 }
 
 /**
- * Generate TOTP code from secret key
+ * Format a TOTP code with a space in the middle.
  */
-function generateTotpCode(secretKey: string): string {
-  try {
-    const totp = new OTPAuth.TOTP({
-      secret: secretKey,
-      algorithm: 'SHA1',
-      digits: 6,
-      period: 30
-    });
-    const code = totp.generate();
-    // Format as "XXX XXX" with space in middle
-    return `${code.slice(0, 3)} ${code.slice(3)}`;
-  } catch {
-    return '--- ---';
-  }
+function formatTotpCode(code: string): string {
+  const half = code.length % 2 === 0 ? code.length / 2 : 3;
+  return `${code.slice(0, half)} ${code.slice(half)}`;
 }
 
 /**
- * Get remaining seconds until next TOTP code
+ * The TOTP time step the current moment falls in for `period`; once it changes, the previewed codes are stale.
  */
-function getTotpRemainingSeconds(): number {
-  return 30 - (Math.floor(Date.now() / 1000) % 30);
+function totpTimeStep(period: number): number {
+  return Math.floor(Date.now() / 1000 / period);
 }
 
 /**
@@ -133,11 +146,12 @@ function isClickInsidePopupUi(event: MouseEvent, popup: Element, input: HTMLInpu
 }
 
 /**
- * Grace period before the loading spinner becomes visible. When the background worker is warm,
- * items arrive within a few dozen milliseconds and the spinner never flashes at all; when the
- * worker has to wake up, the spinner appears after this delay exactly as before.
+ * Whether the input a popup would anchor to has left the page or is hidden. Its rect is then all zeros,
+ * which would place the popup in the top-left corner (e.g. a SPA unmounting a form mid-navigation).
  */
-const SPINNER_GRACE_PERIOD_MS = 250;
+function isAnchorGone(input: HTMLInputElement): boolean {
+  return !input.isConnected || input.getClientRects().length === 0;
+}
 
 /**
  * Open (or refresh) the autofill popup including check if vault is locked.
@@ -146,23 +160,17 @@ const SPINNER_GRACE_PERIOD_MS = 250;
  * @param forceShow - If true, always show the popup even if dismissed (for manual icon clicks)
  */
 export function openAutofillPopup(input: HTMLInputElement, container: HTMLElement, forceShow: boolean = false) : void {
-  const loadingPopup = createLoadingPopup(input, '', container);
+  if (isAnchorGone(input)) {
+    return;
+  }
 
-  /*
-   * Hide the spinner during the grace period: on a warm worker the response arrives before
-   * this timer fires, so the user sees the credential list without any spinner flash.
-   */
-  loadingPopup.style.visibility = 'hidden';
-  const spinnerTimer = setTimeout(() => {
-    loadingPopup.style.visibility = 'visible';
-  }, SPINNER_GRACE_PERIOD_MS);
+  createLoadingPopup(input, '', container);
 
   /**
    * Handle the Enter key.
    */
   const handleEnterKey = (e: KeyboardEvent) : void => {
     if (e.key === 'Enter') {
-      clearTimeout(spinnerTimer);
       removeExistingPopup(container);
       // Remove the event listener to clean up
       document.body.removeEventListener('keydown', handleEnterKey);
@@ -172,32 +180,28 @@ export function openAutofillPopup(input: HTMLInputElement, container: HTMLElemen
   document.addEventListener('keydown', handleEnterKey);
 
   (async () : Promise<void> => {
-    const currentUrl = getCurrentAutofillFrameUrl();
-    if (!currentUrl) {
-      clearTimeout(spinnerTimer);
+    // The background matches on the sender's own frame URL.
+    if (!getCurrentAutofillFrameUrl()) {
       removeExistingPopup(container);
       document.removeEventListener('keydown', handleEnterKey);
       return;
     }
 
     // Load autofill matching mode setting to send to background for filtering
-    const matchingMode = await LocalPreferencesService.getAutofillMatchingMode();
+    const { matchingMode } = await sendMessage('GET_CONTENT_SETTINGS');
 
     const response = await sendMessage('GET_FILTERED_ITEMS', {
-      currentUrl,
       pageTitle: document.title,
       matchingMode: matchingMode,
       includeRecentlySelected: true // Enable for multi-step login autofill
     });
 
-    clearTimeout(spinnerTimer);
-
     if (response.success) {
-      await createAutofillPopup(input, response.items, container, response.recentlySelectedId);
+      await createAutofillPopup(input, response.items, container, response.recentlySelected);
     } else {
       // Check if the user has dismissed the vault locked popup (only for auto-show, not manual clicks)
       if (!forceShow) {
-        const dismissUntil = await LocalPreferencesService.getVaultLockedDismissUntil();
+        const { vaultLockedDismissUntil: dismissUntil } = await sendMessage('GET_CONTENT_SETTINGS');
         if (dismissUntil && Date.now() < dismissUntil) {
           // User has dismissed the popup, don't show it again
           removeExistingPopup(container);
@@ -218,20 +222,17 @@ export function openAutofillPopup(input: HTMLInputElement, container: HTMLElemen
  * @param forceShow - If true, always show the popup even if dismissed (for manual icon clicks)
  */
 export function openTotpPopup(input: HTMLInputElement, container: HTMLElement, forceShow: boolean = false) : void {
-  const loadingPopup = createLoadingPopup(input, '', container);
+  if (isAnchorGone(input)) {
+    return;
+  }
 
-  // Same grace period as the credential popup: hide the spinner while the worker is warm.
-  loadingPopup.style.visibility = 'hidden';
-  const spinnerTimer = setTimeout(() => {
-    loadingPopup.style.visibility = 'visible';
-  }, SPINNER_GRACE_PERIOD_MS);
+  createLoadingPopup(input, '', container);
 
   /**
    * Handle the Enter key.
    */
   const handleEnterKey = (e: KeyboardEvent) : void => {
     if (e.key === 'Enter') {
-      clearTimeout(spinnerTimer);
       removeExistingPopup(container);
       document.body.removeEventListener('keydown', handleEnterKey);
     }
@@ -240,30 +241,26 @@ export function openTotpPopup(input: HTMLInputElement, container: HTMLElement, f
   document.addEventListener('keydown', handleEnterKey);
 
   (async () : Promise<void> => {
-    const currentUrl = getCurrentAutofillFrameUrl();
-    if (!currentUrl) {
-      clearTimeout(spinnerTimer);
+    // The background matches on the sender's own frame URL.
+    if (!getCurrentAutofillFrameUrl()) {
       removeExistingPopup(container);
       document.removeEventListener('keydown', handleEnterKey);
       return;
     }
 
-    const matchingMode = await LocalPreferencesService.getAutofillMatchingMode();
+    const { matchingMode } = await sendMessage('GET_CONTENT_SETTINGS');
 
     const response = await sendMessage('GET_ITEMS_WITH_TOTP', {
-      currentUrl,
       pageTitle: document.title,
       matchingMode: matchingMode
     });
 
-    clearTimeout(spinnerTimer);
-
     if (response.success) {
-      await createTotpPopup(input, response.items, container, response.recentlySelectedId);
+      await createTotpPopup(input, response.items, container, response.recentlySelected);
     } else {
       // Check if the user has dismissed the vault locked popup (only for auto-show, not manual clicks)
       if (!forceShow) {
-        const dismissUntil = await LocalPreferencesService.getVaultLockedDismissUntil();
+        const { vaultLockedDismissUntil: dismissUntil } = await sendMessage('GET_CONTENT_SETTINGS');
         if (dismissUntil && Date.now() < dismissUntil) {
           // User has dismissed the popup, don't show it again
           removeExistingPopup(container);
@@ -271,7 +268,7 @@ export function openTotpPopup(input: HTMLInputElement, container: HTMLElement, f
         }
       }
 
-      await createVaultLockedPopup(input, container);
+      await createVaultLockedPopup(input, container, 'totp');
     }
   })();
 }
@@ -280,11 +277,16 @@ export function openTotpPopup(input: HTMLInputElement, container: HTMLElement, f
  * Create TOTP autofill popup showing items with 2FA codes.
  * Matches the styling of the regular autofill popup.
  */
-async function createTotpPopup(input: HTMLInputElement, items: Item[] | undefined, rootContainer: HTMLElement, recentlySelectedId?: string | null) : Promise<void> {
-  const searchPlaceholder = await t('content.searchVault');
+async function createTotpPopup(input: HTMLInputElement, items: AutofillItemSummary[] | undefined, rootContainer: HTMLElement, recentlySelected?: ItemRef | null) : Promise<void> {
+  const searchPlaceholder = await t('items.searchPlaceholder');
   const hideFor1HourText = await t('content.hideFor1Hour');
   const hidePermanentlyText = await t('content.hidePermanently');
   const noTotpItemsText = await t('content.noTotpItemsFound');
+
+  if (isAnchorGone(input)) {
+    removeExistingPopup(rootContainer);
+    return;
+  }
 
   const popup = createBasePopup(input, rootContainer);
 
@@ -299,7 +301,7 @@ async function createTotpPopup(input: HTMLInputElement, items: Item[] | undefine
     items = [];
   }
 
-  updateTotpPopupContent(items, credentialList, input, rootContainer, noTotpItemsText, recentlySelectedId);
+  updateTotpPopupContent(items, credentialList, input, rootContainer, noTotpItemsText, recentlySelected);
 
   // Add divider
   const divider = document.createElement('div');
@@ -329,7 +331,7 @@ async function createTotpPopup(input: HTMLInputElement, items: Item[] | undefine
 
     if (searchTerm === '') {
       // If search is empty, show the initially URL-filtered items
-      updateTotpPopupContent(items, credentialList, input, rootContainer, noTotpItemsText, recentlySelectedId);
+      updateTotpPopupContent(items, credentialList, input, rootContainer, noTotpItemsText, recentlySelected);
     } else {
       // Search in TOTP items only
       const response = await sendMessage('SEARCH_ITEMS_WITH_TOTP', {
@@ -341,7 +343,7 @@ async function createTotpPopup(input: HTMLInputElement, items: Item[] | undefine
         updateTotpPopupContent(response.items, credentialList, input, rootContainer, noTotpItemsText);
       } else {
         // On error, fallback to showing initial filtered items
-        updateTotpPopupContent(items, credentialList, input, rootContainer, noTotpItemsText, recentlySelectedId);
+        updateTotpPopupContent(items, credentialList, input, rootContainer, noTotpItemsText, recentlySelected);
       }
     }
   });
@@ -350,9 +352,7 @@ async function createTotpPopup(input: HTMLInputElement, items: Item[] | undefine
   const closeButton = document.createElement('button');
   closeButton.className = 'av-button av-button-close';
   closeButton.innerHTML = `
-    <svg class="av-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-      <path d="M6 18L18 6M6 6l12 12" stroke-linecap="round" stroke-linejoin="round"/>
-    </svg>
+    ${uiIconSvg('x', { class: 'av-icon' })}
   `;
 
   /**
@@ -368,15 +368,11 @@ async function createTotpPopup(input: HTMLInputElement, items: Item[] | undefine
     contextMenu.style.top = `${rect.bottom + 4}px`;
     contextMenu.innerHTML = `
       <button class="av-context-menu-item" data-action="temporary">
-        <svg class="av-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
+        ${uiIconSvg('clock', { class: 'av-icon' })}
         ${hideFor1HourText}
       </button>
       <button class="av-context-menu-item" data-action="permanent">
-        <svg class="av-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M6 18L18 6M6 6l12 12" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
+        ${uiIconSvg('x', { class: 'av-icon' })}
         ${hidePermanentlyText}
       </button>
     `;
@@ -463,7 +459,7 @@ async function createTotpPopup(input: HTMLInputElement, items: Item[] | undefine
  * @param rootContainer - The root container element.
  * @param noMatchesText - Text to show when no items match.
  */
-function updateTotpPopupContent(items: Item[], itemList: HTMLElement | null, input: HTMLInputElement, rootContainer: HTMLElement, noMatchesText?: string, recentlySelectedId?: string | null) : void {
+function updateTotpPopupContent(items: AutofillItemSummary[], itemList: HTMLElement | null, input: HTMLInputElement, rootContainer: HTMLElement, noMatchesText?: string, recentlySelected?: ItemRef | null) : void {
   if (!itemList) {
     itemList = document.getElementById('aliasvault-credential-list') as HTMLElement;
   }
@@ -486,38 +482,54 @@ function updateTotpPopupContent(items: Item[], itemList: HTMLElement | null, inp
     return;
   }
 
-  // Fetch TOTP secrets and create items with live codes
+  // Fetch the current codes from the background (the secrets never reach the page) and create items with live codes
   (async (): Promise<void> => {
-    const itemIds = items.map(item => item.Id);
-    /*
-     * Include the page URL so the background can verify each requested item actually
-     * belongs to this site before releasing its TOTP seed.
+    const refs: ItemRef[] = items.map(item => ({ Id: item.Id, ManifestId: item.ManifestId }));
+    let codes: Record<string, TotpCodePreview> = {};
+    let fetchedSteps: Record<string, number> = {};
+
+    /**
+     * Fetch the codes for all listed items, remembering the time step each was fetched in.
      */
-    const currentUrl = getCurrentAutofillFrameUrl();
-    const secretsResponse = await sendMessage('GET_TOTP_SECRETS', { itemIds, currentUrl });
+    const fetchCodes = async (): Promise<void> => {
+      const startedAt = Date.now();
+      const response = await sendMessage('GET_TOTP_CODES', { items: refs });
+      codes = response.success && response.codes ? response.codes : {};
+      fetchedSteps = Object.fromEntries(Object.entries(codes).map(([key, preview]) => [key, Math.floor(startedAt / 1000 / preview.Period)]));
+    };
 
-    const secrets = secretsResponse.success && secretsResponse.secrets ? secretsResponse.secrets : {};
-    const hasSecrets = Object.keys(secrets).length > 0;
+    await fetchCodes();
+    const hasCodes = Object.keys(codes).length > 0;
 
-    // Create items (with live codes if secrets available, static otherwise)
+    // Create items (with live codes if available, static otherwise)
     const codeElements: Map<string, { codeSpan: HTMLSpanElement; pieChart: SVGPathElement }> = new Map();
 
     items.forEach(item => {
-      const secret = secrets[item.Id];
-      const isRecentlySelected = recentlySelectedId != null && item.Id === recentlySelectedId;
-      const itemElement = createTotpItem(item, secret, input, rootContainer, hasSecrets ? codeElements : undefined, isRecentlySelected);
+      const preview = codes[scopedKey(item.ManifestId, item.Id)];
+      const isRecentlySelected = recentlySelected != null && isSameItem(item, recentlySelected);
+      const itemElement = createTotpItem(item, preview, input, rootContainer, hasCodes ? codeElements : undefined, isRecentlySelected);
       itemList!.appendChild(itemElement);
     });
 
-    // Set up live updates only if we have secrets
-    if (hasSecrets) {
-      // Initial update
-      updateTotpCodes(codeElements, secrets);
+    // Set up live updates only if we have codes
+    if (hasCodes) {
+      updateTotpCodes(codeElements, codes);
 
-      // Set up interval to update codes every second
-      totpUpdateIntervalId = setInterval(() => {
-        updateTotpCodes(codeElements, secrets);
+      // Update the countdown every second, and fetch new codes once a period rolls over
+      let refreshing = false;
+      const intervalId = setInterval(async () => {
+        if (!itemList!.isConnected) {
+          clearInterval(intervalId);
+          return;
+        }
+        if (!refreshing && Object.entries(codes).some(([key, preview]) => totpTimeStep(preview.Period) !== fetchedSteps[key])) {
+          refreshing = true;
+          await fetchCodes();
+          refreshing = false;
+        }
+        updateTotpCodes(codeElements, codes);
       }, 1000);
+      totpUpdateIntervalId = intervalId;
     }
   })();
 }
@@ -555,28 +567,27 @@ function createPieSlicePath(cx: number, cy: number, r: number, fraction: number)
  */
 function updateTotpCodes(
   codeElements: Map<string, { codeSpan: HTMLSpanElement; pieChart: SVGPathElement }>,
-  secrets: Record<string, string>
+  codes: Record<string, TotpCodePreview>
 ): void {
-  const remainingSeconds = getTotpRemainingSeconds();
-  const fraction = remainingSeconds / 30;
-
-  codeElements.forEach((elements, itemId) => {
-    const secret = secrets[itemId];
-    if (secret) {
-      elements.codeSpan.textContent = generateTotpCode(secret);
+  codeElements.forEach((elements, itemKey) => {
+    const preview = codes[itemKey];
+    if (!preview) {
+      return;
     }
-    elements.pieChart.setAttribute('d', createPieSlicePath(6, 6, 5, fraction));
+    elements.codeSpan.textContent = formatTotpCode(preview.Code);
+    // Each code counts down over its own period, so the pie is computed per item rather than once.
+    elements.pieChart.setAttribute('d', createPieSlicePath(6, 6, 5, getTotpRemainingSeconds(preview) / preview.Period));
   });
 }
 
 /**
  * Create a TOTP item element.
- * If secret is provided, shows live code with pie chart countdown.
- * If secret is undefined, shows static "000 000" placeholder.
+ * If a code preview is provided, shows the live code with pie chart countdown.
+ * Otherwise shows a static "000 000" placeholder.
  */
 function createTotpItem(
-  item: Item,
-  secret: string | undefined,
+  item: AutofillItemSummary,
+  preview: TotpCodePreview | undefined,
   input: HTMLInputElement,
   rootContainer: HTMLElement,
   codeElements?: Map<string, { codeSpan: HTMLSpanElement; pieChart: SVGPathElement }>,
@@ -623,11 +634,10 @@ function createTotpItem(
 
   // TOTP code span - show generated code or static placeholder
   const codeSpan = document.createElement('span');
-  codeSpan.textContent = secret ? generateTotpCode(secret) : '000 000';
+  codeSpan.textContent = preview ? formatTotpCode(preview.Code) : '000 000';
 
   // Pie chart countdown - blue pie that shrinks clockwise from top
-  const remainingSeconds = getTotpRemainingSeconds();
-  const fraction = secret ? remainingSeconds / 30 : 1; // Static shows full pie
+  const fraction = preview ? getTotpRemainingSeconds(preview) / preview.Period : 1; // Static shows full pie
 
   const svgNS = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(svgNS, 'svg');
@@ -638,7 +648,7 @@ function createTotpItem(
 
   // Blue pie slice that shrinks clockwise from top (like a clock)
   const pieChart = document.createElementNS(svgNS, 'path');
-  pieChart.setAttribute('fill', secret ? '#3b82f6' : '#9ca3af'); // Gray for static
+  pieChart.setAttribute('fill', preview ? '#3b82f6' : '#9ca3af'); // Gray for static
   pieChart.setAttribute('d', createPieSlicePath(6, 6, 5, fraction));
 
   svg.appendChild(pieChart);
@@ -650,17 +660,17 @@ function createTotpItem(
   itemTextContainer.appendChild(detailsContainer);
   itemInfo.appendChild(itemTextContainer);
 
-  // Store references for live updates (only if secret exists and codeElements provided)
-  if (secret && codeElements) {
-    codeElements.set(item.Id, { codeSpan, pieChart });
+  // Store references for live updates (only if a code exists and codeElements provided)
+  if (preview && codeElements) {
+    codeElements.set(scopedKey(item.ManifestId, item.Id), { codeSpan, pieChart });
   }
 
   itemElement.appendChild(itemInfo);
-  itemElement.appendChild(createPopoutIcon(item.Id, rootContainer));
+  itemElement.appendChild(createPopoutIcon(item, rootContainer));
 
   // Handle click to fill TOTP code
   addReliableClickHandler(itemInfo, async () => {
-    await fillTotpCode(item.Id, input);
+    await fillTotpCode(item, input);
     removeExistingPopup(rootContainer);
   });
 
@@ -756,24 +766,24 @@ export function createBasePopup(input: HTMLInputElement, rootContainer: HTMLElem
  * Create a loading popup.
  */
 export function createLoadingPopup(input: HTMLInputElement, message: string, rootContainer: HTMLElement) : HTMLElement {
-  const popup = createBasePopup(input, rootContainer);
-
-  const loadingContainer = document.createElement('div');
-  loadingContainer.className = 'av-loading-container';
-
-  const spinner = document.createElement('div');
-  spinner.className = 'av-loading-spinner';
-
-  /*
-   * Built as a text node rather than interpolated into innerHTML, so a message can never
-   * introduce markup into the extension's own UI.
+  /**
+   * Get the loading wrapper HTML. The message is not interpolated here: it is written
+   * as a text node below, so a message can never introduce markup into the extension's own UI.
    */
-  const text = document.createElement('span');
-  text.className = 'av-loading-text';
-  text.textContent = message;
+  const getLoadingHtml = (): string => `
+    <div class="av-loading-container">
+      <div class="av-loading-spinner"></div>
+      <span class="av-loading-text"></span>
+    </div>
+  `;
 
-  loadingContainer.append(spinner, text);
-  popup.replaceChildren(loadingContainer);
+  const popup = createBasePopup(input, rootContainer);
+  popup.innerHTML = getLoadingHtml();
+
+  const loadingText = popup.querySelector('.av-loading-text');
+  if (loadingText) {
+    loadingText.textContent = message;
+  }
 
   rootContainer.appendChild(popup);
   return popup;
@@ -786,7 +796,7 @@ export function createLoadingPopup(input: HTMLInputElement, message: string, roo
  * @param itemList - The item list element.
  * @param input - The input element that triggered the popup. Required when filling items to know which form to fill.
  */
-export async function updatePopupContent(items: Item[], itemList: HTMLElement | null, input: HTMLInputElement, rootContainer: HTMLElement, noMatchesText?: string, recentlySelectedId?: string | null) : Promise<void> {
+export async function updatePopupContent(items: AutofillItemSummary[], itemList: HTMLElement | null, input: HTMLInputElement, rootContainer: HTMLElement, noMatchesText?: string, recentlySelected?: ItemRef | null) : Promise<void> {
   if (!itemList) {
     itemList = document.getElementById('aliasvault-credential-list') as HTMLElement;
   }
@@ -799,7 +809,7 @@ export async function updatePopupContent(items: Item[], itemList: HTMLElement | 
   itemList.innerHTML = '';
 
   // Add items using the shared function
-  const itemElements = createItemList(items, input, rootContainer, noMatchesText, recentlySelectedId);
+  const itemElements = createItemList(items, input, rootContainer, noMatchesText, recentlySelected);
   itemElements.forEach(element => itemList.appendChild(element));
 }
 
@@ -808,29 +818,10 @@ export async function updatePopupContent(items: Item[], itemList: HTMLElement | 
  * autofilled on this site, so the user can quickly spot it among multiple matches.
  */
 function createRecentlySelectedIcon(): SVGSVGElement {
-  const svgNS = 'http://www.w3.org/2000/svg';
-  const svg = document.createElementNS(svgNS, 'svg');
-  svg.setAttribute('viewBox', '0 0 24 24');
-  svg.setAttribute('fill', 'none');
-  svg.setAttribute('stroke', '#6b7280');
-  svg.setAttribute('stroke-width', '2');
-  svg.setAttribute('stroke-linecap', 'round');
-  svg.setAttribute('stroke-linejoin', 'round');
+  const svg = createUiIconElement<SVGSVGElement>(document, 'clock', { stroke: '#6b7280' });
   svg.style.width = '12px';
   svg.style.height = '12px';
   svg.style.flexShrink = '0';
-
-  const arc = document.createElementNS(svgNS, 'path');
-  arc.setAttribute('d', 'M3 12a9 9 0 1 0 9-9 9.74 9.74 0 0 0-6.74 2.74L3 8');
-  svg.appendChild(arc);
-
-  const corner = document.createElementNS(svgNS, 'polyline');
-  corner.setAttribute('points', '3 3 3 8 8 8');
-  svg.appendChild(corner);
-
-  const innerHands = document.createElementNS(svgNS, 'path');
-  innerHands.setAttribute('d', 'M12 7v5l4 2');
-  svg.appendChild(innerHands);
 
   return svg;
 }
@@ -859,28 +850,23 @@ export function removeExistingPopup(container: HTMLElement) : void {
 }
 
 /**
- * Whether an item is usable for autofill: it must carry at least a username, email, or
- * password. Items with none of these (e.g. a note-only entry) can't fill a login form, so
- * showing them as a credential match is just noise.
- */
-function hasFillableLoginField(item: Item): boolean {
-  return [FieldKey.LoginUsername, FieldKey.LoginEmail, FieldKey.LoginPassword]
-    .some((key) => (getFieldValue(item, key) ?? '').trim() !== '');
-}
-
-/**
  * Create auto-fill popup
  */
-export async function createAutofillPopup(input: HTMLInputElement, items: Item[] | undefined, rootContainer: HTMLElement, recentlySelectedId?: string | null) : Promise<void> {
+export async function createAutofillPopup(input: HTMLInputElement, items: AutofillItemSummary[] | undefined, rootContainer: HTMLElement, recentlySelected?: ItemRef | null) : Promise<void> {
   // Remember the input so a credential created in the full popup window can be filled back here.
   lastAutofillInput = input;
 
   // Get all translations first
   const newText = await t('content.new');
-  const searchPlaceholder = await t('content.searchVault');
+  const searchPlaceholder = await t('items.searchPlaceholder');
   const hideFor1HourText = await t('content.hideFor1Hour');
   const hidePermanentlyText = await t('content.hidePermanently');
   const noMatchesText = await t('content.noMatchesFound');
+
+  if (isAnchorGone(input)) {
+    removeExistingPopup(rootContainer);
+    return;
+  }
 
   const popup = createBasePopup(input, rootContainer);
 
@@ -897,15 +883,12 @@ export async function createAutofillPopup(input: HTMLInputElement, items: Item[]
   credentialList.className = 'av-credential-list';
   popup.appendChild(credentialList);
 
-  // Add initial items (already filtered by background script for performance)
+  // Add initial items (already filtered by background script, which only returns items with something to fill)
   if (!items) {
     items = [];
   }
 
-  // Drop entries that have nothing to fill (no username/email/password) - they're not useful matches.
-  items = items.filter(hasFillableLoginField);
-
-  await updatePopupContent(items, credentialList, input, rootContainer, noMatchesText, recentlySelectedId);
+  await updatePopupContent(items, credentialList, input, rootContainer, noMatchesText, recentlySelected);
 
   // Add divider
   const divider = document.createElement('div');
@@ -920,10 +903,7 @@ export async function createAutofillPopup(input: HTMLInputElement, items: Item[]
   const createButton = document.createElement('button');
   createButton.className = 'av-button av-button-primary';
   createButton.innerHTML = `
-    <svg class="av-icon" viewBox="0 0 24 24">
-      <line x1="12" y1="5" x2="12" y2="19"></line>
-      <line x1="5" y1="12" x2="19" y2="12"></line>
-    </svg>
+    ${uiIconSvg('plus', { class: 'av-icon' })}
     ${newText}
   `;
 
@@ -975,16 +955,14 @@ export async function createAutofillPopup(input: HTMLInputElement, items: Item[]
   // Handle search input.
   let searchTimeout: NodeJS.Timeout | null = null;
   searchInput.addEventListener('input', async () => {
-    await handleSearchInput(searchInput, items, rootContainer, searchTimeout, credentialList, input, noMatchesText, recentlySelectedId);
+    await handleSearchInput(searchInput, items, rootContainer, searchTimeout, credentialList, input, noMatchesText, recentlySelected);
   });
 
   // Close button
   const closeButton = document.createElement('button');
   closeButton.className = 'av-button av-button-close';
   closeButton.innerHTML = `
-    <svg class="av-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-      <path d="M6 18L18 6M6 6l12 12" stroke-linecap="round" stroke-linejoin="round"/>
-    </svg>
+    ${uiIconSvg('x', { class: 'av-icon' })}
   `;
 
   /**
@@ -1000,15 +978,11 @@ export async function createAutofillPopup(input: HTMLInputElement, items: Item[]
     contextMenu.style.top = `${rect.bottom + 4}px`;
     contextMenu.innerHTML = `
       <button class="av-context-menu-item" data-action="temporary">
-        <svg class="av-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
+        ${uiIconSvg('clock', { class: 'av-icon' })}
         ${hideFor1HourText}
       </button>
       <button class="av-context-menu-item" data-action="permanent">
-        <svg class="av-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M6 18L18 6M6 6l12 12" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
+        ${uiIconSvg('x', { class: 'av-icon' })}
         ${hidePermanentlyText}
       </button>
     `;
@@ -1154,13 +1128,19 @@ export async function createAutofillPopup(input: HTMLInputElement, items: Item[]
 /**
  * Create vault locked popup.
  */
-export async function createVaultLockedPopup(input: HTMLInputElement, rootContainer: HTMLElement): Promise<void> {
+export async function createVaultLockedPopup(input: HTMLInputElement, rootContainer: HTMLElement, popupType: PopupType = DEFAULT_POPUP_TYPE): Promise<void> {
   /**
-   * Handle unlock click.
+   * Handle unlock click: open the unlock window, and reopen this field's autofill popup once the vault is unlocked.
    */
   const handleUnlockClick = () : void => {
+    pendingUnlockResume = { input, popupType, expiresAt: Date.now() + UNLOCK_RESUME_WINDOW_MS };
     sendMessage('OPEN_POPUP');
     removeExistingPopup(rootContainer);
+  }
+
+  if (isAnchorGone(input)) {
+    removeExistingPopup(rootContainer);
+    return;
   }
 
   const popup = createBasePopup(input, rootContainer);
@@ -1185,10 +1165,7 @@ export async function createVaultLockedPopup(input: HTMLInputElement, rootContai
   button.title = 'Unlock AliasVault';
   button.className = 'av-vault-locked-button';
   button.innerHTML = `
-    <svg class="av-icon-lock" viewBox="0 0 24 24">
-      <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
-      <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
-    </svg>
+    ${uiIconSvg('lock-closed', { class: 'av-icon-lock' })}
   `;
   container.appendChild(button);
 
@@ -1200,10 +1177,7 @@ export async function createVaultLockedPopup(input: HTMLInputElement, rootContai
   closeButton.className = 'av-button av-button-close av-vault-locked-close';
   closeButton.title = 'Dismiss popup';
   closeButton.innerHTML = `
-    <svg class="av-icon" viewBox="0 0 24 24">
-      <line x1="18" y1="6" x2="6" y2="18"></line>
-      <line x1="6" y1="6" x2="18" y2="18"></line>
-    </svg>
+    ${uiIconSvg('x', { class: 'av-icon' })}
   `;
 
   // Position the close button to the right of the container
@@ -1252,7 +1226,7 @@ export async function createVaultLockedPopup(input: HTMLInputElement, rootContai
  * @param input - The input field that triggered the popup
  * @param noMatchesText - Text to show when no matches found
  */
-async function handleSearchInput(searchInput: HTMLInputElement, initialItems: Item[], rootContainer: HTMLElement, searchTimeout: NodeJS.Timeout | null, itemList: HTMLElement | null, input: HTMLInputElement, noMatchesText?: string, recentlySelectedId?: string | null) : Promise<void> {
+async function handleSearchInput(searchInput: HTMLInputElement, initialItems: AutofillItemSummary[], rootContainer: HTMLElement, searchTimeout: NodeJS.Timeout | null, itemList: HTMLElement | null, input: HTMLInputElement, noMatchesText?: string, recentlySelected?: ItemRef | null) : Promise<void> {
   if (searchTimeout) {
     clearTimeout(searchTimeout);
   }
@@ -1261,7 +1235,7 @@ async function handleSearchInput(searchInput: HTMLInputElement, initialItems: It
 
   if (searchTerm === '') {
     // If search is empty, show the initially URL-filtered items with the recently-used star restored
-    await updatePopupContent(initialItems, itemList, input, rootContainer, noMatchesText, recentlySelectedId);
+    await updatePopupContent(initialItems, itemList, input, rootContainer, noMatchesText, recentlySelected);
   } else {
     // Search in full vault with search term
     const response = await sendMessage('GET_SEARCH_ITEMS', {
@@ -1270,11 +1244,10 @@ async function handleSearchInput(searchInput: HTMLInputElement, initialItems: It
 
     if (response.success && response.items) {
       // Search results don't carry prioritization, so don't highlight any item
-      const fillableItems = response.items.filter(hasFillableLoginField);
-      await updatePopupContent(fillableItems, itemList, input, rootContainer, noMatchesText);
+      await updatePopupContent(response.items, itemList, input, rootContainer, noMatchesText);
     } else {
       // On error, fallback to showing initial filtered items
-      await updatePopupContent(initialItems, itemList, input, rootContainer, noMatchesText, recentlySelectedId);
+      await updatePopupContent(initialItems, itemList, input, rootContainer, noMatchesText, recentlySelected);
     }
   }
 }
@@ -1283,24 +1256,11 @@ async function handleSearchInput(searchInput: HTMLInputElement, initialItems: It
  * Build small passkey badge icon shown next to a service name to mark that the entry is (or has) a passkey.
  */
 function createPasskeyBadgeIcon(): SVGSVGElement {
-  const svgNS = 'http://www.w3.org/2000/svg';
-  const svg = document.createElementNS(svgNS, 'svg');
-  svg.setAttribute('class', 'av-passkey-icon');
-  svg.setAttribute('viewBox', '0 0 24 24');
-  svg.setAttribute('fill', 'none');
-  svg.setAttribute('stroke', 'currentColor');
-  svg.setAttribute('stroke-width', '2');
-  svg.setAttribute('stroke-linecap', 'round');
-  svg.setAttribute('stroke-linejoin', 'round');
-  svg.setAttribute('aria-label', 'Has passkey');
+  const svg = createUiIconElement<SVGSVGElement>(document, 'key', { 'class': 'av-passkey-icon', 'aria-label': 'Has passkey' });
   svg.style.width = '14px';
   svg.style.height = '14px';
   svg.style.flexShrink = '0';
   svg.style.opacity = '0.7';
-
-  const path = document.createElementNS(svgNS, 'path');
-  path.setAttribute('d', 'M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4');
-  svg.appendChild(path);
 
   return svg;
 }
@@ -1316,7 +1276,7 @@ function createLogoContainer(logo: Uint8Array | number[] | undefined): HTMLEleme
   if (logoSrc) {
     logoContainer.innerHTML = `<img src="${logoSrc}" alt="" style="width:100%;height:100%;">`;
   } else {
-    logoContainer.innerHTML = ItemTypeIconSvgs.Placeholder;
+    logoContainer.innerHTML = ItemTypeIconSvgs.placeholder;
   }
 
   return logoContainer;
@@ -1325,20 +1285,16 @@ function createLogoContainer(logo: Uint8Array | number[] | undefined): HTMLEleme
 /**
  * Build popout icon shown at the trailing edge of a row, which opens the underlying item in the full extension popup.
  */
-function createPopoutIcon(itemId: string, rootContainer: HTMLElement): HTMLElement {
+function createPopoutIcon(item: ItemRef, rootContainer: HTMLElement): HTMLElement {
   const popoutIcon = document.createElement('div');
   popoutIcon.className = 'av-popout-icon';
   popoutIcon.innerHTML = `
-      <svg class="av-icon" viewBox="0 0 24 24">
-        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
-        <polyline points="15 3 21 3 21 9"></polyline>
-        <line x1="10" y1="14" x2="21" y2="3"></line>
-      </svg>
+      ${uiIconSvg('external-link', { class: 'av-icon' })}
     `;
 
   addReliableClickHandler(popoutIcon, (e) => {
     e.stopPropagation(); // Don't trigger the row's primary action.
-    sendMessage('OPEN_POPUP_WITH_ITEM', { itemId });
+    sendMessage('OPEN_POPUP_WITH_ITEM', { itemId: item.Id, manifestId: item.ManifestId });
     removeExistingPopup(rootContainer);
   });
 
@@ -1413,14 +1369,14 @@ async function createPasskeySection(rootContainer: HTMLElement): Promise<{ list:
     itemElement.appendChild(itemInfo);
 
     // Popout icon opens the underlying credential in the full extension popup.
-    itemElement.appendChild(createPopoutIcon(option.itemId, rootContainer));
+    itemElement.appendChild(createPopoutIcon({ Id: option.itemId, ManifestId: option.manifestId }, rootContainer));
 
     addReliableClickHandler(itemInfo, () => {
       // Explicit user action - keep the vault from auto-locking mid-assertion.
       sendMessage('RESET_AUTO_LOCK_TIMER').catch(() => {
         // Ignore: background may be asleep.
       });
-      void completeConditionalWithPasskey(option.id);
+      void completeConditionalWithPasskey(option.id, option.manifestId);
       removeExistingPopup(rootContainer);
     });
 
@@ -1451,7 +1407,7 @@ function createViewSwitchPill(label: string): HTMLButtonElement {
  * @param items - The items to display.
  * @param input - The input element that triggered the popup. Required when filling items to know which form to fill.
  */
-function createItemList(items: Item[], input: HTMLInputElement, rootContainer: HTMLElement, noMatchesText?: string, recentlySelectedId?: string | null): HTMLElement[] {
+function createItemList(items: AutofillItemSummary[], input: HTMLInputElement, rootContainer: HTMLElement, noMatchesText?: string, recentlySelected?: ItemRef | null): HTMLElement[] {
   const elements: HTMLElement[] = [];
 
   if (items.length > 0) {
@@ -1482,45 +1438,23 @@ function createItemList(items: Item[], input: HTMLInputElement, rootContainer: H
       serviceNameContainer.appendChild(serviceNameText);
 
       // Add "recently used" indicator if this item was the last autofill on this site
-      if (recentlySelectedId != null && item.Id === recentlySelectedId) {
+      if (recentlySelected != null && isSameItem(item, recentlySelected)) {
         serviceNameContainer.appendChild(createRecentlySelectedIcon());
       }
       
       serviceName.appendChild(serviceNameContainer);
 
-      // Details container (secondary text) - extract from fields
+      // Details container (secondary text): alias full name and username or email
       const detailsContainer = document.createElement('div');
       detailsContainer.className = 'av-service-details';
-
-      // Get field values using helper function
-      const firstName = item.Fields.find(f => f.FieldKey === FieldKey.AliasFirstName)?.Value;
-      const lastName = item.Fields.find(f => f.FieldKey === FieldKey.AliasLastName)?.Value;
-      const username = item.Fields.find(f => f.FieldKey === FieldKey.LoginUsername)?.Value;
-      const email = item.Fields.find(f => f.FieldKey === FieldKey.LoginEmail)?.Value;
-
-      // Combine full name (if available) and username or email
-      const details: string[] = [];
-      const firstNameStr = Array.isArray(firstName) ? firstName[0] : firstName;
-      const lastNameStr = Array.isArray(lastName) ? lastName[0] : lastName;
-      const usernameStr = Array.isArray(username) ? username[0] : username;
-      const emailStr = Array.isArray(email) ? email[0] : email;
-
-      if (firstNameStr && lastNameStr) {
-        details.push(`${firstNameStr} ${lastNameStr}`);
-      }
-      if (usernameStr) {
-        details.push(usernameStr);
-      } else if (emailStr) {
-        details.push(emailStr);
-      }
-      detailsContainer.textContent = details.join(' · ');
+      detailsContainer.textContent = item.Details;
 
       itemTextContainer.appendChild(serviceName);
       itemTextContainer.appendChild(detailsContainer);
       itemInfo.appendChild(itemTextContainer);
 
       itemElement.appendChild(itemInfo);
-      itemElement.appendChild(createPopoutIcon(item.Id, rootContainer));
+      itemElement.appendChild(createPopoutIcon(item, rootContainer));
 
       // Update click handler to only trigger on itemInfo with security validation
       addReliableClickHandler(itemInfo, () => {
@@ -1541,45 +1475,17 @@ function createItemList(items: Item[], input: HTMLInputElement, rootContainer: H
 }
 
 /**
- * Check if auto-popup is disabled for current site
- */
-/**
  * Disable auto-popup for current site
  */
 export async function disableAutoShowPopup(temporary: boolean = false): Promise<void> {
-  const currentHostname = window.location.hostname;
-
-  if (temporary) {
-    // Add to temporary disabled sites with 1 hour expiry
-    const temporaryDisabledSites = await LocalPreferencesService.getTemporaryDisabledSites();
-    temporaryDisabledSites[currentHostname] = Date.now() + (60 * 60 * 1000); // 1 hour from now
-    await LocalPreferencesService.setTemporaryDisabledSites(temporaryDisabledSites);
-  } else {
-    // Add to permanently disabled sites
-    const disabledSites = await LocalPreferencesService.getDisabledSites();
-    if (!disabledSites.includes(currentHostname)) {
-      disabledSites.push(currentHostname);
-      await LocalPreferencesService.setDisabledSites(disabledSites);
-    }
-  }
+  await sendMessage('DISABLE_AUTOFILL_FOR_SITE', { temporary });
 }
 
 /**
  * Dismiss vault locked popup for 4 hours if user is logged in, or for 3 days if user is not logged in.
  */
 export async function dismissVaultLockedPopup(): Promise<void> {
-  // First check if user is logged in or not.
-  const authStatus = await sendMessage('CHECK_AUTH_STATUS');
-
-  if (authStatus.isLoggedIn) {
-    // User is logged in - dismiss for 4 hours
-    const fourHoursFromNow = Date.now() + (4 * 60 * 60 * 1000);
-    await LocalPreferencesService.setVaultLockedDismissUntil(fourHoursFromNow);
-  } else {
-    // User is not logged in - dismiss for 3 days
-    const threeDaysFromNow = Date.now() + (3 * 24 * 60 * 60 * 1000);
-    await LocalPreferencesService.setVaultLockedDismissUntil(threeDaysFromNow);
-  }
+  await sendMessage('DISMISS_VAULT_LOCKED_POPUP');
 }
 
 /**
@@ -1600,7 +1506,7 @@ function addReliableClickHandler(
   const secureHandler = async (e: Event): Promise<void> => {
     const mouseEvent = e as MouseEvent;
 
-    if (!await clickValidator.validateUserClick(mouseEvent)) {
+    if (!await clickValidator.validateClick(mouseEvent)) {
       console.warn(`[AliasVault Security] Blocked click action due to security validation failure`);
       return;
     }
@@ -1644,6 +1550,11 @@ export async function createUpgradeRequiredPopup(input: HTMLInputElement, rootCo
     removeExistingPopup(rootContainer);
   }
 
+  if (isAnchorGone(input)) {
+    removeExistingPopup(rootContainer);
+    return;
+  }
+
   const popup = createBasePopup(input, rootContainer);
   popup.classList.add('av-upgrade-required');
 
@@ -1665,9 +1576,7 @@ export async function createUpgradeRequiredPopup(input: HTMLInputElement, rootCo
   button.title = await t('content.openAliasVaultToUpgrade');
   button.className = 'av-upgrade-required-button';
   button.innerHTML = `
-    <svg class="av-icon-upgrade" viewBox="0 0 24 24">
-      <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"></path>
-    </svg>
+    ${uiIconSvg('collection', { class: 'av-icon-upgrade' })}
   `;
   container.appendChild(button);
 
@@ -1679,10 +1588,7 @@ export async function createUpgradeRequiredPopup(input: HTMLInputElement, rootCo
   closeButton.className = 'av-button av-button-close av-upgrade-required-close';
   closeButton.title = await t('content.dismissPopup');
   closeButton.innerHTML = `
-    <svg class="av-icon" viewBox="0 0 24 24">
-      <line x1="18" y1="6" x2="6" y2="18"></line>
-      <line x1="6" y1="6" x2="18" y2="18"></line>
-    </svg>
+    ${uiIconSvg('x', { class: 'av-icon' })}
   `;
 
   // Position the close button to the right of the container

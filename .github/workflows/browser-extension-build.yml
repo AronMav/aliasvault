@@ -27,16 +27,19 @@ jobs:
   build-core-libraries:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Build Core Libraries
         uses: ./.github/actions/build-core-libraries
+        with:
+          target: browser-extension
+          check-generated: "true"
 
   build-chrome-extension:
     needs: build-core-libraries
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Build Chrome Extension
         uses: ./.github/actions/build-browser-extension
@@ -47,7 +50,7 @@ jobs:
     needs: build-core-libraries
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Build Firefox Extension
         uses: ./.github/actions/build-browser-extension
@@ -58,7 +61,7 @@ jobs:
     needs: build-core-libraries
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Build Edge Extension
         uses: ./.github/actions/build-browser-extension

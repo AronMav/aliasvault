@@ -3,11 +3,12 @@ import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { View, StyleSheet, Modal, TouchableWithoutFeedback, TouchableOpacity } from 'react-native';
 
-import type { ItemType } from '@/utils/dist/core/models/vault';
-import { ItemTypes } from '@/utils/dist/core/models/vault';
+import type { ItemType } from '@aliasvault/models/vault';
+import { ItemTypes } from '@aliasvault/models/vault';
 
 import { useColors } from '@/hooks/useColorScheme';
 
+import { ModalBackdrop } from '@/components/common/ModalBackdrop';
 import { ThemedText } from '@/components/themed/ThemedText';
 import { RobustPressable } from '@/components/ui/RobustPressable';
 
@@ -96,7 +97,6 @@ export const ItemTypeSelector: React.FC<ItemTypeSelectorProps> = ({
       opacity: 0.8,
     },
     modalContainer: {
-      backgroundColor: 'rgba(0, 0, 0, 0.5)',
       flex: 1,
       justifyContent: 'center',
       padding: 20,
@@ -184,6 +184,7 @@ export const ItemTypeSelector: React.FC<ItemTypeSelectorProps> = ({
         animationType="fade"
         onRequestClose={() => setShowDropdown(false)}
       >
+        <ModalBackdrop />
         <TouchableWithoutFeedback onPress={() => setShowDropdown(false)}>
           <View style={styles.modalContainer}>
             <TouchableWithoutFeedback>

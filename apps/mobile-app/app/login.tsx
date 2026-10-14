@@ -1,5 +1,6 @@
-import { Buffer } from 'buffer';
-
+import { describeAuthError, formatErrorMessage } from '@aliasvault/client/auth/AuthErrorMessage';
+import { SrpAuthService, type PreparedCredentials } from '@aliasvault/client/auth/SrpAuthService';
+import { SrpLoginService } from '@aliasvault/client/auth/SrpLoginService';
 import { MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useFocusEffect } from 'expo-router';
@@ -9,13 +10,6 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useApiUrl } from '@/utils/ApiUrlUtility';
 import { AppUnlockUtility } from '@/utils/AppUnlockUtility';
-import ConversionUtility from '@/utils/ConversionUtility';
-import type { EncryptionKeyDerivationParams } from '@/utils/dist/core/models/metadata';
-import type { LoginResponse } from '@/utils/dist/core/models/webapi';
-import EncryptionUtility from '@/utils/EncryptionUtility';
-import { SrpUtility } from '@/utils/SrpUtility';
-import { ApiAuthError } from '@/utils/types/errors/ApiAuthError';
-import { ClientUpgradeRequiredError } from '@/utils/types/errors/ClientUpgradeRequiredError';
 import { LocalAuthError } from '@/utils/types/errors/LocalAuthError';
 
 import { useColors } from '@/hooks/useColorScheme';
@@ -32,6 +26,9 @@ import { useDb } from '@/context/DbContext';
 import { useDialog } from '@/context/DialogContext';
 import { useWebApi } from '@/context/WebApiContext';
 import NativeVaultManager from '@/specs/NativeVaultManager';
+
+import type { UnlockKeyDerivationParams } from '@aliasvault/models/metadata';
+import type { LoginResponse } from '@aliasvault/models/webapi';
 
 /**
  * Login screen.
@@ -63,8 +60,7 @@ export default function LoginScreen() : React.ReactNode {
   const [twoFactorRequired, setTwoFactorRequired] = useState(false);
   const [twoFactorCode, setTwoFactorCode] = useState('');
   const [initiateLoginResponse, setInitiateLoginResponse] = useState<LoginResponse | null>(null);
-  const [passwordHashString, setPasswordHashString] = useState<string | null>(null);
-  const [passwordHashBase64, setPasswordHashBase64] = useState<string | null>(null);
+  const [loginCredentials, setLoginCredentials] = useState<PreparedCredentials | null>(null);
   const [loginStatus, setLoginStatus] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
 
@@ -153,21 +149,41 @@ export default function LoginScreen() : React.ReactNode {
   const webApi = useWebApi();
   const { syncVault } = useVaultSync();
 
-  const srpUtil = new SrpUtility(webApi);
+  const srpUtil = new SrpLoginService(webApi);
+
+  /**
+   * The message for a failed login: the shared auth error message, with the self-hosted variant of the server error.
+   * @param err - the thrown error
+   */
+  const loginErrorMessage = async (err: unknown): Promise<string> => {
+    if (err instanceof LocalAuthError) {
+      return err.message;
+    }
+    const message = await describeAuthError(err);
+    if (message.key === 'common.errors.serverError' && await webApi.isSelfHosted()) {
+      return t('auth.errors.serverErrorSelfHosted');
+    }
+    return formatErrorMessage(message, t);
+  };
 
   /**
    * Process the vault response by storing the vault and logging in the user.
    * @param token - The token to use for the vault
    * @param refreshToken - The refresh token to use for the vault
-   * @param passwordHashBase64 - The password hash base64
+   * @param unlockKeyBase64 - The unlock key (base64), the Argon2id output of the password
    * @param initiateLoginResponse - The initiate login response
    */
   const processVaultResponse = async (
     token: string,
     refreshToken: string,
-    passwordHashBase64: string,
+    unlockKeyBase64: string,
     initiateLoginResponse: LoginResponse
   ) : Promise<void> => {
+    // Login always starts from the server's vault, so drop one an older app version kept after a forced logout.
+    if (await NativeVaultManager.hasEncryptedDatabase()) {
+      await NativeVaultManager.clearSession();
+    }
+
     // Get biometric display name
     const biometricDisplayName = await AppUnlockUtility.getBiometricDisplayName();
     const isBiometricsEnabledOnDevice = await AppUnlockUtility.isBiometricsAvailableOnDevice();
@@ -194,7 +210,7 @@ export default function LoginScreen() : React.ReactNode {
               await continueProcessVaultResponse(
                 token,
                 refreshToken,
-                passwordHashBase64,
+                unlockKeyBase64,
                 initiateLoginResponse
               );
             }
@@ -210,7 +226,7 @@ export default function LoginScreen() : React.ReactNode {
               await continueProcessVaultResponse(
                 token,
                 refreshToken,
-                passwordHashBase64,
+                unlockKeyBase64,
                 initiateLoginResponse
               );
             }
@@ -226,7 +242,7 @@ export default function LoginScreen() : React.ReactNode {
       await continueProcessVaultResponse(
         token,
         refreshToken,
-        passwordHashBase64,
+        unlockKeyBase64,
         initiateLoginResponse
       );
     }
@@ -236,17 +252,16 @@ export default function LoginScreen() : React.ReactNode {
    * Continue processing the vault response after biometric choice
    * @param token - The token to use for the vault
    * @param refreshToken - The refresh token to use for the vault
-   * @param passwordHashBase64 - The password hash base64
+   * @param unlockKeyBase64 - The unlock key (base64), the Argon2id output of the password
    * @param initiateLoginResponse - The initiate login response
-   * @param encryptionKeyDerivationParams - The encryption key derivation parameters
    */
   const continueProcessVaultResponse = async (
     token: string,
     refreshToken: string,
-    passwordHashBase64: string,
+    unlockKeyBase64: string,
     initiateLoginResponse: LoginResponse
   ) : Promise<void> => {
-    const encryptionKeyDerivationParams : EncryptionKeyDerivationParams = {
+    const unlockKeyDerivationParams : UnlockKeyDerivationParams = {
       encryptionType: initiateLoginResponse.encryptionType,
       encryptionSettings: initiateLoginResponse.encryptionSettings,
       salt: initiateLoginResponse.salt,
@@ -256,45 +271,19 @@ export default function LoginScreen() : React.ReactNode {
      * Store auth tokens and encryption credentials. syncVault will download
      * the vault and store it (including metadata) through native code.
      */
-    await authContext.setAuthTokens(ConversionUtility.normalizeUsername(credentials.username), token, refreshToken);
-    await dbContext.storeEncryptionKey(passwordHashBase64);
-    await dbContext.storeEncryptionKeyDerivationParams(encryptionKeyDerivationParams);
+    await authContext.setAuthTokens(SrpAuthService.normalizeUsername(credentials.username), token, refreshToken);
+    await dbContext.storeUnlockKeyDerivationParams(unlockKeyDerivationParams);
 
     /*
-     * Forced logout recovery check:
-     * If there's an existing local vault (from forced logout), try to unlock it.
-     * First check if it belongs to the same user - if different user, clear and download fresh.
-     * If decryption fails (password changed or corrupted), reset sync state so
-     * sync will do a clean download instead of trying to merge.
+     * The Rust core opens the account's key chain (fetched from the server, or the cached one when offline) with the
+     * KEK derived from the unlock key and caches the chain as-is. The session keeps the Account Key it yields.
      */
-    const hasExistingVault = await NativeVaultManager.hasEncryptedDatabase();
-    if (hasExistingVault) {
-      const storedUsername = await NativeVaultManager.getUsername();
-      const normalizedLoginUsername = ConversionUtility.normalizeUsername(credentials.username);
-
-      if (storedUsername && storedUsername !== normalizedLoginUsername) {
-        // Different user: clear vault and download fresh
-        console.info(`Existing vault belongs to different user (${storedUsername}), clearing for fresh download`);
-        await NativeVaultManager.clearEncryptedVaultForFreshDownload();
-      } else {
-        try {
-          await NativeVaultManager.unlockVault();
-          // Decryption succeeded, local vault is valid, sync will handle it
-          console.info('Existing local vault (after forced logout) decrypted successfully, syncing with server');
-        } catch {
-          // Decryption failed (password changed or corrupted), clear vault and download fresh
-          console.info('Existing vault could not be decrypted (password changed or corrupted), clearing for fresh download');
-          await NativeVaultManager.clearEncryptedVaultForFreshDownload();
-        }
-      }
-    }
+    await NativeVaultManager.resolveVaultKey(unlockKeyBase64);
 
     let upgradeRequired = false;
 
     /*
      * Sync vault from server (downloads, stores, and validates compatibility)
-     * This will handle the forced logout recovery check in case our local vault is dirty
-     * or is ahead of server in case of RPO event.
      *
      * Critical errors (auth, version) are handled internally via app.logout(message)
      * which shows a native alert. We check the return value to know if sync succeeded.
@@ -352,8 +341,7 @@ export default function LoginScreen() : React.ReactNode {
     authContext.setOfflineMode(false);
     setTwoFactorRequired(false);
     setTwoFactorCode('');
-    setPasswordHashString(null);
-    setPasswordHashBase64(null);
+    setLoginCredentials(null);
     setInitiateLoginResponse(null);
     setLoginStatus(null);
     router.replace('/(tabs)/items');
@@ -378,31 +366,23 @@ export default function LoginScreen() : React.ReactNode {
     await new Promise(resolve => requestAnimationFrame(resolve));
 
     try {
-      const initiateLoginResponse = await srpUtil.initiateLogin(ConversionUtility.normalizeUsername(credentials.username));
+      const initiateLoginResponse = await srpUtil.initiateLogin(SrpAuthService.normalizeUsername(credentials.username));
 
-      const passwordHash = await EncryptionUtility.deriveKeyFromPassword(
-        credentials.password,
-        initiateLoginResponse.salt,
-        initiateLoginResponse.encryptionType,
-        initiateLoginResponse.encryptionSettings
-      );
-
-      const passwordHashString = Buffer.from(passwordHash).toString('hex').toUpperCase();
-      const passwordHashBase64 = Buffer.from(passwordHash).toString('base64');
+      const unlockKeyBase64 = await NativeVaultManager.deriveKeyFromPassword(credentials.password, initiateLoginResponse.salt, initiateLoginResponse.encryptionType, initiateLoginResponse.encryptionSettings);
+      const passwordCredentials = await SrpAuthService.loginCredentials(unlockKeyBase64, initiateLoginResponse, credentials.username);
 
       setLoginStatus(t('auth.validatingCredentials'));
       await new Promise(resolve => requestAnimationFrame(resolve));
       const validationResponse = await srpUtil.validateLogin(
-        ConversionUtility.normalizeUsername(credentials.username),
-        passwordHashString,
+        SrpAuthService.normalizeUsername(credentials.username),
+        passwordCredentials,
         true,
         initiateLoginResponse
       );
 
       if (validationResponse.requiresTwoFactor) {
         setInitiateLoginResponse(initiateLoginResponse);
-        setPasswordHashString(passwordHashString);
-        setPasswordHashBase64(passwordHashBase64);
+        setLoginCredentials(passwordCredentials);
         setTwoFactorRequired(true);
         setIsLoading(false);
         setLoginStatus(null);
@@ -413,32 +393,18 @@ export default function LoginScreen() : React.ReactNode {
         throw new Error('Login failed -- no token returned');
       }
 
-      setLoginStatus(t('auth.syncingVault'));
+      setLoginStatus(t('vault.syncingVault'));
       await new Promise(resolve => requestAnimationFrame(resolve));
 
       await processVaultResponse(
         validationResponse.token.token,
         validationResponse.token.refreshToken,
-        passwordHashBase64,
+        passwordCredentials.unlockKeyBase64,
         initiateLoginResponse
       );
     } catch (err) {
-      if (err instanceof ClientUpgradeRequiredError) {
-        // Server refused this app version; show the notice translated, keyed on its error code.
-        console.error('Client upgrade required:', err);
-        setError(t('vault.errors.versionNotSupported'));
-      } else if (err instanceof ApiAuthError) {
-        console.error('ApiAuthError error:', err);
-        setError(t(`apiErrors.${err.message}`));
-      } else if (err instanceof LocalAuthError) {
-        console.error('Network/SSL error:', err);
-        setError((err as LocalAuthError).message);
-      } else {
-        console.error('Login error:', err);
-        // Check if self-hosted to show appropriate server error message
-        const isSelfHosted = await webApi.isSelfHosted();
-        setError(isSelfHosted ? t('auth.errors.serverErrorSelfHosted') : t('auth.errors.serverError'));
-      }
+      console.error('Login error:', err);
+      setError(await loginErrorMessage(err));
       setIsLoading(false);
       setLoginStatus(null);
     }
@@ -454,18 +420,18 @@ export default function LoginScreen() : React.ReactNode {
     await new Promise(resolve => requestAnimationFrame(resolve));
 
     try {
-      if (!passwordHashString || !passwordHashBase64 || !initiateLoginResponse) {
+      if (!loginCredentials || !initiateLoginResponse) {
         throw new Error('Required login data not found');
       }
 
       const code = twoFactorCode.trim();
       if (!/^\d{6}$/.test(code)) {
-        throw new ApiAuthError(t('auth.errors.invalidAuthCode'));
+        throw new LocalAuthError(t('common.errors.invalidCode'));
       }
 
       const validationResponse = await srpUtil.validateLogin2Fa(
-        ConversionUtility.normalizeUsername(credentials.username),
-        passwordHashString,
+        SrpAuthService.normalizeUsername(credentials.username),
+        loginCredentials,
         true,
         initiateLoginResponse,
         parseInt(twoFactorCode)
@@ -475,29 +441,18 @@ export default function LoginScreen() : React.ReactNode {
         throw new Error('Login failed -- no token returned');
       }
 
-      setLoginStatus(t('auth.syncingVault'));
+      setLoginStatus(t('vault.syncingVault'));
       await new Promise(resolve => requestAnimationFrame(resolve));
 
       await processVaultResponse(
         validationResponse.token.token,
         validationResponse.token.refreshToken,
-        passwordHashBase64,
+        loginCredentials.unlockKeyBase64,
         initiateLoginResponse
       );
     } catch (err) {
       console.error('2FA error:', err);
-      if (err instanceof ClientUpgradeRequiredError) {
-        // Server refused this app version; show the notice translated, keyed on its error code.
-        setError(t('vault.errors.versionNotSupported'));
-      } else if (err instanceof ApiAuthError) {
-        setError(t(`apiErrors.${err.message}`));
-      } else if (err instanceof LocalAuthError) {
-        setError((err as Error).message);
-      } else {
-        // Check if self-hosted to show appropriate server error message
-        const isSelfHosted = await webApi.isSelfHosted();
-        setError(t(isSelfHosted ? 'auth.errors.serverErrorSelfHosted' : 'auth.errors.serverError'));
-      }
+      setError(await loginErrorMessage(err));
       setIsLoading(false);
     }
   };
@@ -739,8 +694,7 @@ export default function LoginScreen() : React.ReactNode {
                         setCredentials({ username: '', password: '' });
                         setTwoFactorRequired(false);
                         setTwoFactorCode('');
-                        setPasswordHashString(null);
-                        setPasswordHashBase64(null);
+                        setLoginCredentials(null);
                         setInitiateLoginResponse(null);
                         setError(null);
                       }}
@@ -775,7 +729,7 @@ export default function LoginScreen() : React.ReactNode {
                       testID="username-input"
                     />
                   </View>
-                  <Text style={styles.label}>{t('auth.password')}</Text>
+                  <Text style={styles.label}>{t('common.password')}</Text>
                   <View style={styles.inputContainer}>
                     <MaterialIcons
                       name="lock"

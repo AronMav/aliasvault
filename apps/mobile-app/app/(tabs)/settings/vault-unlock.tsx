@@ -43,7 +43,7 @@ export default function VaultUnlockSettingsScreen() : React.ReactNode {
 
         const methods = await AppUnlockUtility.getEnabledAuthMethods();
 
-        // Check if biometric unlock is actually functional (validates stored key)
+        // Check if biometric unlock is actually functional (validates the Account Key in the keychain)
         if (methods.includes('faceid') && deviceAvailable) {
           const unlockAvailable = await AppUnlockUtility.isBiometricUnlockAvailable();
 
@@ -332,7 +332,7 @@ export default function VaultUnlockSettingsScreen() : React.ReactNode {
 
           <View style={[styles.option, styles.optionLast]}>
             <View style={styles.optionHeader}>
-              <ThemedText style={styles.optionText}>{t('items.password')}</ThemedText>
+              <ThemedText style={styles.optionText}>{t('common.password')}</ThemedText>
               <Switch
                 value={true}
                 disabled={true}

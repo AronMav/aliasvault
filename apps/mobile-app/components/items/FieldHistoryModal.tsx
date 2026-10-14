@@ -1,3 +1,4 @@
+import { parseValueSnapshot, previousFieldValues } from '@aliasvault/client/utilities/FieldHistory';
 import { MaterialIcons } from '@expo/vector-icons';
 import React, { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -10,8 +11,9 @@ import {
 } from 'react-native';
 import Toast from 'react-native-toast-message';
 
-import type { FieldHistory, FieldType } from '@/utils/dist/core/models/vault';
-import { FieldTypes } from '@/utils/dist/core/models/vault';
+import type { ItemRef } from '@aliasvault/client/database/ItemRef';
+import type { FieldHistory, FieldType } from '@aliasvault/models/vault';
+import { FieldTypes } from '@aliasvault/models/vault';
 
 import { useColors } from '@/hooks/useColorScheme';
 import { useDb } from '@/context/DbContext';
@@ -24,9 +26,10 @@ import { useDialog } from '@/context/DialogContext';
 type FieldHistoryModalProps = {
   isOpen: boolean;
   onClose: () => void;
-  itemId: string;
+  item: ItemRef;
   fieldKey: string;
   fieldLabel: string;
+  currentValue: string | string[];
   fieldType: FieldType;
   isHidden: boolean;
 }
@@ -40,9 +43,10 @@ type FieldHistoryModalProps = {
 const FieldHistoryModal: React.FC<FieldHistoryModalProps> = ({
   isOpen,
   onClose,
-  itemId,
+  item,
   fieldKey,
   fieldLabel,
+  currentValue,
   fieldType,
   isHidden
 }) => {
@@ -63,14 +67,14 @@ const FieldHistoryModal: React.FC<FieldHistoryModalProps> = ({
 
     try {
       setLoading(true);
-      const historyRecords = await dbContext.sqliteClient.items.getFieldHistory(itemId, fieldKey);
-      setHistory(historyRecords);
+      const historyRecords = await dbContext.sqliteClient.items.getFieldHistory({ Id: item.Id, ManifestId: item.ManifestId }, fieldKey);
+      setHistory(previousFieldValues(historyRecords, currentValue));
     } catch (error) {
       console.error('Error loading field history:', error);
     } finally {
       setLoading(false);
     }
-  }, [dbContext?.sqliteClient, itemId, fieldKey]);
+  }, [dbContext?.sqliteClient, item.Id, item.ManifestId, fieldKey, currentValue]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -98,17 +102,6 @@ const FieldHistoryModal: React.FC<FieldHistoryModalProps> = ({
   };
 
   /**
-   * Parse a value snapshot into an array of values.
-   */
-  const parseValueSnapshot = (snapshot: string): string[] => {
-    try {
-      return JSON.parse(snapshot) as string[];
-    } catch {
-      return [snapshot];
-    }
-  };
-
-  /**
    * Handle delete of a history record.
    */
   const handleDelete = async (historyId: string): Promise<void> => {
@@ -119,7 +112,7 @@ const FieldHistoryModal: React.FC<FieldHistoryModalProps> = ({
     try {
       // Use vault mutation to delete and sync in background
       await executeVaultMutation(async () => {
-        await dbContext.sqliteClient!.items.deleteFieldHistory(historyId);
+        await dbContext.sqliteClient!.items.deleteFieldHistory(historyId, item.ManifestId);
       });
       // Reload history after deletion
       await loadHistory();
@@ -165,7 +158,7 @@ const FieldHistoryModal: React.FC<FieldHistoryModalProps> = ({
       fontSize: 14,
     },
     historyItem: {
-      backgroundColor: colors.accentBackground,
+      backgroundColor: colors.modalSurfaceRaised,
       borderColor: colors.accentBorder,
       borderRadius: 8,
       borderWidth: 1,
@@ -210,7 +203,7 @@ const FieldHistoryModal: React.FC<FieldHistoryModalProps> = ({
     },
     closeButton: {
       alignItems: 'center',
-      backgroundColor: colors.accentBackground,
+      backgroundColor: colors.modalSurfaceRaised,
       borderColor: colors.accentBorder,
       borderRadius: 8,
       borderWidth: 1,
@@ -353,7 +346,7 @@ const FieldHistoryModal: React.FC<FieldHistoryModalProps> = ({
     <ModalWrapper
       isOpen={isOpen}
       onClose={onClose}
-      title={`${fieldLabel} ${t('items.history')}`}
+      title={t('items.fieldHistory.title', { field: fieldLabel })}
       scrollable
       maxScrollHeight={400}
       footer={footer}

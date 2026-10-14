@@ -1,0 +1,29 @@
+@inherits ComponentBase
+<Button OnClick="HandleClick"
+        Display="flex"
+        Color="danger">
+    <UiIcon Icon="UiIcons.Trash" class="w-4 h-4" />
+    <span class="ml-2">@ButtonText</span>
+</Button>
+
+@code {
+    /// <summary>
+    /// The event to call in the parent when the delete button is clicked.
+    /// </summary>
+    [Parameter]
+    public EventCallback OnClick { get; set; }
+
+    /// <summary>
+    /// The text to display on the button.
+    /// </summary>
+    [Parameter]
+    public string ButtonText { get; set; } = "Delete";
+
+    /// <summary>
+    /// Handles the button click event.
+    /// </summary>
+    private async Task HandleClick()
+    {
+        await OnClick.InvokeAsync();
+    }
+}

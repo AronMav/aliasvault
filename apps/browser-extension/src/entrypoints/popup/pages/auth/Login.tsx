@@ -1,4 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import { ClientUpgradeRequiredError } from '@aliasvault/client/api/errors/ClientUpgradeRequiredError';
+import { ServerUpdateRequiredError } from '@aliasvault/client/api/errors/ServerUpdateRequiredError';
+import { VaultProcessingError } from '@aliasvault/client/api/errors/VaultProcessingError';
+import { describeAuthError, formatErrorMessage } from '@aliasvault/client/auth/AuthErrorMessage';
+import { VaultKeyService } from '@aliasvault/client/auth/VaultKeyService';
+import { AppInfo } from '@aliasvault/client/platform/AppInfo';
+import { syncErrorMessage, syncErrorReportDetail } from '@aliasvault/client/sync/SyncErrorMessage';
+import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 
@@ -6,26 +13,26 @@ import Button from '@/entrypoints/popup/components/Button';
 import MobileUnlockModal from '@/entrypoints/popup/components/Dialogs/MobileUnlockModal';
 import HeaderButton from '@/entrypoints/popup/components/HeaderButton';
 import { HeaderIcon, HeaderIconType } from '@/entrypoints/popup/components/Icons/HeaderIcons';
+import Icon from '@/entrypoints/popup/components/Icons/Icon';
 import LoginServerInfo from '@/entrypoints/popup/components/LoginServerInfo';
+import VaultErrorReport from '@/entrypoints/popup/components/VaultErrorReport';
 import { useApp } from '@/entrypoints/popup/context/AppContext';
 import { useDb } from '@/entrypoints/popup/context/DbContext';
 import { useHeaderButtons } from '@/entrypoints/popup/context/HeaderButtonsContext';
 import { useLoading } from '@/entrypoints/popup/context/LoadingContext';
 import { useWebApi } from '@/entrypoints/popup/context/WebApiContext';
+import { useFinishBackgroundAuth } from '@/entrypoints/popup/hooks/useFinishBackgroundAuth';
 import { PopoutUtility } from '@/entrypoints/popup/utils/PopoutUtility';
-import SrpUtility from '@/entrypoints/popup/utils/SrpUtility';
 
-import { AppInfo } from '@/utils/AppInfo';
-import { SrpAuthService } from '@/utils/auth/SrpAuthService';
-import type { VaultResponse, LoginResponse } from '@/utils/dist/core/models/webapi';
-import { EncryptionUtility } from '@/utils/EncryptionUtility';
+import { StorageKeys } from '@/utils/constants/storageKeys';
+import { logFailure } from '@/utils/Diagnostics';
 import { sendMessage } from '@/utils/messaging/ExtensionMessaging';
-import { ApiAuthError } from '@/utils/types/errors/ApiAuthError';
-import { hasErrorCode, getErrorMessage } from '@/utils/types/errors/AppErrorCodes';
-import { ClientUpgradeRequiredError } from '@/utils/types/errors/ClientUpgradeRequiredError';
-import type { MobileLoginResult } from '@/utils/types/messaging/MobileLoginResult';
+import type { BackgroundAuthResult } from '@/utils/types/messaging/BackgroundAuthResult';
 
 import { vaultStateEvents } from '@/events/VaultStateEvents';
+
+import type { MobileLoginResult } from '@aliasvault/client/auth/MobileLoginService';
+import type { UnlockKeyDerivationParams } from '@aliasvault/models/metadata';
 
 import { storage } from '#imports';
 
@@ -51,128 +58,150 @@ const Login: React.FC = () => {
   const { showLoading, hideLoading, setIsInitialLoading } = useLoading();
   const [rememberMe, setRememberMe] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
-  const [loginResponse, setLoginResponse] = useState<LoginResponse | null>(null);
-  const [passwordHashString, setPasswordHashString] = useState<string | null>(null);
-  const [passwordHashBase64, setPasswordHashBase64] = useState<string | null>(null);
   const [twoFactorRequired, setTwoFactorRequired] = useState(false);
   const [twoFactorCode, setTwoFactorCode] = useState('');
   const [clientUrl, setClientUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [vaultError, setVaultError] = useState<VaultProcessingError | null>(null);
   const [showMobileLoginModal, setShowMobileLoginModal] = useState(false);
   const webApi = useWebApi();
-  const srpUtil = new SrpUtility(webApi);
+  const finishBackgroundAuth = useFinishBackgroundAuth();
 
   /**
-   * Helper to persist and load vault after successful authentication.
-   * Checks if local vault exists from forced logout and preserves it if more advanced.
-   * Also checks if the vault belongs to the same user - if different user, uses server vault.
+   * True while this page waits for a background login, so its own login does not trigger the cross-window reload.
    */
-  const persistAndLoadVault = async (vaultResponse: VaultResponse, encryptionKey: string, loginUsername: string): Promise<void> => {
-    // Check if there's existing vault data (from forced logout)
-    const existingVault = await storage.getItem('local:encryptedVault') as string | null;
-    const existingRevision = await storage.getItem('local:serverRevision') as number | null;
-    const storedUsername = await storage.getItem('local:username') as string | null;
+  const authInFlightRef = useRef(false);
 
-    let vaultToLoad = vaultResponse.vault.blob;
-
-    if (existingVault && existingRevision !== null) {
-      // Check if the existing vault belongs to a different user
-      const normalizedLoginUsername = loginUsername.toLowerCase().trim();
-      const normalizedStoredUsername = storedUsername?.toLowerCase().trim();
-
-      if (storedUsername && normalizedStoredUsername !== normalizedLoginUsername) {
-        // Different user
-        console.info(
-          `Existing vault belongs to different user (${storedUsername}), using server vault for ${loginUsername}`
-        );
-      } else {
-        // Same user (or no stored username)
-        try {
-          const decryptedExisting = await EncryptionUtility.symmetricDecrypt(existingVault, encryptionKey);
-
-          // Check if existing vault is more advanced than server
-          if (existingRevision >= vaultResponse.vault.currentRevisionNumber) {
-            console.info(
-              `Existing vault is more advanced (rev ${existingRevision} >= ${vaultResponse.vault.currentRevisionNumber}), ` +
-              `preserving local vault and will upload to server`
-            );
-
-            // Update metadata and load existing vault
-            vaultToLoad = existingVault;
-            await sendMessage('STORE_VAULT_METADATA', {
-              publicEmailDomainList: vaultResponse.vault.publicEmailDomainList,
-              privateEmailDomainList: vaultResponse.vault.privateEmailDomainList,
-              hiddenPrivateEmailDomainList: vaultResponse.vault.hiddenPrivateEmailDomainList,
-            });
-
-            await dbContext.loadDatabase(decryptedExisting);
-            return;
-          }
-
-          // Server is more advanced, fetch server vault
-          console.info(
-            `Server vault is more advanced (rev ${vaultResponse.vault.currentRevisionNumber} > ${existingRevision}), ` +
-            `using server vault`
-          );
-        } catch {
-          // Decryption failed, password changed or corrupt vault
-          console.info('Existing vault could not be decrypted (password changed), using server vault');
-        }
-      }
+  /**
+   * Pull the vault from the server.
+   */
+  const pullAndLoadVault = async (): Promise<void> => {
+    const result = await sendMessage('FULL_VAULT_SYNC', { forcePull: true, reportErrorToPopup: false });
+    if (result.logoutReason === 'clientVersionNotSupported') {
+      throw new ClientUpgradeRequiredError();
+    }
+    if (result.logoutReason === 'serverVersionNotSupported') {
+      throw new ServerUpdateRequiredError();
+    }
+    if (!result.success) {
+      throw new VaultProcessingError('vault-pull', new Error(syncErrorMessage(result, t) ?? t('common.errors.unknownError')), syncErrorReportDetail(result));
     }
 
-    // Normal flow: persist server vault to local storage
-    await sendMessage('STORE_ENCRYPTED_VAULT', {
-      vaultBlob: vaultResponse.vault.blob,
-      serverRevision: vaultResponse.vault.currentRevisionNumber,
-    });
-
-    await sendMessage('STORE_VAULT_METADATA', {
-      publicEmailDomainList: vaultResponse.vault.publicEmailDomainList,
-      privateEmailDomainList: vaultResponse.vault.privateEmailDomainList,
-      hiddenPrivateEmailDomainList: vaultResponse.vault.hiddenPrivateEmailDomainList,
-    });
-
-    // Decrypt and load the vault into memory
-    const decryptedVault = await EncryptionUtility.symmetricDecrypt(vaultToLoad, encryptionKey);
-    await dbContext.loadDatabase(decryptedVault);
+    await dbContext.loadStoredDatabase();
   };
 
   /**
-   * Handle successful authentication by storing tokens and initializing the database
+   * Show login attempt failure.
+   * @param context - what failed, for the console
+   * @param err - the error
+   */
+  const showLoginError = async (context: string, err: unknown): Promise<void> => {
+    logFailure(context, err);
+    if (err instanceof VaultProcessingError) {
+      // The vault was fetched but couldn't be decrypted/materialized, surface the real error (copyable) for support.
+      setVaultError(err);
+    } else {
+      setError(formatErrorMessage(await describeAuthError(err), t));
+    }
+  };
+
+  /**
+   * Run a login flow in the background and show its outcome. Resolves to the outcome, or null when none ran.
+   */
+  const runBackgroundAuth = async (start: () => Promise<BackgroundAuthResult | null>): Promise<BackgroundAuthResult | null> => {
+    authInFlightRef.current = true;
+    let result: BackgroundAuthResult | null = null;
+    try {
+      result = await start();
+      if (result) {
+        await handleAuthResult(result);
+      }
+    } catch (err) {
+      await showLoginError('Login error', err);
+    } finally {
+      // After a success the page navigates away, keep ignoring the unlock event until then.
+      authInFlightRef.current = result?.status === 'success';
+    }
+    return result;
+  };
+
+  /**
+   * Show the outcome of a background login flow.
+   */
+  const handleAuthResult = async (result: BackgroundAuthResult): Promise<void> => {
+    switch (result.status) {
+      case 'success': {
+        // Reset prefill flag so next logout will prefill again
+        usernamePrefillAttempted = false;
+        setTwoFactorRequired(false);
+        setTwoFactorCode('');
+        const finishError = await finishBackgroundAuth(result.offline);
+        if (finishError) {
+          setError(finishError);
+        }
+        return;
+      }
+      case 'twoFactorRequired':
+        setCredentials({ username: result.username, password: '' });
+        setRememberMe(result.rememberMe);
+        setTwoFactorRequired(true);
+        return;
+      case 'vaultPullFailed':
+        // The vault was fetched but couldn't be decrypted/materialized, surface the real error (copyable) for support.
+        setVaultError(new VaultProcessingError('vault-pull', new Error(syncErrorMessage(result.sync, t) ?? t('common.errors.unknownError')), syncErrorReportDetail(result.sync)));
+        return;
+      case 'logout':
+        setError(result.message ?? t(result.reasonKey ?? 'common.errors.unknownError'));
+        return;
+      case 'error':
+        setError(formatErrorMessage(result.error, t));
+        return;
+      default:
+        // An unlock flow finished while this page was open, reinitialize routes to where it left the popup.
+        navigate('/reinitialize', { replace: true });
+    }
+  };
+
+  /**
+   * Finish a mobile login: store the tokens and unlock key, then pull and load the vault.
+   * @param username - the normalized username
+   * @param token - the access token
+   * @param refreshToken - the refresh token
+   * @param unlockKey - the key the phone sent (its Account Key, or an unlock key from an older app), base64
+   * @param derivationParams - how the unlock key is derived from the password
    */
   const handleSuccessfulAuth = async (
     username: string,
     token: string,
     refreshToken: string,
-    passwordHashBase64: string,
-    loginResponse: LoginResponse
+    unlockKey: string,
+    derivationParams: UnlockKeyDerivationParams
   ) : Promise<void> => {
-    // Try to get latest vault manually providing auth token.
-    const vaultResponseJson = await webApi.authFetch<VaultResponse>('Vault', { method: 'GET', headers: {
-      'Authorization': `Bearer ${token}`
-    } });
-
-    // All is good. Store auth info which is required to make requests to the web API.
+    // Store auth info first; the vault fetch below makes an authenticated request via the stored access token.
     await app.setAuthTokens(username, token, refreshToken);
 
-    // Store the encryption key and derivation params separately
-    await dbContext.storeEncryptionKey(passwordHashBase64);
-    await dbContext.storeEncryptionKeyDerivationParams({
-      salt: loginResponse.salt,
-      encryptionType: loginResponse.encryptionType,
-      encryptionSettings: loginResponse.encryptionSettings
+    /*
+     * Fetch the account's key chain, check the unlock key opens it and cache it as-is; the vault encryption key is
+     * derived from the two on demand. Legacy accounts have no chain.
+     */
+    let accountKey: string;
+    try {
+      accountKey = await VaultKeyService.refreshKeyChain(unlockKey, webApi);
+    } catch (err) {
+      // If key chain can't be fetched, logout user and show error as this is not a recoverable error.
+      await app.logout();
+      throw err;
+    }
+
+    await dbContext.storeUnlockKeyDerivationParams({
+      salt: derivationParams.salt,
+      encryptionType: derivationParams.encryptionType,
+      encryptionSettings: derivationParams.encryptionSettings
     });
 
-    /*
-     * Persist and load the vault.
-     * If there was a forced logout, persistAndLoadVault checks existing vault data:
-     * - If different user → uses server vault
-     * - If local vault is more advanced → preserves it (will upload via sync in /reinitialize)
-     * - If server is more advanced → uses server vault
-     * - If password changed (can't decrypt) → uses server vault
-     */
-    await persistAndLoadVault(vaultResponseJson, passwordHashBase64, username);
+    // Store the Account Key, then pull and load the vault.
+    await dbContext.storeAccountKey(accountKey);
+    await pullAndLoadVault();
 
     // Reset prefill flag so next logout will prefill again
     usernamePrefillAttempted = false;
@@ -180,7 +209,7 @@ const Login: React.FC = () => {
     /*
      * Navigate to reinitialize page which will:
      * 1. Call syncVault() to check version compatibility
-     * 2. Handle pending migrations via onUpgradeRequired callback
+     * 2. Send the vault through /upgrade when either the legacy sqlite-blob chain or the manifest migration applies
      * 3. Navigate to appropriate page
      *
      * Other windows on /login or /unlock pick up the encryption-key storage
@@ -198,12 +227,20 @@ const Login: React.FC = () => {
      */
     const loadInitialData = async () : Promise<void> => {
       // Load client URL
-      const settingClientUrl = await storage.getItem('local:clientUrl') as string;
+      const settingClientUrl = await storage.getItem(StorageKeys.CLIENT_URL) as string;
       let clientUrl = AppInfo.DEFAULT_CLIENT_URL;
       if (settingClientUrl && settingClientUrl.length > 0) {
         clientUrl = settingClientUrl;
       }
       setClientUrl(clientUrl);
+
+      // Pick up a login the background is still running because the popup was closed mid-login.
+      const pending = await runBackgroundAuth(() => sendMessage('AUTH_AWAIT_PENDING'));
+      if (pending) {
+        twoFactorStateRestoreAttempted = true;
+        setIsInitialLoading(false);
+        return;
+      }
 
       /*
        * Check for persisted 2FA state (from popup close during 2FA entry).
@@ -214,11 +251,8 @@ const Login: React.FC = () => {
         twoFactorStateRestoreAttempted = true;
         const savedState = await sendMessage('GET_TWO_FACTOR_STATE');
         if (savedState) {
-          // Restore the 2FA state
+          // Restore the 2FA step, the background keeps what it needs to finish the login.
           setCredentials({ username: savedState.username, password: '' });
-          setLoginResponse(savedState.loginResponse);
-          setPasswordHashString(savedState.passwordHashString);
-          setPasswordHashBase64(savedState.passwordHashBase64);
           setRememberMe(savedState.rememberMe);
           setTwoFactorRequired(true);
           setIsInitialLoading(false);
@@ -232,7 +266,7 @@ const Login: React.FC = () => {
        */
       if (!usernamePrefillAttempted) {
         usernamePrefillAttempted = true;
-        const savedUsername = await storage.getItem('local:username') as string | null;
+        const savedUsername = await storage.getItem(StorageKeys.USERNAME) as string | null;
         if (savedUsername) {
           setCredentials(prev => ({ ...prev, username: savedUsername }));
         }
@@ -241,6 +275,7 @@ const Login: React.FC = () => {
       setIsInitialLoading(false);
     };
     loadInitialData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [setIsInitialLoading]);
 
   // Set header buttons on mount and clear on unmount
@@ -249,7 +284,7 @@ const Login: React.FC = () => {
       <>
         <HeaderButton
           onClick={() => PopoutUtility.openInNewPopup()}
-          title="Open in new window"
+          title={t('common.openInNewWindow')}
           iconType={HeaderIconType.EXPAND}
         />
       </>
@@ -260,14 +295,16 @@ const Login: React.FC = () => {
     return () => {
       setHeaderButtons(null);
     };
-  }, [setHeaderButtons]);
+  }, [setHeaderButtons, t]);
 
   /*
    * Cross-window login sync: reload when another window unlocks/logs in.
    */
   useEffect(() => {
     return vaultStateEvents.onVaultUnlocked(() => {
-      window.location.reload();
+      if (!authInFlightRef.current) {
+        window.location.reload();
+      }
     });
   }, []);
 
@@ -277,88 +314,14 @@ const Login: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent) : Promise<void> => {
     e.preventDefault();
     setError(null);
+    setVaultError(null);
+    showLoading();
 
-    try {
-      showLoading();
+    // Clear global message if set with every login attempt.
+    app.clearGlobalMessage();
 
-      // Clear global message if set with every login attempt.
-      app.clearGlobalMessage();
-
-      // Initiate login with server
-      const normalizedUsername = SrpAuthService.normalizeUsername(credentials.username);
-      const loginResponse = await srpUtil.initiateLogin(normalizedUsername);
-
-      // Derive key from password using Argon2id and prepare credentials
-      const { passwordHashString, passwordHashBase64 } = await SrpAuthService.prepareCredentials(
-        credentials.password,
-        loginResponse.salt,
-        loginResponse.encryptionType,
-        loginResponse.encryptionSettings
-      );
-
-      // Validate login with SRP protocol
-      const validationResponse = await srpUtil.validateLogin(
-        normalizedUsername,
-        passwordHashString,
-        rememberMe,
-        loginResponse
-      );
-
-      // Handle 2FA if required
-      if (validationResponse.requiresTwoFactor) {
-        // Store login response as we need it for 2FA validation
-        setLoginResponse(loginResponse);
-        // Store password hash string as we need it for 2FA validation
-        setPasswordHashString(passwordHashString);
-        // Store password hash base64 as we need it for decryption
-        setPasswordHashBase64(passwordHashBase64);
-        setTwoFactorRequired(true);
-
-        /*
-         * Persist 2FA state to background script so user can
-         * close popup to switch to authenticator app and continue when reopening
-         */
-        await sendMessage('STORE_TWO_FACTOR_STATE', {
-          username: normalizedUsername,
-          loginResponse,
-          passwordHashString,
-          passwordHashBase64,
-          rememberMe,
-        });
-
-        // Show app.
-        hideLoading();
-        return;
-      }
-
-      // Check if token was returned.
-      if (!validationResponse.token) {
-        throw new Error(t('common.errors.unknownError'));
-      }
-
-      // Handle successful authentication
-      await handleSuccessfulAuth(
-        normalizedUsername,
-        validationResponse.token.token,
-        validationResponse.token.refreshToken,
-        passwordHashBase64,
-        loginResponse
-      );
-    } catch (err) {
-      // Show API authentication errors as-is.
-      if (err instanceof ClientUpgradeRequiredError) {
-        // Server refused this client version (HTTP 426).
-        setError(t('common.errors.clientVersionNotSupported'));
-      } else if (err instanceof ApiAuthError) {
-        setError(t('common.apiErrors.' + err.message));
-      } else if (hasErrorCode(err)) {
-        // Error contains an error code (E-XXX), show the formatted message as-is
-        setError(getErrorMessage(err, t('common.errors.serverError')));
-      } else {
-        setError(t('common.errors.serverError'));
-      }
-      hideLoading();
-    }
+    await runBackgroundAuth(() => sendMessage('AUTH_LOGIN', { username: credentials.username, password: credentials.password, rememberMe }));
+    hideLoading();
   };
 
   /**
@@ -367,68 +330,18 @@ const Login: React.FC = () => {
   const handleTwoFactorSubmit = async (e: React.FormEvent) : Promise<void> => {
     e.preventDefault();
     setError(null);
+    setVaultError(null);
 
-    try {
-      showLoading();
-
-      if (!passwordHashString || !passwordHashBase64 || !loginResponse) {
-        throw new Error(t('common.errors.unknownError'));
-      }
-
-      // Validate that 2FA code is a 6-digit number
-      const code = twoFactorCode.trim();
-      if (!/^\d{6}$/.test(code)) {
-        throw new Error(t('common.errors.invalidCode'));
-      }
-
-      const twoFaUsername = SrpAuthService.normalizeUsername(credentials.username);
-      const validationResponse = await srpUtil.validateLogin2Fa(
-        twoFaUsername,
-        passwordHashString,
-        rememberMe,
-        loginResponse,
-        parseInt(twoFactorCode)
-      );
-
-      // Check if token was returned.
-      if (!validationResponse.token) {
-        throw new Error(t('common.errors.unknownError'));
-      }
-
-      // Clear any persisted 2FA state since login is successful
-      await sendMessage('CLEAR_TWO_FACTOR_STATE');
-
-      // Handle successful authentication
-      await handleSuccessfulAuth(
-        twoFaUsername,
-        validationResponse.token.token,
-        validationResponse.token.refreshToken,
-        passwordHashBase64,
-        loginResponse
-      );
-
-      // Reset 2FA state and login response as it's no longer needed
-      setTwoFactorRequired(false);
-      setTwoFactorCode('');
-      setPasswordHashString(null);
-      setPasswordHashBase64(null);
-      setLoginResponse(null);
-    } catch (err) {
-      // Show API authentication errors as-is.
-      console.error('2FA error:', err);
-      if (err instanceof ClientUpgradeRequiredError) {
-        // Server refused this client version (HTTP 426).
-        setError(t('common.errors.clientVersionNotSupported'));
-      } else if (err instanceof ApiAuthError) {
-        setError(t('common.apiErrors.' + err.message));
-      } else if (hasErrorCode(err)) {
-        // Error contains an error code (E-XXX), show the formatted message as-is
-        setError(getErrorMessage(err, t('common.errors.serverError')));
-      } else {
-        setError(t('common.errors.serverError'));
-      }
-      hideLoading();
+    // Validate that 2FA code is a 6-digit number
+    const code = twoFactorCode.trim();
+    if (!/^\d{6}$/.test(code)) {
+      setError(t('common.errors.invalidCode'));
+      return;
     }
+
+    showLoading();
+    await runBackgroundAuth(() => sendMessage('AUTH_LOGIN_TWO_FACTOR', { code }));
+    hideLoading();
   };
 
   /**
@@ -439,40 +352,12 @@ const Login: React.FC = () => {
     try {
       // Clear global message if set
       app.clearGlobalMessage();
-
-      // Fetch vault from server with the new auth token
-      const vaultResponse = await webApi.authFetch<VaultResponse>('Vault', {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${result.token}`,
-        },
-      });
-
-      // Store auth tokens and username
-      await app.setAuthTokens(result.username, result.token, result.refreshToken);
-
-      // Store the encryption key and derivation params
-      await dbContext.storeEncryptionKey(result.decryptionKey);
-      await dbContext.storeEncryptionKeyDerivationParams({
-        salt: result.salt,
-        encryptionType: result.encryptionType,
-        encryptionSettings: result.encryptionSettings,
-      });
-
-      // Persist and load the vault
-      await persistAndLoadVault(vaultResponse, result.decryptionKey, result.username);
-
-      /*
-       * Navigate to reinitialize page which will:
-       * 1. Call syncVault() to check version compatibility
-       * 2. Handle pending migrations via onUpgradeRequired callback
-       * 3. Navigate to appropriate page
-       */
-      hideLoading();
       setIsInitialLoading(false);
-      navigate('/reinitialize', { replace: true });
+
+      // The mobile device sends the unlock key.
+      await handleSuccessfulAuth(result.username, result.token, result.refreshToken, result.unlockKey, result);
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('common.errors.unknownError'));
+      await showLoginError('Mobile login error', err);
       hideLoading();
       throw err; // Re-throw to let modal show error
     }
@@ -491,60 +376,66 @@ const Login: React.FC = () => {
 
   if (twoFactorRequired) {
     return (
-      <div>
-        <form onSubmit={handleTwoFactorSubmit} className="bg-white dark:bg-gray-700 w-full shadow-md rounded px-8 pt-6 pb-8 mb-4">
-          {error && (
-            <div className="mb-4 text-red-500 dark:text-red-400 text-sm">
-              {error}
+      <div className="flex flex-col items-center justify-center p-4">
+        <div className="w-full max-w-md">
+          <form onSubmit={handleTwoFactorSubmit} className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+            <div className="text-center mb-6">
+              <h2 className="text-xl font-bold text-gray-900 dark:text-white">{t('common.twoFactorAuthentication')}</h2>
+              <p className="text-sm text-gray-600 dark:text-gray-400 mt-2">{t('auth.twoFactorTitle')}</p>
             </div>
-          )}
-          <div className="mb-6">
-            <p className="text-gray-700 dark:text-gray-200 mb-4">
-              {t('auth.twoFactorTitle')}
+
+            {error && (
+              <div className="mb-4 text-red-500 dark:text-red-400 text-sm">
+                {error}
+              </div>
+            )}
+            {vaultError && <VaultErrorReport error={vaultError} />}
+
+            <div className="mb-6">
+              <label className="block text-gray-700 dark:text-gray-200 font-medium mb-2" htmlFor="twoFactorCode">
+                {t('auth.authCode')}
+              </label>
+              <input
+                className="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 dark:text-gray-200 dark:bg-gray-700 dark:border-gray-600 leading-tight focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                id="twoFactorCode"
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                autoFocus
+                value={twoFactorCode}
+                onChange={(e) => setTwoFactorCode(e.target.value)}
+                placeholder={t('auth.enterAuthCode')}
+                required
+              />
+            </div>
+            <div className="flex flex-col w-full space-y-2">
+              <Button type="submit">
+                {t('auth.verify')}
+              </Button>
+              <Button
+                type="button"
+                onClick={async () => {
+                  // Clear persisted 2FA state
+                  await sendMessage('CLEAR_TWO_FACTOR_STATE');
+                  // Reset the form
+                  setCredentials({
+                    username: '',
+                    password: ''
+                  });
+                  setTwoFactorRequired(false);
+                  setTwoFactorCode('');
+                  setError(null);
+                }}
+                variant="secondary"
+              >
+                {t('common.cancel')}
+              </Button>
+            </div>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mt-6 text-center">
+              {t('auth.authCodeNote')}
             </p>
-            <label className="block text-gray-700 dark:text-gray-200 text-sm font-bold mb-2" htmlFor="twoFactorCode">
-              {t('auth.authCode')}
-            </label>
-            <input
-              className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 dark:text-gray-200 dark:bg-gray-800 dark:border-gray-600 leading-tight focus:outline-none focus:shadow-outline"
-              id="twoFactorCode"
-              type="text"
-              value={twoFactorCode}
-              onChange={(e) => setTwoFactorCode(e.target.value)}
-              placeholder={t('auth.authCodePlaceholder')}
-              required
-            />
-          </div>
-          <div className="flex flex-col w-full space-y-2">
-            <Button type="submit">
-              {t('auth.verify')}
-            </Button>
-            <Button
-              type="button"
-              onClick={async () => {
-                // Clear persisted 2FA state
-                await sendMessage('CLEAR_TWO_FACTOR_STATE');
-                // Reset the form
-                setCredentials({
-                  username: '',
-                  password: ''
-                });
-                setTwoFactorRequired(false);
-                setTwoFactorCode('');
-                setPasswordHashString(null);
-                setPasswordHashBase64(null);
-                setLoginResponse(null);
-                setError(null);
-              }}
-              variant="secondary"
-            >
-              {t('common.cancel')}
-            </Button>
-          </div>
-          <p className="text-xs text-gray-500 dark:text-gray-400 mt-4 text-center">
-            {t('auth.twoFactorNote')}
-          </p>
-        </form>
+          </form>
+        </div>
       </div>
     );
   }
@@ -565,6 +456,7 @@ const Login: React.FC = () => {
               {error}
             </div>
           )}
+          {vaultError && <VaultErrorReport error={vaultError} />}
 
           <div className="mb-4">
             <label className="block text-gray-700 dark:text-gray-200 font-medium mb-2" htmlFor="username">
@@ -620,7 +512,7 @@ const Login: React.FC = () => {
 
           <Button type="submit">
             <div className="flex items-center justify-center gap-2">
-              {t('auth.loginButton')}
+              {t('auth.login')}
             </div>
           </Button>
 
@@ -630,21 +522,19 @@ const Login: React.FC = () => {
             onClick={() => setShowMobileLoginModal(true)}
             className="w-full max-w-md mt-4 px-4 py-2 text-sm font-medium text-center text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-100 focus:ring-4 focus:ring-gray-200 dark:bg-gray-600 dark:text-white dark:border-gray-500 dark:hover:bg-gray-500 dark:focus:ring-gray-700 flex items-center justify-center gap-2"
           >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"></path>
-            </svg>
+            <Icon name="device-mobile" className="w-5 h-5" />
             {t('auth.loginWithMobile')}
           </button>
 
           <div className="text-center text-sm text-gray-500 dark:text-gray-400 mt-6">
-            {t('auth.noAccount')}{' '}
+            {t('auth.noAccountYet')}{' '}
             <a
               href={clientUrl ?? ''}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-orange-500 hover:text-orange-600 dark:text-orange-400 dark:hover:text-orange-500"
+              className="text-primary-500 hover:text-primary-600 dark:text-primary-400 dark:hover:text-primary-500"
             >
-              {t('auth.createVault')}
+              {t('auth.createNewVault')}
             </a>
           </div>
         </form>

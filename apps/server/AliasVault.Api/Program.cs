@@ -9,18 +9,20 @@ using System.Globalization;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using AliasServerDb;
 using AliasServerDb.Configuration;
 using AliasVault.Api;
+using AliasVault.Api.Filters;
+using AliasVault.Api.Helpers;
 using AliasVault.Api.Jwt;
 using AliasVault.Api.Services;
 using AliasVault.Auth;
 using AliasVault.Auth.IpAddress;
-using AliasVault.Cryptography.Server;
+using AliasVault.Cryptography;
 using AliasVault.Logging;
 using AliasVault.Shared.Models.Configuration;
-using AliasVault.Shared.Providers.Time;
+using AliasVault.Shared.Models.Enums;
+using AliasVault.Shared.Models.WebApi.V2;
 using AliasVault.Shared.Server.Services;
 using AliasVault.Shared.Server.Utilities;
 using Asp.Versioning;
@@ -41,19 +43,24 @@ CultureInfo.DefaultThreadCurrentUICulture = CultureInfo.InvariantCulture;
 builder.Configuration.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
 builder.Configuration.AddJsonFile($"appsettings.{builder.Environment.EnvironmentName}.json", optional: true, reloadOnChange: true);
 
+#if DEBUG
+// E2E tests override config values for their own requests via headers, see TestConfig.
+var config = builder.Environment.IsDevelopment() ? new AliasVault.Api.Controllers.V2.Tests.TestConfig(new HttpContextAccessor()) : new Config();
+#else
 var config = new Config();
+#endif
 var publicRegistrationEnabled = Environment.GetEnvironmentVariable("PUBLIC_REGISTRATION_ENABLED") ?? "false";
 config.PublicRegistrationEnabled = bool.Parse(publicRegistrationEnabled);
 
 var privateEmailDomains = Environment.GetEnvironmentVariable("PRIVATE_EMAIL_DOMAINS")?
     .Split(",", StringSplitOptions.RemoveEmptyEntries)
-    .Select(d => d.Trim())
+    .Select(d => d.Trim().ToLowerInvariant())
     .Where(d => !string.IsNullOrWhiteSpace(d));
 config.PrivateEmailDomains = privateEmailDomains?.ToList() ?? new List<string>();
 
 var hiddenPrivateEmailDomains = Environment.GetEnvironmentVariable("HIDDEN_PRIVATE_EMAIL_DOMAINS")?
     .Split(",", StringSplitOptions.RemoveEmptyEntries)
-    .Select(d => d.Trim())
+    .Select(d => d.Trim().ToLowerInvariant())
     .Where(d => !string.IsNullOrWhiteSpace(d));
 config.HiddenPrivateEmailDomains = hiddenPrivateEmailDomains?.ToList() ?? new List<string>();
 
@@ -82,17 +89,21 @@ builder.Services.ConfigureLogging(builder.Configuration, Assembly.GetExecutingAs
 
 builder.Services.AddAliasVaultDatabaseConfiguration(builder.Configuration);
 builder.Services.AddAliasVaultDataProtection("AliasVault.Api");
-builder.Services.AddSingleton<ITimeProvider, SystemTimeProvider>();
+builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<TimeValidationJwtBearerEvents>();
 builder.Services.AddScoped<AuthLoggingService>();
 builder.Services.AddScoped<ServerSettingsService>();
 builder.Services.AddScoped<RegistrationRateLimitService>();
+builder.Services.AddScoped<RegistrationInviteService>();
 builder.Services.AddScoped<IpBlockListService>();
 builder.Services.AddScoped<MobileLoginRateLimitService>();
 builder.Services.AddSingleton<FaviconRateLimitService>();
 builder.Services.AddSingleton<AnonymousAuthRateLimitService>();
+builder.Services.AddSingleton<TakenAliasLookupRateLimitService>();
 builder.Services.AddScoped<RateLimitService>();
+builder.Services.AddScoped<CapabilityService>();
 builder.Services.AddHttpContextAccessor();
+builder.Services.AddRateLimiter(options => RegistrationCheckRateLimit.Configure(options, builder.Environment.IsDevelopment()));
 
 builder.Services.AddLogging(logging =>
 {
@@ -102,7 +113,7 @@ builder.Services.AddLogging(logging =>
     logging.AddFilter("Microsoft.AspNetCore.Identity.UserManager", LogLevel.Error);
 });
 
-builder.Services.AddIdentity<AliasVaultUser, AliasVaultRole>(options =>
+builder.Services.AddIdentityCore<AliasVaultUser>(options =>
     {
         options.Password.RequireDigit = false;
         options.Password.RequireLowercase = false;
@@ -178,12 +189,22 @@ builder.Services.AddCors(options =>
         });
 });
 
-builder.Services.AddControllers()
+builder.Services.AddControllers(options =>
+    {
+        options.InputFormatters.Insert(0, new BinaryFrameInputFormatter());
+        options.Filters.Add<LegacyApiGuardFilter>();
+    })
     .AddJsonOptions(options =>
     {
         // Ensure consistent date formatting regardless of server locale
         options.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
         options.JsonSerializerOptions.WriteIndented = false;
+    })
+    .ConfigureApiBehaviorOptions(options =>
+    {
+        // A V2 request that fails model binding or validation gets the coded error body; V1 keeps the framework default.
+        var defaultFactory = options.InvalidModelStateResponseFactory;
+        options.InvalidModelStateResponseFactory = context => ApiError.IsV2Request(context.HttpContext) ? ApiError.Result(ApiErrorCode.INVALID_REQUEST, StatusCodes.Status400BadRequest) : defaultFactory(context);
     });
 builder.Services.AddMemoryCache();
 
@@ -193,6 +214,7 @@ builder.Services.AddApiVersioning(options =>
         options.AssumeDefaultVersionWhenUnspecified = true;
         options.ReportApiVersions = true;
     })
+    .AddMvc()
     .AddApiExplorer(options =>
     {
         options.GroupNameFormat = "'v'VVV";
@@ -237,16 +259,24 @@ if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ASPNETCORE_PATHBAS
     app.UsePathBase(Environment.GetEnvironmentVariable("ASPNETCORE_PATHBASE"));
 }
 
+// An unhandled exception on a V2 request still answers with the coded error body.
+app.UseWhen(ApiError.IsV2Request, v2 => v2.UseExceptionHandler(errorApp => errorApp.Run(context => context.Response.WriteAsJsonAsync(ErrorResponse.Create(ApiErrorCode.INTERNAL_SERVER_ERROR, StatusCodes.Status500InternalServerError)))));
+
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 
 app.MapControllers();
 
 using (var scope = app.Services.CreateScope())
 {
     var container = scope.ServiceProvider;
+    var migrationLogger = container.GetRequiredService<ILoggerFactory>().CreateLogger("AliasVault.DatabaseMigrations");
     await using var db = await container.GetRequiredService<IAliasServerDbContextFactory>().CreateDbContextAsync();
-    await db.Database.MigrateAsync();
+
+    // The API is responsible for database migrations and runtime should not be limited by a command timeout.
+    db.Database.SetCommandTimeout(0);
+    await db.MigrateWithLoggingAsync(migrationLogger);
 }
 
 await app.RunAsync();

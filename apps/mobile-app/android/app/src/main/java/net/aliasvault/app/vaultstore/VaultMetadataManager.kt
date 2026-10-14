@@ -3,8 +3,8 @@ package net.aliasvault.app.vaultstore
 import android.util.Log
 import net.aliasvault.app.vaultstore.models.SyncState
 import net.aliasvault.app.vaultstore.models.VaultMetadata
+import net.aliasvault.app.vaultstore.models.VaultMutationScope
 import net.aliasvault.app.vaultstore.storageprovider.StorageProvider
-import net.aliasvault.app.vaultstore.utils.VersionComparison
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -30,7 +30,7 @@ class VaultMetadataManager(
     /**
      * Get the metadata from the storage provider.
      */
-    fun getMetadata(): String {
+    fun getVaultMetadata(): String {
         return storageProvider.getMetadata()
     }
 
@@ -130,13 +130,17 @@ class VaultMetadataManager(
     }
 
     /**
-     * Check if the stored server version is greater than or equal to the specified version.
-     * @param targetVersion The version to compare against (e.g., "0.25.0")
-     * @return true if stored server version >= targetVersion, false if server version not available or less than target
+     * Set the capabilities the server resolved for this account, as a JSON object.
      */
-    fun isServerVersionGreaterThanOrEqualTo(targetVersion: String): Boolean {
-        val serverVersion = getServerVersion() ?: return false // No server version stored yet
-        return VersionComparison.isGreaterThanOrEqualTo(serverVersion, targetVersion)
+    fun setCapabilities(json: String) {
+        storageProvider.setCapabilities(json)
+    }
+
+    /**
+     * Get the capabilities the server resolved for this account, as a JSON object.
+     */
+    fun getCapabilities(): String? {
+        return storageProvider.getCapabilities()
     }
 
     // endregion
@@ -144,10 +148,53 @@ class VaultMetadataManager(
     // region Sync State Management
 
     /**
-     * Set the dirty flag indicating local changes need to be synced.
+     * Set the dirty flag indicating local changes need to be synced. Clearing it forgets the pending scopes
+     * with it, since a clean vault has nothing left to push.
      */
     fun setIsDirty(isDirty: Boolean) {
         storageProvider.setIsDirty(isDirty)
+        if (!isDirty) {
+            storageProvider.setDirtyScopes(emptyList())
+        }
+    }
+
+    /**
+     * Mark the vault dirty and record what the mutation touched, so the next sync can push only that scope.
+     * @param scope The mutation scope, defaulting to a full-manifest change
+     */
+    fun markDirty(scope: String = VaultMutationScope.MAIN) {
+        setIsDirty(true)
+        addDirtyScope(scope)
+    }
+
+    /**
+     * The mutation scopes that have pending changes.
+     */
+    fun getDirtyScopes(): List<String> {
+        return storageProvider.getDirtyScopes()
+    }
+
+    /**
+     * Record one scope as having pending changes.
+     * @param scope The mutation scope; an unknown one counts as a full-manifest change
+     */
+    fun addDirtyScope(scope: String) {
+        val known = VaultMutationScope.known(scope)
+        val scopes = getDirtyScopes()
+        if (scopes.contains(known)) {
+            return
+        }
+        storageProvider.setDirtyScopes(scopes + known)
+    }
+
+    /**
+     * The random id of this install, created on first use. Per-device vault rows (item usage statistics) are keyed by it.
+     */
+    fun getOrCreateDeviceId(): String {
+        storageProvider.getDeviceId()?.takeIf { it.isNotEmpty() }?.let { return it }
+        val deviceId = java.util.UUID.randomUUID().toString().lowercase()
+        storageProvider.setDeviceId(deviceId)
+        return deviceId
     }
 
     /**
@@ -201,6 +248,7 @@ class VaultMetadataManager(
     fun getSyncState(): SyncState {
         return SyncState(
             isDirty = getIsDirty(),
+            dirtyScopes = getDirtyScopes(),
             mutationSequence = getMutationSequence(),
             serverRevision = getVaultRevisionNumber(),
             isSyncing = getIsSyncing(),
@@ -246,7 +294,7 @@ class VaultMetadataManager(
      * Get the vault metadata object.
      */
     fun getVaultMetadataObject(): VaultMetadata? {
-        val metadataJson = getMetadata()
+        val metadataJson = getVaultMetadata()
         if (metadataJson.isBlank()) {
             return null
         }

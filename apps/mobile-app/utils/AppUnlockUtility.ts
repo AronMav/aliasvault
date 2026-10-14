@@ -135,7 +135,7 @@ export class AppUnlockUtility {
       // This checks auth methods AND validates the encryption key
       const isAvailable = await NativeVaultManager.isBiometricUnlockAvailable();
 
-      // If biometric unlock is NOT available but 'faceid' is still in auth methods,
+      // If biometric unlock is not available but 'faceid' is still in auth methods,
       // automatically remove it to keep state consistent
       if (!isAvailable) {
         const currentMethods = await this.getEnabledAuthMethods();
@@ -212,10 +212,10 @@ export class AppUnlockUtility {
       }
 
       // Fallback to password
-      return 'items.password';
+      return 'common.password';
     } catch (error) {
       console.error('Failed to get auth method display key:', error);
-      return 'items.password';
+      return 'common.password';
     }
   }
 }

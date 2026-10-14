@@ -7,6 +7,7 @@ on:
       - 'apps/mobile-app/**'
       - 'core/**'
       - '.github/workflows/mobile-app-build.yml'
+      - '.github/actions/build-core-libraries/**'
       - '.github/actions/build-android-app/**'
       - '.github/actions/build-ios-app/**'
   pull_request:
@@ -15,6 +16,7 @@ on:
       - 'apps/mobile-app/**'
       - 'core/**'
       - '.github/workflows/mobile-app-build.yml'
+      - '.github/actions/build-core-libraries/**'
       - '.github/actions/build-android-app/**'
       - '.github/actions/build-ios-app/**'
   workflow_dispatch:
@@ -46,43 +48,19 @@ jobs:
       run:
         working-directory: apps/mobile-app
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: 'npm'
           cache-dependency-path: apps/mobile-app/package-lock.json
 
-      - name: Build and distribute core libraries
-        run: |
-          cd ../../core
-          chmod +x build-and-distribute.sh
-          ./build-and-distribute.sh --android
-
-      - name: Verify core library distribution
-        run: |
-          # Check if files exist and were recently modified
-          TARGET_DIRS=(
-            "utils/dist/core/models"
-            "utils/dist/core/vault"
-          )
-
-          for dir in "${TARGET_DIRS[@]}"; do
-            if [ ! -d "$dir" ]; then
-              echo "❌ Directory $dir does not exist"
-              exit 1
-            fi
-
-            # Check if files were modified in the last 10 minutes
-            find "$dir" -type f -mmin -10 | grep -q . || {
-              echo "❌ Files in $dir were not recently modified"
-              exit 1
-            }
-          done
-
-          echo "✅ Shared library distribution verified"
+      - name: Build core libraries
+        uses: ./.github/actions/build-core-libraries
+        with:
+          target: android
 
       - name: Install dependencies
         run: npm ci
@@ -97,20 +75,19 @@ jobs:
       run:
         working-directory: apps/mobile-app
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: 'npm'
           cache-dependency-path: apps/mobile-app/package-lock.json
 
       - name: Build core libraries
-        run: |
-          cd ../../core
-          chmod +x build-and-distribute.sh
-          ./build-and-distribute.sh --android
+        uses: ./.github/actions/build-core-libraries
+        with:
+          target: android
 
       - name: Install dependencies
         run: npm ci
@@ -128,7 +105,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Build Android App
         uses: ./.github/actions/build-android-app
@@ -147,7 +124,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Build Android App
         uses: ./.github/actions/build-android-app
@@ -166,7 +143,7 @@ jobs:
     runs-on: macos-15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Build iOS App
         uses: ./.github/actions/build-ios-app

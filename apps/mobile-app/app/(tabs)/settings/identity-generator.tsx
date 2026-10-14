@@ -1,11 +1,10 @@
+import { getIdentityAgeRanges } from '@aliasvault/client/rust/RustCore';
+import { getLanguageInfo } from '@aliasvault/i18n/languages';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useState, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { StyleSheet, View, TouchableOpacity } from 'react-native';
-
-import { getLanguageInfo } from '@/utils/dist/core/models/defaults';
-import { getIdentityAgeRanges } from '@/utils/IdentityGeneratorUtility';
 
 import { useColors } from '@/hooks/useColorScheme';
 import { useVaultMutate } from '@/hooks/useVaultMutate';
@@ -50,9 +49,9 @@ export default function IdentityGeneratorSettingsScreen(): React.ReactNode {
       const loadSettings = async (): Promise<void> => {
         try {
           const [currentLanguage, currentGender, currentAgeRange, availableAgeRanges] = await Promise.all([
-            dbContext.sqliteClient!.getEffectiveIdentityLanguage(),
-            dbContext.sqliteClient!.getDefaultIdentityGender(),
-            dbContext.sqliteClient!.getDefaultIdentityAgeRange(),
+            dbContext.sqliteClient!.settings.getEffectiveIdentityLanguage(),
+            dbContext.sqliteClient!.settings.getDefaultIdentityGender(),
+            dbContext.sqliteClient!.settings.getDefaultIdentityAgeRange(),
             getIdentityAgeRanges()
           ]);
 
@@ -90,10 +89,10 @@ export default function IdentityGeneratorSettingsScreen(): React.ReactNode {
             // Save all pending changes in a single vault mutation (language is managed in subview)
             await executeVaultMutation(async () => {
               if (pendingChanges.current.gender !== undefined) {
-                await dbContext.sqliteClient!.updateSetting('DefaultIdentityGender', pendingChanges.current.gender);
+                await dbContext.sqliteClient!.settings.updateSetting('DefaultIdentityGender', pendingChanges.current.gender);
               }
               if (pendingChanges.current.ageRange !== undefined) {
-                await dbContext.sqliteClient!.updateSetting('DefaultIdentityAgeRange', pendingChanges.current.ageRange);
+                await dbContext.sqliteClient!.settings.updateSetting('DefaultIdentityAgeRange', pendingChanges.current.ageRange);
               }
             });
 
@@ -216,17 +215,17 @@ export default function IdentityGeneratorSettingsScreen(): React.ReactNode {
           {t('settings.identityGeneratorSettings.description')}
         </ThemedText>
 
-        <ThemedText style={styles.sectionTitle}>{t('settings.identityGeneratorSettings.languageSection')}</ThemedText>
+        <ThemedText style={styles.sectionTitle}>{t('settings.language')}</ThemedText>
         <ThemedText style={styles.descriptionText}>
           {t('settings.identityGeneratorSettings.languageDescription')}
         </ThemedText>
         <TouchableOpacity style={styles.navRow} onPress={handleLanguagePress}>
-          <ThemedText style={styles.navRowLabel}>{t('settings.identityGeneratorSettings.languageSection')}</ThemedText>
+          <ThemedText style={styles.navRowLabel}>{t('settings.language')}</ThemedText>
           <ThemedText style={styles.navRowValue}>{getLanguageDisplayLabel()}</ThemedText>
           <Ionicons name="chevron-forward" size={20} style={styles.chevron} />
         </TouchableOpacity>
 
-        <ThemedText style={styles.sectionTitle}>{t('settings.identityGeneratorSettings.genderSection')}</ThemedText>
+        <ThemedText style={styles.sectionTitle}>{t('fieldLabels.alias.gender')}</ThemedText>
         <ThemedText style={styles.descriptionText}>
           {t('settings.identityGeneratorSettings.genderDescription')}
         </ThemedText>

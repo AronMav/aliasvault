@@ -1,9 +1,8 @@
 import { useFocusEffect } from 'expo-router';
+import { useHeaderHeight } from 'expo-router/react-navigation';
 import { useState, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { StyleSheet, View } from 'react-native';
-
-import type { PasswordSettings } from '@/utils/dist/core/models/vault';
+import { KeyboardAvoidingView, Platform, StyleSheet, View } from 'react-native';
 
 import { useColors } from '@/hooks/useColorScheme';
 import { useVaultMutate } from '@/hooks/useVaultMutate';
@@ -15,6 +14,8 @@ import { ThemedText } from '@/components/themed/ThemedText';
 import { useDb } from '@/context/DbContext';
 import { useDialog } from '@/context/DialogContext';
 
+import type { PasswordSettings } from '@aliasvault/models/vault';
+
 /**
  * Password Generator Settings screen. Configures the default password and passphrase generator
  * settings, persisted globally in the vault so they sync across AliasVault clients.
@@ -25,6 +26,7 @@ export default function PasswordGeneratorSettingsScreen(): React.ReactNode {
   const dbContext = useDb();
   const { showAlert } = useDialog();
   const { executeVaultMutation } = useVaultMutate();
+  const headerHeight = useHeaderHeight();
 
   const [settings, setSettings] = useState<PasswordSettings | null>(null);
   // Increments each time settings are (re)loaded so the panel remounts with fresh initial values.
@@ -41,7 +43,7 @@ export default function PasswordGeneratorSettingsScreen(): React.ReactNode {
        */
       const loadSettings = async (): Promise<void> => {
         try {
-          const passwordSettings = await dbContext.sqliteClient!.getPasswordSettings();
+          const passwordSettings = await dbContext.sqliteClient!.settings.getPasswordSettings();
           setSettings(passwordSettings);
           latestSettings.current = passwordSettings;
           persistedJson.current = JSON.stringify(passwordSettings);
@@ -66,7 +68,7 @@ export default function PasswordGeneratorSettingsScreen(): React.ReactNode {
         }
 
         executeVaultMutation(async () => {
-          await dbContext.sqliteClient!.updateSetting('PasswordGenerationSettings', currentJson);
+          await dbContext.sqliteClient!.settings.updateSetting('PasswordGenerationSettings', currentJson);
         }).then(() => {
           persistedJson.current = currentJson;
         }).catch((error) => {
@@ -86,6 +88,9 @@ export default function PasswordGeneratorSettingsScreen(): React.ReactNode {
       fontSize: 13,
       marginBottom: 16,
     },
+    keyboardAvoidingView: {
+      flex: 1,
+    },
   });
 
   if (!settings) {
@@ -99,17 +104,19 @@ export default function PasswordGeneratorSettingsScreen(): React.ReactNode {
   }
 
   return (
-    <ThemedContainer>
-      <ThemedScrollView>
-        <ThemedText style={styles.descriptionText}>
-          {t('settings.passwordGeneratorSettings.description')}
-        </ThemedText>
-        <PasswordGeneratorPanel
-          key={loadKey}
-          initialSettings={settings}
-          onSettingsChange={handleSettingsChange}
-        />
-      </ThemedScrollView>
-    </ThemedContainer>
+    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={Platform.OS === 'android' ? headerHeight : 0} style={styles.keyboardAvoidingView}>
+      <ThemedContainer>
+        <ThemedScrollView>
+          <ThemedText style={styles.descriptionText}>
+            {t('settings.passwordGeneratorSettings.description')}
+          </ThemedText>
+          <PasswordGeneratorPanel
+            key={loadKey}
+            initialSettings={settings}
+            onSettingsChange={handleSettingsChange}
+          />
+        </ThemedScrollView>
+      </ThemedContainer>
+    </KeyboardAvoidingView>
   );
 }

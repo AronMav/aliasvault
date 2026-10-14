@@ -1,4 +1,4 @@
-﻿@using AliasVault.RazorComponents.Tables
+﻿@using AliasVault.Admin.Main.Components.Tables
 
 <div class="mb-4">
     <Button Color="danger" OnClick="RevokeAllTokens">Revoke all sessions</Button>
@@ -55,8 +55,8 @@
         new TableColumn { Title = "ID", PropertyName = "Id" },
         new TableColumn { Title = "Device", PropertyName = "DeviceIdentifier" },
         new TableColumn { Title = "Ip", PropertyName = "IpAddress" },
-        new TableColumn { Title = "Created", PropertyName = "CreatedAt" },
-        new TableColumn { Title = "Expires", PropertyName = "ExpireDate" },
+        new TableColumn { Title = "Created (UTC)", PropertyName = "CreatedAt" },
+        new TableColumn { Title = "Expires (UTC)", PropertyName = "ExpireDate" },
         new TableColumn { Title = "Actions", Sortable = false },
     ];
 

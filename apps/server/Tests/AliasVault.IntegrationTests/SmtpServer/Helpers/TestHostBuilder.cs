@@ -29,6 +29,11 @@ public class TestHostBuilder : AbstractTestHostBuilder
     public const string IntegrationAdvertisedHostname = "mail.integration.test";
 
     /// <summary>
+    /// Salt used to bucket sender hosts in integration tests.
+    /// </summary>
+    public const string IntegrationAbuseMetricsSalt = "integration-test-salt";
+
+    /// <summary>
     /// Builds the SmtpService test host with a provided database connection.
     /// </summary>
     /// <param name="dbConnection">The database connection to use for the test.</param>
@@ -92,6 +97,7 @@ public class TestHostBuilder : AbstractTestHostBuilder
             {
                 AllowedToDomains = new List<string> { "example.tld" },
                 SmtpTlsEnabled = "false",
+                AbuseMetricsSalt = IntegrationAbuseMetricsSalt,
             };
         });
 
@@ -104,7 +110,8 @@ public class TestHostBuilder : AbstractTestHostBuilder
                     Environment.GetEnvironmentVariable("SMTP_ADVERTISED_HOSTNAME"),
                     Dns.GetHostName);
                 var options = new SmtpServerOptionsBuilder()
-                    .ServerName(advertisedHostname);
+                    .ServerName(advertisedHostname)
+                    .MaxMessageSize(DatabaseMessageStore.MaxEmailSizeInBytes, MaxMessageSizeHandling.Strict);
 
                 // Note: port 25 doesn't work in GitHub actions so we use these instead for the integration tests:
                 // - 2525 for the SMTP server

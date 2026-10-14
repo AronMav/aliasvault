@@ -8,7 +8,6 @@
 namespace AliasServerDb;
 
 using System.ComponentModel.DataAnnotations;
-using System.ComponentModel.DataAnnotations.Schema;
 using AliasVault.Shared.Models.Enums;
 using Microsoft.EntityFrameworkCore;
 
@@ -74,6 +73,16 @@ public enum AuthFailureReason
     MobileLoginRateLimitExceeded = 11,
 
     /// <summary>
+    /// Indicates that the mobile login request was declined on the mobile device.
+    /// </summary>
+    MobileLoginDeclined = 12,
+
+    /// <summary>
+    /// Indicates that the registration used an invite code that is unknown, expired or used up.
+    /// </summary>
+    InvalidInviteCode = 13,
+
+    /// <summary>
     /// Indicates that the failure reason was unknown.
     /// </summary>
     Unknown = 99,
@@ -90,8 +99,17 @@ public enum AuthFailureReason
 public class AuthLog
 {
     /// <summary>
-    /// The maximum length of <see cref="Username"/>. Callers that log an unvalidated username must
-    /// truncate to this length, otherwise the insert fails on a value the caller fully controls.
+    /// Maximum stored length of <see cref="RequestPath"/>.
+    /// </summary>
+    public const int RequestPathMaxLength = 255;
+
+    /// <summary>
+    /// Maximum stored length of <see cref="Client"/>.
+    /// </summary>
+    public const int ClientMaxLength = 100;
+
+    /// <summary>
+    /// Maximum stored length of <see cref="Username"/>.
     /// </summary>
     public const int UsernameMaxLength = 255;
 
@@ -171,7 +189,7 @@ public class AuthLog
     /// <summary>
     /// Gets or sets the request path of the authentication event.
     /// </summary>
-    [MaxLength(100)]
+    [MaxLength(RequestPathMaxLength)]
     public string? RequestPath { get; set; }
 
     /// <summary>
@@ -182,6 +200,6 @@ public class AuthLog
     /// <summary>
     /// Gets or sets the client application name and version.
     /// </summary>
-    [MaxLength(100)]
+    [MaxLength(ClientMaxLength)]
     public string? Client { get; set; }
 }

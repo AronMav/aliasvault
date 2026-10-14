@@ -6,17 +6,17 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.util.Log
-import com.lambdapioneer.argon2kt.Argon2Kt
-import com.lambdapioneer.argon2kt.Argon2Mode
-import com.lambdapioneer.argon2kt.Argon2Version
 import org.json.JSONObject
+import uniffi.aliasvault_core.pinDecrypt
+import uniffi.aliasvault_core.pinEncrypt
+import uniffi.aliasvault_core.pinGenerateSalt
+import uniffi.aliasvault_core.pinIsLocked
+import uniffi.aliasvault_core.pinRegisterFailure
 import java.security.KeyStore
-import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.SecretKeySpec
 
 /**
  * Exception types for PIN unlock operations.
@@ -42,8 +42,10 @@ sealed class PinUnlockException(message: String) : Exception(message) {
 
 /**
  * Handles PIN unlock functionality for the vault store.
- * This component manages PIN-based unlocking by encrypting the vault encryption key
+ * This component manages PIN-based unlocking by encrypting the Account Key
  * with a key derived from the user's PIN using Argon2id.
+ * The key wrap and the attempt policy live in the Rust core (crypto/pin.rs); this class only stores them.
+ * Other platform implementations: VaultStore+Pin.swift (iOS), PinUnlockService.ts (browser extension).
  *
  * Security features:
  * - 4 failed attempts maximum before requiring full password
@@ -67,11 +69,6 @@ class VaultPin(
         private const val TAG = "VaultPin"
 
         /**
-         * The maximum number of failed PIN attempts before locking.
-         */
-        private const val MAX_PIN_ATTEMPTS = 4
-
-        /**
          * Shared preferences keys for PIN metadata (non-sensitive data only).
          */
         private const val PIN_ENABLED_KEY = "aliasvault_pin_enabled"
@@ -85,20 +82,7 @@ class VaultPin(
         private const val KEYSTORE_ALIAS_DATA_ENCRYPTION = "aliasvault_pin_data_encryption_key"
 
         /**
-         * Argon2id parameters for PIN key derivation.
-         * These parameters are chosen for security against brute-force attacks:
-         * - Memory: 65536 KB (64 MB) - makes GPU attacks much harder
-         * - Iterations: 3 - standard for Argon2id
-         * - Parallelism: 1 - suitable for mobile environment
-         * - Output: 32 bytes for AES-256-GCM
-         */
-        private const val ARGON2_ITERATIONS = 3
-        private const val ARGON2_MEMORY_KB = 65536 // 64 MB
-        private const val ARGON2_PARALLELISM = 1
-        private const val ARGON2_OUTPUT_LENGTH = 32
-
-        /**
-         * AES-GCM parameters.
+         * AES-GCM parameters of the Keystore-encrypted storage.
          */
         private const val GCM_IV_LENGTH = 12
         private const val GCM_TAG_LENGTH = 128
@@ -125,15 +109,15 @@ class VaultPin(
     }
 
     /**
-     * Get failed attempts count from secure storage (Android Keystore).
-     * @return The number of failed PIN attempts
+     * Get the failed attempts count from secure storage (Android Keystore).
+     * @return The number of failed PIN attempts, or null when the counter is unreadable (which counts as locked)
      */
-    fun getPinFailedAttempts(): Int {
+    private fun getPinFailedAttempts(): UInt? {
         return try {
             retrievePinFailedAttemptsFromKeystore()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to retrieve failed attempts, returning 0", e)
-            0
+            Log.e(TAG, "Failed to retrieve failed attempts, treating PIN as locked", e)
+            null
         }
     }
 
@@ -141,43 +125,21 @@ class VaultPin(
 
     /**
      * Setup PIN unlock.
-     * Encrypts the vault encryption key with the PIN and stores it securely.
+     * Encrypts the Account Key with the PIN and stores it securely.
      *
      * @param pin The PIN to set (4+ digits)
-     * @param vaultEncryptionKeyBase64 The base64-encoded vault encryption key to protect
+     * @param accountKeyBase64 The base64-encoded Account Key to protect
      * @throws IllegalArgumentException if PIN format is invalid
      * @throws Exception if encryption or storage fails
      */
     @Throws(Exception::class)
-    fun setupPin(pin: String, vaultEncryptionKeyBase64: String) {
-        // Decode the vault encryption key
-        val vaultEncryptionKey = Base64.decode(vaultEncryptionKeyBase64, Base64.NO_WRAP)
-
-        // Generate random salt
-        val salt = ByteArray(16)
-        SecureRandom().nextBytes(salt)
-
-        // Derive key from PIN + salt using Argon2id
-        val pinKey = derivePinKey(pin, salt)
-
-        // Encrypt the vault encryption key using AES-GCM
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        val secretKey = SecretKeySpec(pinKey, "AES")
-
-        // Generate random IV for AES-GCM
-        val iv = ByteArray(GCM_IV_LENGTH)
-        SecureRandom().nextBytes(iv)
-
-        cipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_LENGTH, iv))
-        val encryptedKey = cipher.doFinal(vaultEncryptionKey)
-
-        // Combine IV + encrypted data
-        val combined = ByteArray(iv.size + encryptedKey.size)
-        System.arraycopy(iv, 0, combined, 0, iv.size)
-        System.arraycopy(encryptedKey, 0, combined, iv.size, encryptedKey.size)
+    fun setupPin(pin: String, accountKeyBase64: String) {
+        val accountKey = Base64.decode(accountKeyBase64, Base64.NO_WRAP)
+        val salt = pinGenerateSalt()
+        val encryptedKey = pinEncrypt(pin, salt, accountKey)
 
         // Store encrypted key and salt in Android Keystore
-        storePinDataInKeystore(combined, salt)
+        storePinDataInKeystore(encryptedKey, salt)
 
         // Initialize failed attempts counter in Keystore
         storePinFailedAttemptsInKeystore(0)
@@ -196,52 +158,41 @@ class VaultPin(
 
     /**
      * Unlock with PIN.
-     * Returns the decrypted vault encryption key.
+     * Returns the decrypted Account Key.
      *
      * @param pin The PIN to use for unlocking
-     * @return The decrypted vault encryption key (base64)
+     * @return The decrypted key (base64)
      * @throws PinUnlockException with specific error type and metadata
      */
     @Throws(PinUnlockException::class)
     @Suppress("SwallowedException") // We intentionally swallow to avoid exposing crypto implementation details
     fun unlockWithPin(pin: String): String {
+        val failedAttempts = getPinFailedAttempts()
+        if (failedAttempts == null || pinIsLocked(failedAttempts)) {
+            removeAndDisablePin()
+            throw PinUnlockException.Locked
+        }
+
         try {
-            // Retrieve encrypted key and salt from Keystore
             val (encryptedKey, salt) = retrievePinDataFromKeystore()
-
-            // Decode encrypted package
-            val iv = encryptedKey.copyOfRange(0, GCM_IV_LENGTH)
-            val encryptedData = encryptedKey.copyOfRange(GCM_IV_LENGTH, encryptedKey.size)
-
-            // Derive key from PIN + salt
-            val pinKey = derivePinKey(pin, salt)
-
-            // Decrypt the vault encryption key
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            val secretKey = SecretKeySpec(pinKey, "AES")
-            cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_LENGTH, iv))
-            val decryptedKey = cipher.doFinal(encryptedData)
+            val decryptedKey = pinDecrypt(pin, salt, encryptedKey)
 
             // Reset failed attempts on success
             storePinFailedAttemptsInKeystore(0)
 
-            // Return the decrypted vault encryption key as base64
+            // Return the decrypted key as base64
             return Base64.encodeToString(decryptedKey, Base64.NO_WRAP)
         } catch (e: Exception) {
-            // Increment failed attempts
-            val currentAttempts = getPinFailedAttempts()
-            val newAttempts = currentAttempts + 1
-            storePinFailedAttemptsInKeystore(newAttempts)
+            val failure = pinRegisterFailure(failedAttempts)
+            storePinFailedAttemptsInKeystore(failure.failedAttempts.toInt())
 
             // If max attempts reached, disable PIN and clear all stored data
-            if (newAttempts >= MAX_PIN_ATTEMPTS) {
+            if (failure.locked) {
                 removeAndDisablePin()
                 throw PinUnlockException.Locked
             }
 
-            // Return incorrect PIN error with attempts remaining
-            val attemptsRemaining = MAX_PIN_ATTEMPTS - newAttempts
-            throw PinUnlockException.IncorrectPin(attemptsRemaining)
+            throw PinUnlockException.IncorrectPin(failure.attemptsRemaining.toInt())
         }
     }
 
@@ -282,43 +233,6 @@ class VaultPin(
     }
 
     // MARK: - Private PIN Methods
-
-    /**
-     * Derive encryption key from PIN + salt using Argon2id.
-     *
-     * Uses Argon2id with high memory cost (64 MB) to make brute-force attacks expensive.
-     * The salt is stored in Android Keystore with device-unlock protection, which means
-     * an attacker who steals the encrypted blob cannot brute-force offline because they
-     * cannot access the salt without unlocking the device.
-     *
-     * @param pin User's PIN (low entropy)
-     * @param salt Random salt (stored in Keystore, requires device unlock to access)
-     * @return The derived key bytes (32 bytes)
-     * @throws Exception if key derivation fails
-     */
-    @Throws(Exception::class)
-    private fun derivePinKey(pin: String, salt: ByteArray): ByteArray {
-        try {
-            val pinBytes = pin.toByteArray(Charsets.UTF_8)
-            val argon2 = Argon2Kt()
-
-            val hashResult = argon2.hash(
-                mode = Argon2Mode.ARGON2_ID,
-                password = pinBytes,
-                salt = salt,
-                tCostInIterations = ARGON2_ITERATIONS,
-                mCostInKibibyte = ARGON2_MEMORY_KB,
-                parallelism = ARGON2_PARALLELISM,
-                hashLengthInBytes = ARGON2_OUTPUT_LENGTH,
-                version = Argon2Version.V13,
-            )
-
-            return hashResult.rawHashAsByteArray()
-        } catch (e: Exception) {
-            Log.e(TAG, "Argon2 PIN hashing failed", e)
-            throw Exception("Argon2 PIN hashing failed", e)
-        }
-    }
 
     // MARK: - PIN Data Storage (Encrypted Key + Salt)
 
@@ -430,34 +344,33 @@ class VaultPin(
      * Retrieve failed attempts counter from Android Keystore.
      */
     @Throws(Exception::class)
-    private fun retrievePinFailedAttemptsFromKeystore(): Int {
+    private fun retrievePinFailedAttemptsFromKeystore(): UInt {
         // Get encrypted data from SharedPreferences
         val combinedBase64 = sharedPreferences.getString(KEYSTORE_ALIAS_FAILED_ATTEMPTS, null)
-            ?: return 0 // Default if not found
+            ?: return 0u // Default if not found
 
-        try {
-            val combined = Base64.decode(combinedBase64, Base64.NO_WRAP)
-            val iv = combined.copyOfRange(0, GCM_IV_LENGTH)
-            val encryptedData = combined.copyOfRange(GCM_IV_LENGTH, combined.size)
+        val combined = Base64.decode(combinedBase64, Base64.NO_WRAP)
+        val iv = combined.copyOfRange(0, GCM_IV_LENGTH)
+        val encryptedData = combined.copyOfRange(GCM_IV_LENGTH, combined.size)
 
-            // Get decryption key from Keystore
-            val secretKey = keyStore.getKey(KEYSTORE_ALIAS_DATA_ENCRYPTION, null) as? SecretKey
-                ?: return 0
+        // Get decryption key from Keystore
+        val secretKey = keyStore.getKey(KEYSTORE_ALIAS_DATA_ENCRYPTION, null) as? SecretKey
+            ?: throw Exception("Keystore key for PIN attempts not found")
 
-            // Decrypt the attempts data
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_LENGTH, iv))
-            val decryptedData = cipher.doFinal(encryptedData)
-
-            // Convert ByteArray to Int
-            return ((decryptedData[0].toInt() and 0xFF) shl 24) or
-                ((decryptedData[1].toInt() and 0xFF) shl 16) or
-                ((decryptedData[2].toInt() and 0xFF) shl 8) or
-                (decryptedData[3].toInt() and 0xFF)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to decode failed attempts", e)
-            return 0
+        // Decrypt the attempts data
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_LENGTH, iv))
+        val decryptedData = cipher.doFinal(encryptedData)
+        if (decryptedData.size != 4) {
+            throw Exception("Invalid PIN failed attempts value")
         }
+
+        // Convert ByteArray to Int
+        val attempts = ((decryptedData[0].toInt() and 0xFF) shl 24) or
+            ((decryptedData[1].toInt() and 0xFF) shl 16) or
+            ((decryptedData[2].toInt() and 0xFF) shl 8) or
+            (decryptedData[3].toInt() and 0xFF)
+        return attempts.toUInt()
     }
 
     /**

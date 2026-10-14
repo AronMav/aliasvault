@@ -48,11 +48,43 @@ function resolveShell() {
 }
 
 const args = argv.slice(2);
-const buildArgs = args.length > 0 ? args : ["--browser"];
+const buildArgs = args.length > 0 ? args : ["--browser-extension"];
+
+/**
+ * Environment for the build. The WASM build compiles the bundled SQLite with cc-rs,
+ * which needs an LLVM clang that has the WebAssembly backend. The standard MSVC
+ * toolchain has none, and LLVM is not on PATH by default when installed to
+ * "C:\Program Files\LLVM", so point CC/AR at it explicitly when it is there.
+ *
+ * @returns {object} The environment to spawn the build script with.
+ */
+function buildEnv() {
+  const env = { ...process.env };
+  const llvmCandidates = [
+    env["ProgramFiles"] ? `${env["ProgramFiles"]}\LLVMin` : null,
+    env["ProgramFiles(x86)"] ? `${env["ProgramFiles(x86)"]}\LLVMin` : null,
+  ].filter(Boolean);
+  for (const bin of llvmCandidates) {
+    if (existsSync(`${bin}\clang.exe`)) {
+      env["CC_wasm32_unknown_unknown"] = "clang";
+      env["AR_wasm32_unknown_unknown"] = "llvm-ar";
+      env["PATH"] = `${bin};${env["PATH"] ?? ""}`;
+      break;
+    }
+  }
+  // The build script computes paths with POSIX pwd and hands them to wasm-pack and
+  // cargo, which are native binaries. With MSYS path conversion disabled (a common
+  // global setting: MSYS_NO_PATHCONV=1) those arrive as "/d/...", get resolved
+  // relative to the current drive and end up in a literal "D:\d\..." directory.
+  delete env["MSYS_NO_PATHCONV"];
+  delete env["MSYS2_ARG_CONV_EXCL"];
+  return env;
+}
 
 const result = spawnSync(resolveShell(), ["./build.sh", ...buildArgs], {
   cwd: rustDir,
   stdio: "inherit",
+  env: buildEnv(),
 });
 
 if (result.error) {

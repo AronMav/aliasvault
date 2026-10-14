@@ -8,7 +8,6 @@
 namespace AliasClientDb;
 
 using System.Globalization;
-using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Microsoft.Extensions.Configuration;
@@ -22,16 +21,6 @@ public class AliasClientDbContext : DbContext
     /// Initializes a new instance of the <see cref="AliasClientDbContext"/> class.
     /// </summary>
     public AliasClientDbContext()
-    {
-    }
-
-    /// <summary>
-    /// Initializes a new instance of the <see cref="AliasClientDbContext"/> class.
-    /// </summary>
-    /// <param name="sqliteConnection">The SQLite connection to use to connect to the SQLite database.</param>
-    /// <param name="logAction">The action to perform for logging.</param>
-    public AliasClientDbContext(SqliteConnection sqliteConnection, Action<string> logAction)
-        : base(GetOptions(sqliteConnection, logAction))
     {
     }
 
@@ -75,6 +64,11 @@ public class AliasClientDbContext : DbContext
     public DbSet<Item> Items { get; set; }
 
     /// <summary>
+    /// Gets or sets the ItemStats DbSet.
+    /// </summary>
+    public DbSet<ItemStat> ItemStats { get; set; }
+
+    /// <summary>
     /// Gets or sets the Folders DbSet.
     /// </summary>
     public DbSet<Folder> Folders { get; set; }
@@ -110,6 +104,16 @@ public class AliasClientDbContext : DbContext
     public DbSet<ItemTag> ItemTags { get; set; }
 
     /// <summary>
+    /// Gets or sets the CodecOverflows DbSet.
+    /// </summary>
+    public DbSet<CodecOverflow> CodecOverflows { get; set; }
+
+    /// <summary>
+    /// Gets or sets the Manifests DbSet.
+    /// </summary>
+    public DbSet<Manifest> Manifests { get; set; }
+
+    /// <summary>
     /// The OnModelCreating method.
     /// </summary>
     /// <param name="modelBuilder">ModelBuilder instance.</param>
@@ -129,25 +133,83 @@ public class AliasClientDbContext : DbContext
             }
         }
 
+        /*
+         * Manifest-scoped entities are keyed by (ManifestId, Id): a manifest is a namespace, and Ids are
+         * client-generated, so duplicate Ids alone are possible and should be allowed. Therefore we use
+         * a composite key for these entities.
+         */
+        modelBuilder.Entity<Item>().HasKey(e => new { e.ManifestId, e.Id });
+        modelBuilder.Entity<Folder>().HasKey(e => new { e.ManifestId, e.Id });
+        modelBuilder.Entity<Logo>().HasKey(e => new { e.ManifestId, e.Id });
+        modelBuilder.Entity<EncryptionKey>().HasKey(e => new { e.ManifestId, e.Id });
+        modelBuilder.Entity<FieldValue>().HasKey(e => new { e.ManifestId, e.Id });
+        modelBuilder.Entity<FieldHistory>().HasKey(e => new { e.ManifestId, e.Id });
+        modelBuilder.Entity<Tag>().HasKey(e => new { e.ManifestId, e.Id });
+        modelBuilder.Entity<FieldDefinition>().HasKey(e => new { e.ManifestId, e.Id });
+        modelBuilder.Entity<Attachment>().HasKey(e => new { e.ManifestId, e.Id });
+        modelBuilder.Entity<Passkey>().HasKey(e => new { e.ManifestId, e.Id });
+        modelBuilder.Entity<TotpCode>().HasKey(e => new { e.ManifestId, e.Id });
+        modelBuilder.Entity<ItemStat>().HasKey(e => new { e.ManifestId, e.Id, e.DeviceId });
+        modelBuilder.Entity<ItemStat>().Property(e => e.DeviceId).HasDefaultValue(string.Empty).UseCollation("NOCASE");
+        modelBuilder.Entity<Setting>().HasKey(e => new { e.ManifestId, e.Key });
+        modelBuilder.Entity<ItemTag>().HasKey(e => new { e.ManifestId, e.ItemId, e.TagId });
+
+        // For GUID columns, convert to lowercase which is the normalized spelling expected by all AliasVault clients.
+        var guidConverter = new ValueConverter<Guid, string>(id => id.ToString("D"), text => Guid.Parse(text));
+        var guidProperties = modelBuilder.Model.GetEntityTypes()
+            .SelectMany(type => type.GetProperties())
+            .Where(property => property.ClrType == typeof(Guid) || property.ClrType == typeof(Guid?));
+        foreach (var property in guidProperties)
+        {
+            property.SetValueConverter(guidConverter);
+            property.SetCollation("NOCASE");
+        }
+
         // Configure Attachment - Item relationship
         modelBuilder.Entity<Attachment>()
             .HasOne(l => l.Item)
             .WithMany(c => c.Attachments)
-            .HasForeignKey(l => l.ItemId)
+            .HasForeignKey(l => new { l.ManifestId, l.ItemId })
             .OnDelete(DeleteBehavior.Cascade);
 
         // Configure TotpCode - Item relationship
         modelBuilder.Entity<TotpCode>()
             .HasOne(l => l.Item)
             .WithMany(c => c.TotpCodes)
-            .HasForeignKey(l => l.ItemId)
+            .HasForeignKey(l => new { l.ManifestId, l.ItemId })
             .OnDelete(DeleteBehavior.Cascade);
+
+        // The TOTP parameters default to what RFC 6238 assumes when an otpauth:// URI omits them.
+        modelBuilder.Entity<TotpCode>().Property(t => t.Algorithm).HasDefaultValue(TotpCode.AlgorithmSha1);
+        modelBuilder.Entity<TotpCode>().Property(t => t.Digits).HasDefaultValue(TotpCode.DefaultDigits);
+        modelBuilder.Entity<TotpCode>().Property(t => t.Period).HasDefaultValue(TotpCode.DefaultPeriod);
 
         // Configure Passkey - Item relationship
         modelBuilder.Entity<Passkey>()
             .HasOne(p => p.Item)
             .WithMany(c => c.Passkeys)
-            .HasForeignKey(p => p.ItemId)
+            .HasForeignKey(p => new { p.ManifestId, p.ItemId })
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // Configure FieldValue - Item relationship
+        modelBuilder.Entity<FieldValue>()
+            .HasOne(fv => fv.Item)
+            .WithMany(i => i.FieldValues)
+            .HasForeignKey(fv => new { fv.ManifestId, fv.ItemId })
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // Configure FieldHistory - Item relationship
+        modelBuilder.Entity<FieldHistory>()
+            .HasOne(fh => fh.Item)
+            .WithMany()
+            .HasForeignKey(fh => new { fh.ManifestId, fh.ItemId })
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // Configure ItemTag - Item relationship
+        modelBuilder.Entity<ItemTag>()
+            .HasOne(it => it.Item)
+            .WithMany(i => i.ItemTags)
+            .HasForeignKey(it => new { it.ManifestId, it.ItemId })
             .OnDelete(DeleteBehavior.Cascade);
 
         // Configure Passkey indexes
@@ -158,44 +220,45 @@ public class AliasClientDbContext : DbContext
             .Property(e => e.RpId)
             .UseCollation("NOCASE");
 
-        // Configure Item - Logo relationship
         modelBuilder.Entity<Item>()
             .HasOne(i => i.Logo)
             .WithMany(l => l.Items)
-            .HasForeignKey(i => i.LogoId)
-            .OnDelete(DeleteBehavior.SetNull);
+            .HasForeignKey(i => new { i.ManifestId, i.LogoId })
+            .OnDelete(DeleteBehavior.ClientSetNull);
 
-        // Configure Item - Folder relationship
         modelBuilder.Entity<Item>()
             .HasOne(i => i.Folder)
             .WithMany(f => f.Items)
-            .HasForeignKey(i => i.FolderId)
-            .OnDelete(DeleteBehavior.SetNull);
+            .HasForeignKey(i => new { i.ManifestId, i.FolderId })
+            .OnDelete(DeleteBehavior.ClientSetNull);
 
         // Configure Folder - ParentFolder relationship
         modelBuilder.Entity<Folder>()
             .HasOne(f => f.ParentFolder)
             .WithMany(f => f.ChildFolders)
-            .HasForeignKey(f => f.ParentFolderId)
+            .HasForeignKey(f => new { f.ManifestId, f.ParentFolderId })
             .OnDelete(DeleteBehavior.Cascade);
 
-        // Configure Logo unique index on Source
+        // Configure Logo unique index on (ManifestId, Kind, Source): an icon belongs to exactly one
+        // manifest, so the same natural key may appear once per manifest.
         modelBuilder.Entity<Logo>()
-            .HasIndex(l => l.Source)
+            .HasIndex(l => new { l.ManifestId, l.Kind, l.Source })
             .IsUnique();
 
-        // Configure FieldValue - Item relationship
-        modelBuilder.Entity<FieldValue>()
-            .HasOne(fv => fv.Item)
-            .WithMany(i => i.FieldValues)
-            .HasForeignKey(fv => fv.ItemId)
-            .OnDelete(DeleteBehavior.Cascade);
+        // Kind defaults to 'favicon' for legacy reasons and backwards compatibility.
+        modelBuilder.Entity<Logo>()
+            .Property(l => l.Kind)
+            .HasDefaultValue(Logo.KindFavicon);
+
+        // Encryption key lookups resolve a manifest's primary keypair.
+        modelBuilder.Entity<EncryptionKey>()
+            .HasIndex(k => new { k.ManifestId, k.IsPrimary });
 
         // Configure FieldValue - FieldDefinition relationship (nullable for system fields)
         modelBuilder.Entity<FieldValue>()
             .HasOne(fv => fv.FieldDefinition)
             .WithMany(fd => fd.FieldValues)
-            .HasForeignKey(fv => fv.FieldDefinitionId)
+            .HasForeignKey(fv => new { fv.ManifestId, fv.FieldDefinitionId })
             .OnDelete(DeleteBehavior.Cascade)
             .IsRequired(false); // Nullable for system fields
 
@@ -203,8 +266,17 @@ public class AliasClientDbContext : DbContext
         modelBuilder.Entity<FieldHistory>()
             .HasOne(fh => fh.FieldDefinition)
             .WithMany(fd => fd.FieldHistories)
-            .HasForeignKey(fh => fh.FieldDefinitionId)
+            .HasForeignKey(fh => new { fh.ManifestId, fh.FieldDefinitionId })
             .OnDelete(DeleteBehavior.Cascade);
+
+        /*
+         * A column added to a table that already shipped carries its default in the model, not only in the
+         * migration that added it: the codec inserts exactly the columns a manifest row carries, so a row
+         * written before the column existed omits it, and any later table rebuild re-creates the column
+         * without the migration's one-off backfill default. Without this the insert fails on NOT NULL.
+         */
+        modelBuilder.Entity<FieldValue>().Property(fv => fv.IsDisabled).HasDefaultValue(false);
+        modelBuilder.Entity<FieldValue>().Property(fv => fv.ValueIndex).HasDefaultValue(0);
 
         // Configure indexes for FieldValue
         modelBuilder.Entity<FieldValue>()
@@ -235,23 +307,16 @@ public class AliasClientDbContext : DbContext
         modelBuilder.Entity<Folder>()
             .HasIndex(f => f.ParentFolderId);
 
-        // Configure ItemTag - Item relationship
-        modelBuilder.Entity<ItemTag>()
-            .HasOne(it => it.Item)
-            .WithMany(i => i.ItemTags)
-            .HasForeignKey(it => it.ItemId)
-            .OnDelete(DeleteBehavior.Cascade);
-
         // Configure ItemTag - Tag relationship
         modelBuilder.Entity<ItemTag>()
             .HasOne(it => it.Tag)
             .WithMany(t => t.ItemTags)
-            .HasForeignKey(it => it.TagId)
+            .HasForeignKey(it => new { it.ManifestId, it.TagId })
             .OnDelete(DeleteBehavior.Cascade);
 
         // Configure indexes for Tag
         modelBuilder.Entity<Tag>()
-            .HasIndex(t => t.Name);
+            .HasIndex(t => new { t.ManifestId, t.Name });
 
         // Configure indexes for ItemTag
         modelBuilder.Entity<ItemTag>()
@@ -259,11 +324,6 @@ public class AliasClientDbContext : DbContext
 
         modelBuilder.Entity<ItemTag>()
             .HasIndex(it => it.TagId);
-
-        // Configure unique index for ItemTag to prevent duplicate tag assignments
-        modelBuilder.Entity<ItemTag>()
-            .HasIndex(it => new { it.ItemId, it.TagId })
-            .IsUnique();
     }
 
     /// <summary>
@@ -280,30 +340,13 @@ public class AliasClientDbContext : DbContext
                 .AddJsonFile("appsettings.json")
                 .Build();
 
-            optionsBuilder
-                .UseSqlite(configuration.GetConnectionString("AliasClientDbContext"))
-                .UseLazyLoadingProxies();
+            optionsBuilder.UseSqlite(configuration.GetConnectionString("AliasClientDbContext"));
 
             // Log queries made as debug output.
             optionsBuilder.LogTo(Console.WriteLine);
         }
 
         base.OnConfiguring(optionsBuilder);
-    }
-
-    /// <summary>
-    /// Gets the options for the AliasClientDbContext.
-    /// </summary>
-    /// <param name="connection">The SQLite connection to use to connect to the SQLite database.</param>
-    /// <param name="logAction">The action to perform for logging.</param>
-    /// <returns>The options for the AliasClientDbContext.</returns>
-    private static DbContextOptions<AliasClientDbContext> GetOptions(SqliteConnection connection, Action<string> logAction)
-    {
-        var optionsBuilder = new DbContextOptionsBuilder<AliasClientDbContext>();
-        optionsBuilder.UseSqlite(connection);
-        optionsBuilder.LogTo(logAction, new[] { DbLoggerCategory.Database.Command.Name });
-
-        return optionsBuilder.Options;
     }
 
     /// <summary>

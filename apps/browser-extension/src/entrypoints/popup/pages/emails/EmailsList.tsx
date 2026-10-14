@@ -1,9 +1,13 @@
+import { isServerUnreachable } from '@aliasvault/client/api/errors/ExpectedFailure';
+import { decryptEmailList } from '@aliasvault/client/email/EmailDecryption';
 import React, { useEffect, useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 
 import HeaderButton from '@/entrypoints/popup/components/HeaderButton';
+import { AttachmentIcon } from '@/entrypoints/popup/components/Icons/AttachmentIcon';
 import { HeaderIconType } from '@/entrypoints/popup/components/Icons/HeaderIcons';
+import Icon from '@/entrypoints/popup/components/Icons/Icon';
 import LoadingSpinner from '@/entrypoints/popup/components/LoadingSpinner';
 import PageTitle from '@/entrypoints/popup/components/PageTitle';
 import ReloadButton from '@/entrypoints/popup/components/ReloadButton';
@@ -13,10 +17,11 @@ import { useLoading } from '@/entrypoints/popup/context/LoadingContext';
 import { useWebApi } from '@/entrypoints/popup/context/WebApiContext';
 import { PopoutUtility } from '@/entrypoints/popup/utils/PopoutUtility';
 
-import type { MailboxBulkRequest, MailboxBulkResponse, MailboxEmail } from '@/utils/dist/core/models/webapi';
-import EncryptionUtility from '@/utils/EncryptionUtility';
+import { logFailure } from '@/utils/Diagnostics';
 
 import { useMinDurationLoading } from '@/hooks/useMinDurationLoading';
+
+import type { InboxResponse, MailboxEmail } from '@aliasvault/models/webapi';
 
 /**
  * Emails list page.
@@ -62,21 +67,15 @@ const EmailsList: React.FC = () => {
         return;
       }
 
-      // Get unique email addresses from all credentials.
-      const emailAddresses = dbContext.sqliteClient.items.getAllEmailAddresses();
-
       try {
-        const data = await webApi.post<MailboxBulkRequest, MailboxBulkResponse>('EmailBox/bulk', {
-          addresses: emailAddresses,
-          page: 1,
-          pageSize: PAGE_SIZE,
-        });
+        // The server resolves the mailbox from the caller's active alias claims.
+        const data = await webApi.get<InboxResponse>(`EmailBox?page=1&pageSize=${PAGE_SIZE}`);
 
         // Decrypt emails locally using private key associated with the email address.
-        const encryptionKeys = dbContext.sqliteClient.settings.getAllEncryptionKeys();
+        const encryptionKeys = dbContext.sqliteClient.encryptionKeys.getAll();
 
         // Decrypt emails locally using public/private key pairs.
-        const decryptedEmails = await EncryptionUtility.decryptEmailList(data.mails, encryptionKeys);
+        const decryptedEmails = await decryptEmailList(data.mails, data.publicKeys, encryptionKeys);
 
         if (reset) {
           setEmails(decryptedEmails);
@@ -84,7 +83,11 @@ const EmailsList: React.FC = () => {
           setTotalRecords(data.totalRecords);
         }
       } catch (error) {
-        console.error(error);
+        logFailure('[Emails] Loading the mailbox failed', error);
+        if (isServerUnreachable(error)) {
+          await dbContext.setIsOffline(true);
+          return;
+        }
         throw new Error(t('common.errors.unknownError'));
       }
     } catch (err) {
@@ -93,7 +96,7 @@ const EmailsList: React.FC = () => {
       setIsLoading(false);
       setIsInitialLoading(false);
     }
-  }, [dbContext?.sqliteClient, dbContext.isOffline, webApi, setIsLoading, setIsInitialLoading, t, PAGE_SIZE]);
+  }, [dbContext, webApi, setIsLoading, setIsInitialLoading, t, PAGE_SIZE]);
 
   /**
    * Loads more emails (next page).
@@ -107,30 +110,29 @@ const EmailsList: React.FC = () => {
       setIsLoadingMore(true);
       setError(null);
 
-      const emailAddresses = dbContext.sqliteClient.items.getAllEmailAddresses();
       const nextPage = currentPage + 1;
 
-      const data = await webApi.post<MailboxBulkRequest, MailboxBulkResponse>('EmailBox/bulk', {
-        addresses: emailAddresses,
-        page: nextPage,
-        pageSize: PAGE_SIZE,
-      });
+      const data = await webApi.get<InboxResponse>(`EmailBox?page=${nextPage}&pageSize=${PAGE_SIZE}`);
 
       // Decrypt emails locally
-      const encryptionKeys = dbContext.sqliteClient.settings.getAllEncryptionKeys();
-      const decryptedEmails = await EncryptionUtility.decryptEmailList(data.mails, encryptionKeys);
+      const encryptionKeys = dbContext.sqliteClient.encryptionKeys.getAll();
+      const decryptedEmails = await decryptEmailList(data.mails, data.publicKeys, encryptionKeys);
 
       // Append to existing emails
       setEmails((prevEmails) => [...prevEmails, ...decryptedEmails]);
       setCurrentPage(data.currentPage);
       setTotalRecords(data.totalRecords);
     } catch (err) {
+      logFailure('Failed to load more emails', err);
+      if (isServerUnreachable(err)) {
+        await dbContext.setIsOffline(true);
+        return;
+      }
       setError(err instanceof Error ? err.message : t('common.errors.unknownError'));
-      console.error('Failed to load more emails:', err);
     } finally {
       setIsLoadingMore(false);
     }
-  }, [isLoadingMore, dbContext?.sqliteClient, dbContext.isOffline, webApi, currentPage, PAGE_SIZE, t]);
+  }, [isLoadingMore, dbContext, webApi, currentPage, PAGE_SIZE, t]);
 
   useEffect(() => {
     loadEmails();
@@ -162,26 +164,26 @@ const EmailsList: React.FC = () => {
     const secondsAgo = Math.floor((now.getTime() - emailDate.getTime()) / 1000);
 
     if (secondsAgo < 60) {
-      return t('emails.dateFormat.justNow');
+      return t('emails.time.justNow');
     } else if (secondsAgo < 3600) {
       // Less than 1 hour ago
       const minutes = Math.floor(secondsAgo / 60);
       if (minutes === 1) {
-        return t('emails.dateFormat.minutesAgo_single', { count: minutes });
+        return t('emails.time.minutesAgo_single', { count: minutes });
       } else {
-        return t('emails.dateFormat.minutesAgo_plural', { count: minutes });
+        return t('emails.time.minutesAgo_plural', { count: minutes });
       }
     } else if (secondsAgo < 86400) {
       // Less than 24 hours ago
       const hours = Math.floor(secondsAgo / 3600);
       if (hours === 1) {
-        return t('emails.dateFormat.hoursAgo_single', { count: hours });
+        return t('emails.time.hoursAgo_single', { count: hours });
       } else {
-        return t('emails.dateFormat.hoursAgo_plural', { count: hours });
+        return t('emails.time.hoursAgo_plural', { count: hours });
       }
     } else if (secondsAgo < 172800) {
       // Less than 48 hours ago
-      return t('emails.dateFormat.yesterday');
+      return t('emails.time.yesterday');
     } else {
       // Older than 48 hours
       return emailDate.toLocaleDateString('en-GB', {
@@ -197,10 +199,6 @@ const EmailsList: React.FC = () => {
         <LoadingSpinner />
       </div>
     );
-  }
-
-  if (error) {
-    return <div className="text-red-500">{t('common.error')}: {error}</div>;
   }
 
   // Show offline message if in offline mode
@@ -226,11 +224,15 @@ const EmailsList: React.FC = () => {
           <PageTitle>{t('emails.title')}</PageTitle>
           <ReloadButton onClick={loadEmails} />
         </div>
-        <div className="text-gray-500 dark:text-gray-400 space-y-2">
-          <p className="text-sm">
-            {t('emails.noEmailsDescription')}
-          </p>
-        </div>
+        {error ? (
+          <p className="text-sm text-red-500">{t('common.error')}: {error}</p>
+        ) : (
+          <div className="text-gray-500 dark:text-gray-400 space-y-2">
+            <p className="text-sm">
+              {t('emails.emptyMessage')}
+            </p>
+          </div>
+        )}
       </div>
     );
   }
@@ -243,6 +245,7 @@ const EmailsList: React.FC = () => {
         <PageTitle>{t('emails.title')}</PageTitle>
         <ReloadButton onClick={() => loadEmails(true)} />
       </div>
+      {error && <p className="mb-4 text-sm text-red-500">{t('common.error')}: {error}</p>}
       <div className="space-y-2">
         {emails.map((email) => (
           <Link
@@ -254,8 +257,9 @@ const EmailsList: React.FC = () => {
               <div className="text-gray-900 dark:text-white mb-1 font-bold">
                 {email.subject}
               </div>
-              <div className="text-sm text-gray-500 dark:text-gray-400">
-                {formatEmailDate(email.dateSystem)}
+              <div className="flex items-center gap-1.5 flex-shrink-0 text-sm text-gray-500 dark:text-gray-400">
+                {email.hasAttachments && <AttachmentIcon className="w-4 h-4" />}
+                <span>{formatEmailDate(email.dateSystem)}</span>
               </div>
             </div>
             <div className="text-gray-600 text-sm dark:text-gray-300 line-clamp-2">
@@ -275,10 +279,7 @@ const EmailsList: React.FC = () => {
           >
             {isLoadingMore ? (
               <span className="flex items-center justify-center">
-                <svg className="animate-spin -ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
+                <Icon name="spinner" className="animate-spin -ml-1 mr-2 h-4 w-4" />
                 {t('common.loading')}
               </span>
             ) : (

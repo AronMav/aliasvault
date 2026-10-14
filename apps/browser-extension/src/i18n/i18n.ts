@@ -1,10 +1,13 @@
+import { ALL_TRANSLATIONS } from '@aliasvault/i18n/all';
 import i18n from 'i18next';
 import { initReactI18next } from 'react-i18next';
 
+import { StorageKeys } from '@/utils/constants/storageKeys';
+import { logFailure } from '@/utils/Diagnostics';
+
 import {
   DEFAULT_LANGUAGE,
-  LANGUAGE_CODES,
-  LANGUAGE_RESOURCES
+  LANGUAGE_CODES
 } from './config';
 
 import { storage } from '#imports';
@@ -15,7 +18,7 @@ import { storage } from '#imports';
  */
 const detectLanguage = async (): Promise<string> => {
   // Check localStorage first
-  const stored = await storage.getItem('local:language') as string;
+  const stored = await storage.getItem(StorageKeys.LANGUAGE) as string;
   if (stored && LANGUAGE_CODES.includes(stored)) {
     return stored;
   }
@@ -30,11 +33,16 @@ const detectLanguage = async (): Promise<string> => {
  */
 const initI18n = async (): Promise<void> => {
   const language = await detectLanguage();
+  /*
+   * The extension build puts each entry point in one file (no code splitting), so the popup bundles every language
+   * up front; the background and content scripts only bundle the namespaces they use (config.ts).
+   */
+  const resources = Object.fromEntries(Object.entries(ALL_TRANSLATIONS).map(([code, translation]) => [code, { translation }]));
 
   await i18n
     .use(initReactI18next)
     .init({
-      resources: LANGUAGE_RESOURCES,
+      resources,
       lng: language,
       fallbackLng: DEFAULT_LANGUAGE,
 
@@ -54,7 +62,7 @@ const initI18n = async (): Promise<void> => {
 
 // Initialize immediately and handle potential errors
 initI18n().catch((error) => {
-  console.error('Failed to initialize i18n:', error);
+  logFailure('Failed to initialize i18n', error);
   // Even if initialization fails, emit initialized event to prevent app from hanging
   i18n.emit('initialized');
 });

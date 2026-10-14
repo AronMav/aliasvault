@@ -39,6 +39,9 @@ public static class LoggingConfiguration
         "AliasVault.TaskRunner.Tasks.EmailCleanupTask",
         "AliasVault.TaskRunner.Tasks.LogCleanupTask",
         "AliasVault.TaskRunner.Tasks.RefreshTokenCleanupTask",
+        "AliasVault.TaskRunner.Tasks.OrphanedEmailCleanupTask",
+        "AliasVault.TaskRunner.Tasks.UnlockKeyHistoryCleanupTask",
+        "AliasVault.TaskRunner.Tasks.VaultBlobCleanupTask",
 
         // Admin actions
         "AliasVault.Admin.Main.Pages.Users.Delete",
@@ -64,9 +67,13 @@ public static class LoggingConfiguration
     /// <returns>IServiceCollection instance.</returns>
     public static IServiceCollection ConfigureLogging(this IServiceCollection services, IConfiguration configuration, string applicationName, string logFolder = "logs/")
     {
+        // Resolved once on first use: building a service provider per log event leaks a whole container each time.
+        var dbContextFactory = new Lazy<IDbContextFactory<AliasServerDbContext>>(() => services.BuildServiceProvider().GetRequiredService<IDbContextFactory<AliasServerDbContext>>());
+
         services.AddSerilog(new LoggerConfiguration()
             .ReadFrom.Configuration(configuration)
             .Enrich.FromLogContext()
+            .Enrich.With<ControlCharacterEscapingEnricher>()
             .Enrich.WithProperty("Application", applicationName)
             .Filter.ByIncludingOnly(GetSourceContextFilter(configuration))
 
@@ -96,7 +103,7 @@ public static class LoggingConfiguration
             .WriteTo.Logger(lc => lc
                 .Filter.ByIncludingOnly(evt => ShouldLogToDatabase(evt))
                 .Filter.ByExcluding(Matching.FromSource("Microsoft.EntityFrameworkCore"))
-                .WriteTo.Sink(new DatabaseSink(CultureInfo.InvariantCulture, () => services.BuildServiceProvider().GetRequiredService<IDbContextFactory<AliasServerDbContext>>(), applicationName)))
+                .WriteTo.Sink(new DatabaseSink(CultureInfo.InvariantCulture, () => dbContextFactory.Value, applicationName)))
             .CreateLogger());
 
         return services;
@@ -155,9 +162,11 @@ public static class LoggingConfiguration
     {
         var logLevels = configuration.GetSection("Logging:LogLevel");
 
-        // If this specific source context has an override level defined in appsettings.json, return that.
+        // If this source context has an override level defined in appsettings.json, return the most specific (longest prefix) one.
+        var category = sourceContext.Trim('"');
         var logLevel = logLevels.GetChildren()
-            .FirstOrDefault(ll => sourceContext.Contains(ll.Key, StringComparison.OrdinalIgnoreCase));
+            .Where(ll => ll.Key != "Default" && category.StartsWith(ll.Key, StringComparison.OrdinalIgnoreCase))
+            .MaxBy(ll => ll.Key.Length);
         if (logLevel != null)
         {
             return Enum.Parse<LogEventLevel>(logLevel.Value ?? "Information", true);

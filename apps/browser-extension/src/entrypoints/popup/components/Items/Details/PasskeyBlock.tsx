@@ -1,36 +1,30 @@
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import Icon from '@/entrypoints/popup/components/Icons/Icon';
 import LoadingSpinner from '@/entrypoints/popup/components/LoadingSpinner';
 import { useDb } from '@/entrypoints/popup/context/DbContext';
 
-import type { Passkey } from '@/utils/dist/core/models/vault';
+import { logFailure } from '@/utils/Diagnostics';
+
+import type { Passkey } from '@aliasvault/models/vault';
 
 type PasskeyBlockProps = {
   itemId: string;
+  manifestId: string;
 }
 
 /**
  * Passkey icon component.
  */
 const PasskeyIcon: React.FC<{ className?: string }> = ({ className = "w-5 h-5" }) => (
-  <svg
-    className={className}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
-  </svg>
+  <Icon name="key" className={className} />
 );
 
 /**
  * Display passkey information for an item in view mode.
  */
-const PasskeyBlock: React.FC<PasskeyBlockProps> = ({ itemId }) => {
+const PasskeyBlock: React.FC<PasskeyBlockProps> = ({ itemId, manifestId }) => {
   const { t } = useTranslation();
   const dbContext = useDb();
   const [passkeys, setPasskeys] = useState<Passkey[]>([]);
@@ -43,14 +37,14 @@ const PasskeyBlock: React.FC<PasskeyBlockProps> = ({ itemId }) => {
     }
 
     try {
-      const itemPasskeys = dbContext.sqliteClient.passkeys.getByItemId(itemId);
+      const itemPasskeys = dbContext.sqliteClient.passkeys.getByItemId({ Id: itemId, ManifestId: manifestId });
       setPasskeys(itemPasskeys);
     } catch (err) {
-      console.error('Error loading passkeys:', err);
+      logFailure('Error loading passkeys', err);
     } finally {
       setLoading(false);
     }
-  }, [dbContext?.sqliteClient, itemId]);
+  }, [dbContext?.sqliteClient, itemId, manifestId]);
 
   if (loading) {
     return (

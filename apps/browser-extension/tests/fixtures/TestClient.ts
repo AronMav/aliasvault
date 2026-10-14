@@ -11,11 +11,9 @@
  * ```
  */
 import type { BrowserContext, Page } from '@playwright/test';
-import { chromium } from '@playwright/test';
-import path from 'path';
-import { fileURLToPath } from 'url';
 
-import { expect } from './fixtures';
+import { createFreshContext, expect, test } from './fixtures';
+import { waitForVaultOpen } from './helpers';
 import { FieldSelectors, ButtonSelectors } from './selectors';
 import {
   waitForVaultReady,
@@ -28,10 +26,6 @@ import {
   waitForPopupReady,
   Timeouts,
 } from './waits';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const EXTENSION_PATH = path.join(__dirname, '..', '..', 'dist', 'chrome-mv3');
 
 /**
  * TestClient provides a fluent API for E2E testing of the browser extension.
@@ -51,22 +45,7 @@ export class TestClient {
    * Create a new TestClient with a fresh browser context.
    */
   static async create(): Promise<TestClient> {
-    const context = await chromium.launchPersistentContext('', {
-      headless: false,
-      args: [
-        `--disable-extensions-except=${EXTENSION_PATH}`,
-        `--load-extension=${EXTENSION_PATH}`,
-        '--no-first-run',
-        '--disable-gpu',
-      ],
-    });
-
-    // Wait for service worker and get extension ID
-    let [background] = context.serviceWorkers();
-    if (!background) {
-      background = await context.waitForEvent('serviceworker');
-    }
-    const extensionId = background.url().split('/')[2];
+    const { context, extensionId } = await createFreshContext();
 
     // Open popup
     const popup = await context.newPage();
@@ -140,7 +119,26 @@ export class TestClient {
     await this.popup.fill('input[type="text"]', username);
     await this.popup.fill('input[type="password"]', password);
     await this.popup.click('button:has-text("Log in")');
-    await this.popup.getByRole('button', { name: 'Vault' }).waitFor({ state: 'visible', timeout: Timeouts.LONG });
+    return this.waitForVaultOpen();
+  }
+
+  /**
+   * Wait for the vault to open after a login or unlock; fails on the upgrade gate.
+   */
+  async waitForVaultOpen(timeout: number = Timeouts.LONG): Promise<this> {
+    await waitForVaultOpen(this.popup, timeout);
+    return this;
+  }
+
+  /**
+   * Stop here and open the Playwright Inspector to look at the popup, only in a `npm run test:e2e:p` run; a no-op otherwise.
+   */
+  async pause(): Promise<this> {
+    if (!process.env.E2E_PAUSE) {
+      return this;
+    }
+    test.info().setTimeout(0);
+    await this.popup.pause();
     return this;
   }
 
@@ -168,8 +166,7 @@ export class TestClient {
    */
   async submitLogin(): Promise<this> {
     await this.popup.click('button:has-text("Log in")');
-    await this.popup.getByRole('button', { name: 'Vault' }).waitFor({ state: 'visible', timeout: Timeouts.LONG });
-    return this;
+    return this.waitForVaultOpen();
   }
 
   /**
@@ -210,6 +207,15 @@ export class TestClient {
     });
     await this.popup.waitForLoadState('domcontentloaded');
     await waitForSyncComplete(this.popup, Timeouts.LONG);
+    return this;
+  }
+
+  /**
+   * Wait until the local changes are pushed to the server. A save only pushes in the background, so another
+   * client syncing right after it can otherwise miss the change.
+   */
+  async waitForServerSync(timeout: number = Timeouts.LONG): Promise<this> {
+    await expect.poll(() => this.popup.evaluate(async () => (await chrome.storage.local.get('isDirty')).isDirty === true), { timeout }).toBe(false);
     return this;
   }
 
@@ -275,6 +281,15 @@ export class TestClient {
     await expect(editButton).toBeVisible({ timeout: Timeouts.SHORT });
     await editButton.click();
     await expect(this.popup.locator(FieldSelectors.LOGIN_USERNAME)).toBeVisible({ timeout: Timeouts.MEDIUM });
+    return this;
+  }
+
+  /**
+   * Switch the item type on the add/edit form.
+   */
+  async switchItemType(type: 'Login' | 'Alias' | 'CreditCard' | 'Note'): Promise<this> {
+    await this.popup.click(ButtonSelectors.ITEM_TYPE_SELECTOR);
+    await this.popup.click(`button#item-type-option-${type}`);
     return this;
   }
 
@@ -382,35 +397,6 @@ export class TestClient {
   }
 
   /**
-   * Enable E2E test mode which sets the shadow DOM to 'open' mode for testability.
-   * This must be called before navigating to pages where you want to inspect the autofill popup.
-   */
-  async enableE2ETestMode(): Promise<this> {
-    await this.popup.evaluate(() => {
-      return new Promise<void>((resolve) => {
-        chrome.storage.local.set({ e2eTestMode: true }, () => {
-          resolve();
-        });
-      });
-    });
-    return this;
-  }
-
-  /**
-   * Disable E2E test mode.
-   */
-  async disableE2ETestMode(): Promise<this> {
-    await this.popup.evaluate(() => {
-      return new Promise<void>((resolve) => {
-        chrome.storage.local.remove('e2eTestMode', () => {
-          resolve();
-        });
-      });
-    });
-    return this;
-  }
-
-  /**
    * Enable offline mode by setting an invalid API URL.
    */
   async enableOfflineMode(): Promise<this> {
@@ -463,8 +449,7 @@ export class TestClient {
   async unlockVault(password: string): Promise<this> {
     await this.popup.fill('input#password', password);
     await this.popup.click('button[type="submit"]:has-text("Unlock")');
-    await waitForVaultReady(this.popup, Timeouts.LONG);
-    return this;
+    return this.waitForVaultOpen();
   }
 
   /**

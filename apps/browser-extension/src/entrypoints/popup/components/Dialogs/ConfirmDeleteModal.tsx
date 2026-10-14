@@ -10,6 +10,7 @@ type ConfirmDeleteModalProps = {
   title: string;
   message: string;
   confirmText: string;
+  warning?: string;
 }
 
 /**
@@ -22,7 +23,8 @@ const ConfirmDeleteModal: React.FC<ConfirmDeleteModalProps> = ({
   onConfirm,
   title,
   message,
-  confirmText
+  confirmText,
+  warning
 }) => {
   const { t } = useTranslation();
 
@@ -52,6 +54,11 @@ const ConfirmDeleteModal: React.FC<ConfirmDeleteModalProps> = ({
       <p className="text-gray-500 dark:text-gray-400">
         {message}
       </p>
+      {warning && (
+        <p className="mt-3 p-3 border rounded-md text-sm bg-amber-100 dark:bg-amber-500/10 border-amber-300 dark:border-amber-500/40 text-amber-900 dark:text-amber-100">
+          {warning}
+        </p>
+      )}
     </ModalWrapper>
   );
 };

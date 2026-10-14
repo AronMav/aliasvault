@@ -22,10 +22,10 @@ extension VaultStore {
                 throw error
             }
         } else {
-            print("Face ID is now enabled, persisting encryption key in memory to keychain")
+            print("Face ID is now enabled, persisting Account Key in memory to keychain")
             do {
-                guard let keyData = self.encryptionKey else {
-                    print("Encryption key is empty, skipping keychain persistence")
+                guard let keyData = self.accountKey else {
+                    print("Account Key is empty, skipping keychain persistence")
                     return
                 }
 

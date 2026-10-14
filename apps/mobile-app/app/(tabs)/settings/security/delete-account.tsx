@@ -1,12 +1,9 @@
-import { Buffer } from 'buffer';
-
+import { SrpAuthService } from '@aliasvault/client/auth/SrpAuthService';
 import { router } from 'expo-router';
+import { useHeaderHeight } from 'expo-router/react-navigation';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { StyleSheet, View, KeyboardAvoidingView, Platform } from 'react-native';
-
-import type { DeleteAccountInitiateRequest, DeleteAccountInitiateResponse, DeleteAccountRequest } from '@/utils/dist/core/models/webapi';
-import { SrpUtility } from '@/utils/SrpUtility';
 
 import { useColors } from '@/hooks/useColorScheme';
 
@@ -21,6 +18,8 @@ import { useApp } from '@/context/AppContext';
 import { useDialog } from '@/context/DialogContext';
 import { useWebApi } from '@/context/WebApiContext';
 
+import type { DeleteAccountInitiateRequest, DeleteAccountInitiateResponse, DeleteAccountRequest } from '@aliasvault/models/webapi';
+
 /**
  * Delete account screen.
  */
@@ -30,6 +29,7 @@ export default function DeleteAccountScreen(): React.ReactNode {
   const { username, verifyPassword, logout } = useApp();
   const { t } = useTranslation();
   const { showAlert, showConfirm } = useDialog();
+  const headerHeight = useHeaderHeight();
 
   const [confirmUsername, setConfirmUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -131,10 +131,10 @@ export default function DeleteAccountScreen(): React.ReactNode {
   const handleDeleteAccountPress = async (): Promise<void> => {
     try {
       setIsLoading(true);
-      setLoadingStatus(t('settings.securitySettings.deleteAccount.verifyingPassword'));
+      setLoadingStatus(t('common.verifyingPassword'));
       const currentPasswordHashBase64 = await verifyPassword(password);
       if (!currentPasswordHashBase64) {
-        showAlert(t('common.error'), t('settings.securitySettings.deleteAccount.currentPasswordIncorrect'));
+        showAlert(t('common.error'), t('settings.securitySettings.changePassword.currentPasswordIncorrect'));
         return;
       }
 
@@ -162,11 +162,11 @@ export default function DeleteAccountScreen(): React.ReactNode {
       const srpIdentity = data.srpIdentity ?? username;
 
       setLoadingStatus(t('settings.securitySettings.deleteAccount.verifyingWithServer'));
-      // Convert base64 string to hex string
-      const currentPasswordHashString = Buffer.from(currentPasswordHashBase64, 'base64').toString('hex').toUpperCase();
+      // The SRP password hash the account's encryption type makes from the unlock key.
+      const currentPasswordHashString = await SrpAuthService.srpPasswordHash(currentPasswordHashBase64, data.encryptionType);
 
       // Derive the SRP client proof to authenticate the deletion with the server.
-      const clientProof = await SrpUtility.deriveClientProof(
+      const clientProof = await SrpAuthService.deriveClientProof(
         currentSalt,
         srpIdentity,
         currentPasswordHashString,
@@ -219,6 +219,7 @@ export default function DeleteAccountScreen(): React.ReactNode {
       {isLoading && <LoadingOverlay status={loadingStatus ?? ''} />}
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'android' ? headerHeight : 0}
         style={styles.keyboardAvoidingView}
       >
         <ThemedContainer>
@@ -258,7 +259,7 @@ export default function DeleteAccountScreen(): React.ReactNode {
                   </ThemedText>
                   {renderWarningItem(t('settings.securitySettings.deleteAccount.irreversibleWarning'))}
                   <View style={styles.inputContainer}>
-                    <ThemedText style={styles.label}>{t('settings.securitySettings.deleteAccount.password')}</ThemedText>
+                    <ThemedText style={styles.label}>{t('common.password')}</ThemedText>
                     <ThemedTextInput
                       secureTextEntry
                       value={password}

@@ -27,18 +27,18 @@
     </ItemGroup>
 
     <ItemGroup>
-        <PackageReference Include="coverlet.msbuild" Version="10.0.1">
+        <PackageReference Include="coverlet.msbuild" Version="10.1.0">
           <PrivateAssets>all</PrivateAssets>
           <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
         </PackageReference>
-        <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
+        <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.10.1" />
         <PackageReference Include="NUnit" Version="4.6.1" />
-        <PackageReference Include="NUnit3TestAdapter" Version="6.2.0" />
-        <PackageReference Include="NUnit.Analyzers" Version="4.14.0">
+        <PackageReference Include="NUnit3TestAdapter" Version="6.3.0" />
+        <PackageReference Include="NUnit.Analyzers" Version="4.15.0">
             <PrivateAssets>all</PrivateAssets>
             <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
         </PackageReference>
-        <PackageReference Include="coverlet.collector" Version="10.0.1">
+        <PackageReference Include="coverlet.collector" Version="10.1.0">
             <PrivateAssets>all</PrivateAssets>
             <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
         </PackageReference>
@@ -46,42 +46,14 @@
             <PrivateAssets>all</PrivateAssets>
             <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
         </PackageReference>
-        <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="10.0.10" />
-        <PackageReference Include="Microsoft.AspNetCore.TestHost" Version="10.0.10" />
     </ItemGroup>
 
     <ItemGroup>
         <ProjectReference Include="..\..\AliasVault.Api\AliasVault.Api.csproj" />
         <ProjectReference Include="..\..\Databases\AliasClientDb\AliasClientDb.csproj" />
         <ProjectReference Include="..\..\Databases\AliasServerDb\AliasServerDb.csproj" />
-        <ProjectReference Include="..\..\Utilities\Cryptography\AliasVault.Cryptography.Client\AliasVault.Cryptography.Client.csproj" />
-        <ProjectReference Include="..\..\Utilities\Cryptography\AliasVault.Cryptography.Server\AliasVault.Cryptography.Server.csproj" />
-        <ProjectReference Include="..\..\Utilities\AliasVault.ImportExport\AliasVault.ImportExport.csproj" />
+        <ProjectReference Include="..\..\Utilities\AliasVault.Cryptography\AliasVault.Cryptography.csproj" />
         <ProjectReference Include="..\..\Utilities\AliasVault.FaviconExtractor\AliasVault.FaviconExtractor.csproj" />
-        <ProjectReference Include="..\..\Utilities\AliasVault.TotpGenerator\AliasVault.TotpGenerator.csproj" />
-    </ItemGroup>
-
-    <ItemGroup>
-      <EmbeddedResource Include="TestData\Exports\bitwarden.csv" />
-      <EmbeddedResource Include="TestData\Exports\bitwarden.zip" />
-      <EmbeddedResource Include="TestData\Exports\chrome.csv" />
-      <EmbeddedResource Include="TestData\Exports\dashlane.csv" />
-      <EmbeddedResource Include="TestData\Exports\dropbox.csv" />
-      <EmbeddedResource Include="TestData\Exports\firefox.csv" />
-      <EmbeddedResource Include="TestData\Exports\strongbox.csv" />
-      <EmbeddedResource Include="TestData\Exports\keepass.csv" />
-      <EmbeddedResource Include="TestData\Exports\keepass_special_chars.csv" />
-      <EmbeddedResource Include="TestData\Exports\keepassxc.csv" />
-      <EmbeddedResource Include="TestData\Exports\1password_8.csv" />
-      <EmbeddedResource Include="TestData\Exports\1password_8.1pux" />
-      <EmbeddedResource Include="TestData\Exports\protonpass.csv" />
-      <EmbeddedResource Include="TestData\Exports\protonpass.zip" />
-      <EmbeddedResource Include="TestData\Exports\lastpass.csv" />
-      <EmbeddedResource Include="TestData\Exports\nordpass.csv" />
-      <EmbeddedResource Include="TestData\Exports\aliasvault_mobile_app_export.csv" />
-      <EmbeddedResource Include="TestData\Exports\roboform.csv" />
-      <EmbeddedResource Include="TestData\Exports\edge.csv" />
-      <EmbeddedResource Include="TestData\Exports\enpass.csv" />
     </ItemGroup>
 
 </Project>

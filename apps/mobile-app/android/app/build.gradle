@@ -95,9 +95,6 @@ android {
         versionCode 3100100
         versionName "0.31.0-alpha"
 
-        // Instrumented test configuration
-        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-
         buildConfigField "String", "REACT_NATIVE_RELEASE_LEVEL", "\"${findProperty('reactNativeReleaseLevel') ?: 'stable'}\""
     }
     signingConfigs {
@@ -222,12 +219,6 @@ dependencies {
     // Do NOT remove: it has no direct code reference here, so it can look unused.
     implementation("androidx.exifinterface:exifinterface:1.4.2")
 
-    // Add Argon2 library for password key derivation
-    implementation("com.lambdapioneer.argon2kt:argon2kt:1.6.0")
-
-    // Add modern SQLite library with VACUUM INTO and backup API support
-    implementation("com.github.requery:sqlite-android:3.49.0")
-
     // Add ZXing library for QR code scanning (F-Droid compatible)
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
@@ -238,6 +229,12 @@ dependencies {
         artifact {
             type = "aar"
         }
+    }
+
+    // Raise vulnerable transitive dependencies of Expo modules (gson via expo-log-box, commons-io via expo-file-system and expo-document-picker)
+    constraints {
+        implementation("com.google.code.gson:gson:2.14.0")
+        implementation("commons-io:commons-io:2.22.0")
     }
 
     // Test dependencies (unit tests)
@@ -252,14 +249,6 @@ dependencies {
     testImplementation 'org.junit.jupiter:junit-jupiter-engine:5.9.2'
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.9.2'
     testImplementation 'org.junit.vintage:junit-vintage-engine:5.9.2'
-
-    // Instrumented test dependencies (androidTest)
-    androidTestImplementation 'androidx.test:core:1.5.0'
-    androidTestImplementation 'androidx.test:runner:1.5.2'
-    androidTestImplementation 'androidx.test:rules:1.5.0'
-    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
-    androidTestImplementation 'androidx.test.uiautomator:uiautomator:2.2.0'
-    androidTestImplementation 'org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3'
 
     def isGifEnabled = (findProperty('expo.gif.enabled') ?: "") == "true";
     def isWebpEnabled = (findProperty('expo.webp.enabled') ?: "") == "true";
@@ -326,8 +315,17 @@ task lintCheck {
     dependsOn 'detekt'
 }
 
+// Regenerate the native strings.xml files from core/i18n to ensure native Android translations are up to date.
+def i18nDir = new File(rootDir, "../../../core/i18n").canonicalFile
+task exportNativeTranslations(type: Exec) {
+    description = "Generate res/values*/strings.xml from core/i18n"
+    group = "build"
+    commandLine "node", new File(i18nDir, "scripts/export-native.mjs").absolutePath, "--platform", "android"
+}
+
 // Add a task dependency to make ktlint run before build
 tasks.named("preBuild") {
+    dependsOn("exportNativeTranslations")
     dependsOn("lintFormat")
     dependsOn("lintCheck")
 }

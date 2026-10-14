@@ -20,9 +20,9 @@ import net.aliasvault.app.utils.TotpClipboard
 import net.aliasvault.app.vaultstore.VaultStore
 import net.aliasvault.app.vaultstore.keystoreprovider.AndroidKeystoreProvider
 import net.aliasvault.app.vaultstore.passkey.PasskeyAuthenticator
-import net.aliasvault.app.vaultstore.passkey.PasskeyHelper
 import net.aliasvault.app.vaultstore.storageprovider.AndroidStorageProvider
 import org.json.JSONObject
+import uniffi.aliasvault_core.ItemUsageAction
 import java.security.MessageDigest
 import java.util.UUID
 
@@ -159,18 +159,16 @@ class PasskeyAuthenticationActivity : FragmentActivity() {
                     return@launch
                 }
 
-                val passkeyId = UUID.fromString(passkeyIdString.uppercase())
+                val passkeyId = UUID.fromString(passkeyIdString)
 
-                // Get database connection from vault
-                val db = vaultStore.database.dbConnection
-                if (db == null) {
+                if (!vaultStore.database.isOpen()) {
                     Log.e(TAG, "Database not available - vault may not be unlocked")
                     setResult(RESULT_CANCELED)
                     finish()
                     return@launch
                 }
 
-                val passkey = vaultStore.getPasskeyById(passkeyId, db)
+                val passkey = vaultStore.getPasskeyById(passkeyId)
                 if (passkey == null) {
                     Log.e(TAG, "Passkey not found: $passkeyId")
                     setResult(RESULT_CANCELED)
@@ -243,7 +241,7 @@ class PasskeyAuthenticationActivity : FragmentActivity() {
                 }
 
                 // Use PasskeyAuthenticator.getAssertion for signing
-                val credentialId = PasskeyHelper.guidToBytes(passkey.id.toString())
+                val credentialId = PasskeyAuthenticator.guidToBytes(passkey.id.toString())
                 val prfInputs = extractPrfInputs(requestObj)
                 val assertion = PasskeyAuthenticator.getAssertion(
                     credentialId = credentialId,
@@ -262,13 +260,24 @@ class PasskeyAuthenticationActivity : FragmentActivity() {
                     clientDataJson = clientDataJson,
                 )
 
+                // Count the assertion in the item's usage statistics.
+                val manifestId = passkey.manifestId
+                if (manifestId != null) {
+                    try {
+                        vaultStore.recordItemUsage(passkey.parentItemId.toString(), manifestId, ItemUsageAction.PASSKEY)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to record passkey usage", e)
+                    }
+                }
+
                 // If the item behind this passkey also has a TOTP code and the user has the
                 // copy-on-fill setting enabled (default), write the current code to the clipboard.
-                if (TotpClipboard.isCopyOnFillEnabled(this@PasskeyAuthenticationActivity)) {
+                if (manifestId != null && TotpClipboard.isCopyOnFillEnabled(this@PasskeyAuthenticationActivity)) {
                     TotpClipboard.copyCodeForItem(
                         context = this@PasskeyAuthenticationActivity,
                         store = vaultStore,
                         itemId = passkey.parentItemId.toString(),
+                        manifestId = manifestId,
                     )
                 }
 

@@ -1,0 +1,692 @@
+//-----------------------------------------------------------------------
+// <copyright file="TestController.cs" company="aliasvault">
+// Copyright (c) aliasvault. All rights reserved.
+// Licensed under the AGPLv3 license. See LICENSE.md file in the project root for full license information.
+// </copyright>
+//-----------------------------------------------------------------------
+
+/*
+ * Note: this file is used for E2E testing purposes only. It contains test endpoints that are used by
+ * E2E tests (browser extension Playwright tests, mobile app UI tests) to manipulate server state.
+ *
+ * These endpoints are only available in DEBUG builds.
+ */
+
+namespace AliasVault.Api.Controllers.V2.Tests;
+
+using AliasServerDb;
+using AliasVault.Api.Controllers.Abstracts;
+using AliasVault.Api.Controllers.Tests;
+using AliasVault.Api.Helpers;
+using AliasVault.Api.Services;
+using AliasVault.Shared.Server.Services;
+using Asp.Versioning;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
+
+#if DEBUG
+
+/// <summary>
+/// Test controller that contains test endpoints for E2E testing purposes.
+/// All endpoints are hidden from Swagger and only work in Development environment.
+/// </summary>
+/// <param name="userManager">UserManager instance.</param>
+/// <param name="environment">IWebHostEnvironment instance.</param>
+/// <param name="dbContextFactory">DbContext factory instance.</param>
+/// <param name="serverSettingsService">ServerSettingsService instance.</param>
+/// <param name="registrationInviteService">RegistrationInviteService instance.</param>
+/// <param name="capabilityService">CapabilityService instance.</param>
+/// <param name="cache">IMemoryCache instance.</param>
+[ApiVersion("2")]
+public class TestController(
+    UserManager<AliasVaultUser> userManager,
+    IWebHostEnvironment environment,
+    IAliasServerDbContextFactory dbContextFactory,
+    ServerSettingsService serverSettingsService,
+    RegistrationInviteService registrationInviteService,
+    CapabilityService capabilityService,
+    IMemoryCache cache) : AuthenticatedRequestController(userManager)
+{
+    /// <summary>
+    /// Authenticated test request. Used to verify authentication is working.
+    /// </summary>
+    /// <returns>Static OK.</returns>
+    [HttpGet("")]
+    public IActionResult TestCall()
+    {
+        if (!environment.IsDevelopment())
+        {
+            return NotFound();
+        }
+
+        return Ok();
+    }
+
+    /// <summary>
+    /// Test request that throws an exception. Used for testing error handling.
+    /// </summary>
+    /// <returns>Never returns - always throws.</returns>
+    [AllowAnonymous]
+    [HttpGet("Error")]
+    public IActionResult TestCallError()
+    {
+        if (!environment.IsDevelopment())
+        {
+            return NotFound();
+        }
+
+        // Throw an exception here to test error handling.
+        throw new ArgumentException("Test error");
+    }
+
+    /// <summary>
+    /// Delete the newest vault revisions for the current user.
+    /// Used for testing RPO (Recovery Point Objective) recovery scenarios.
+    /// </summary>
+    /// <param name="count">Number of newest revisions to delete.</param>
+    /// <returns>OK with the number of deleted revisions, or NotFound in production.</returns>
+    [HttpDelete("vault-revisions/{count:int}")]
+    public async Task<IActionResult> DeleteVaultRevisions(int count)
+    {
+        if (!environment.IsDevelopment())
+        {
+            return NotFound();
+        }
+
+        if (count <= 0)
+        {
+            return BadRequest("Count must be greater than 0");
+        }
+
+        var user = await GetCurrentUserAsync();
+        if (user == null)
+        {
+            return Unauthorized();
+        }
+
+        await using var context = await dbContextFactory.CreateDbContextAsync();
+
+        var deletedRevisions = await PopNewestRevisionsAsync(context, user.Id, count);
+        if (deletedRevisions.Count == 0)
+        {
+            return Ok(new { deleted = 0, message = "No revisions found to delete" });
+        }
+
+        return Ok(new
+        {
+            deleted = deletedRevisions.Count,
+            deletedRevisions,
+            message = $"Deleted {deletedRevisions.Count} vault revision(s)",
+        });
+    }
+
+    /// <summary>
+    /// Get vault revision information for the current user.
+    /// Used for E2E tests to verify vault state.
+    /// </summary>
+    /// <returns>Vault revision information.</returns>
+    [HttpGet("vault-revisions")]
+    public async Task<IActionResult> GetVaultRevisions()
+    {
+        if (!environment.IsDevelopment())
+        {
+            return NotFound();
+        }
+
+        var user = await GetCurrentUserAsync();
+        if (user == null)
+        {
+            return Unauthorized();
+        }
+
+        await using var context = await dbContextFactory.CreateDbContextAsync();
+
+        return Ok(await BuildRevisionInfoAsync(context, user.Id));
+    }
+
+    /// <summary>
+    /// Block the current user's account.
+    /// Used for testing forced logout scenarios.
+    /// After calling this, any subsequent API calls to /status will return 401.
+    /// </summary>
+    /// <returns>OK with the blocked status.</returns>
+    [HttpPost("block-user")]
+    public async Task<IActionResult> BlockUser()
+    {
+        if (!environment.IsDevelopment())
+        {
+            return NotFound();
+        }
+
+        var user = await GetCurrentUserAsync();
+        if (user == null)
+        {
+            return Unauthorized();
+        }
+
+        await using var context = await dbContextFactory.CreateDbContextAsync();
+
+        // Find the user in the new context and block them
+        var dbUser = await context.AliasVaultUsers.FindAsync(user.Id);
+        if (dbUser == null)
+        {
+            return NotFound("User not found");
+        }
+
+        dbUser.Blocked = true;
+        await context.SaveChangesAsync();
+
+        return Ok(new
+        {
+            blocked = true,
+            message = $"User {user.UserName} has been blocked",
+        });
+    }
+
+    /// <summary>
+    /// Unblock the current user's account.
+    /// Used for testing - allows re-enabling the account after forced logout test.
+    /// Note: This uses the JWT token which is still valid even for blocked users,
+    /// so the user can unblock themselves for testing purposes.
+    /// </summary>
+    /// <returns>OK with the blocked status.</returns>
+    [HttpPost("unblock-user")]
+    public async Task<IActionResult> UnblockUser()
+    {
+        if (!environment.IsDevelopment())
+        {
+            return NotFound();
+        }
+
+        var user = await GetCurrentUserAsync();
+        if (user == null)
+        {
+            return Unauthorized();
+        }
+
+        await using var context = await dbContextFactory.CreateDbContextAsync();
+
+        // Find the user in the new context and unblock them
+        var dbUser = await context.AliasVaultUsers.FindAsync(user.Id);
+        if (dbUser == null)
+        {
+            return NotFound("User not found");
+        }
+
+        dbUser.Blocked = false;
+        await context.SaveChangesAsync();
+
+        return Ok(new
+        {
+            blocked = false,
+            message = $"User {user.UserName} has been unblocked",
+        });
+    }
+
+    /// <summary>
+    /// Get vault revision information for a user by username.
+    /// Anonymous endpoint for E2E tests that cannot access auth tokens.
+    /// Only available in DEBUG builds.
+    /// </summary>
+    /// <param name="username">The username to look up.</param>
+    /// <returns>Vault revision information.</returns>
+    [AllowAnonymous]
+    [HttpGet("vault-revisions/by-username/{username}")]
+    public async Task<IActionResult> GetVaultRevisionsByUsername(string username)
+    {
+        if (!environment.IsDevelopment())
+        {
+            return NotFound();
+        }
+
+        await using var context = await dbContextFactory.CreateDbContextAsync();
+
+        var user = await context.AliasVaultUsers
+            .FirstOrDefaultAsync(u => u.NormalizedUserName == username.ToUpperInvariant());
+
+        if (user == null)
+        {
+            return NotFound($"User '{username}' not found");
+        }
+
+        return Ok(await BuildRevisionInfoAsync(context, user.Id));
+    }
+
+    /// <summary>
+    /// Delete the newest vault revisions for a user by username.
+    /// Anonymous endpoint for E2E tests that cannot access auth tokens.
+    /// Only available in DEBUG builds.
+    /// </summary>
+    /// <param name="username">The username to look up.</param>
+    /// <param name="count">Number of newest revisions to delete.</param>
+    /// <returns>OK with the number of deleted revisions.</returns>
+    [AllowAnonymous]
+    [HttpDelete("vault-revisions/by-username/{username}/{count:int}")]
+    public async Task<IActionResult> DeleteVaultRevisionsByUsername(string username, int count)
+    {
+        if (!environment.IsDevelopment())
+        {
+            return NotFound();
+        }
+
+        if (count <= 0)
+        {
+            return BadRequest("Count must be greater than 0");
+        }
+
+        await using var context = await dbContextFactory.CreateDbContextAsync();
+
+        var user = await context.AliasVaultUsers
+            .FirstOrDefaultAsync(u => u.NormalizedUserName == username.ToUpperInvariant());
+
+        if (user == null)
+        {
+            return NotFound($"User '{username}' not found");
+        }
+
+        var deletedRevisions = await PopNewestRevisionsAsync(context, user.Id, count);
+        if (deletedRevisions.Count == 0)
+        {
+            return Ok(new { deleted = 0, message = "No revisions found to delete" });
+        }
+
+        return Ok(new
+        {
+            deleted = deletedRevisions.Count,
+            deletedRevisions,
+            message = $"Deleted {deletedRevisions.Count} vault revision(s)",
+        });
+    }
+
+    /// <summary>
+    /// Block a user's account by username.
+    /// Anonymous endpoint for E2E tests that cannot access auth tokens.
+    /// Only available in DEBUG builds.
+    /// </summary>
+    /// <param name="username">The username to block.</param>
+    /// <returns>OK with the blocked status.</returns>
+    [AllowAnonymous]
+    [HttpPost("block-user/by-username/{username}")]
+    public async Task<IActionResult> BlockUserByUsername(string username)
+    {
+        if (!environment.IsDevelopment())
+        {
+            return NotFound();
+        }
+
+        await using var context = await dbContextFactory.CreateDbContextAsync();
+
+        var user = await context.AliasVaultUsers
+            .FirstOrDefaultAsync(u => u.NormalizedUserName == username.ToUpperInvariant());
+
+        if (user == null)
+        {
+            return NotFound($"User '{username}' not found");
+        }
+
+        user.Blocked = true;
+        await context.SaveChangesAsync();
+
+        return Ok(new
+        {
+            blocked = true,
+            message = $"User {user.UserName} has been blocked",
+        });
+    }
+
+    /// <summary>
+    /// Unblock a user's account by username.
+    /// Anonymous endpoint for E2E tests that cannot access auth tokens.
+    /// Only available in DEBUG builds.
+    /// </summary>
+    /// <param name="username">The username to unblock.</param>
+    /// <returns>OK with the blocked status.</returns>
+    [AllowAnonymous]
+    [HttpPost("unblock-user/by-username/{username}")]
+    public async Task<IActionResult> UnblockUserByUsername(string username)
+    {
+        if (!environment.IsDevelopment())
+        {
+            return NotFound();
+        }
+
+        await using var context = await dbContextFactory.CreateDbContextAsync();
+
+        var user = await context.AliasVaultUsers
+            .FirstOrDefaultAsync(u => u.NormalizedUserName == username.ToUpperInvariant());
+
+        if (user == null)
+        {
+            return NotFound($"User '{username}' not found");
+        }
+
+        user.Blocked = false;
+        await context.SaveChangesAsync();
+
+        return Ok(new
+        {
+            blocked = false,
+            message = $"User {user.UserName} has been unblocked",
+        });
+    }
+
+    /// <summary>
+    /// Turn an account into one that predates the unlock-key model and holds a legacy (sqlite-blob) vault: the v2 key
+    /// material is removed so login falls back to the salt and verifier on the vault row, and the personal vault is
+    /// overwritten with the given one.
+    /// Only available in DEBUG builds.
+    /// </summary>
+    /// <param name="username">The username of the account.</param>
+    /// <param name="request">The legacy vault and the login material it was written with.</param>
+    /// <returns>OK with the manifest id of the overwritten vault.</returns>
+    [AllowAnonymous]
+    [HttpPost("legacy-vault/by-username/{username}")]
+    public async Task<IActionResult> RestoreLegacyVaultByUsername(string username, [FromBody] RestoreLegacyVaultRequest request)
+    {
+        if (!environment.IsDevelopment())
+        {
+            return NotFound();
+        }
+
+        await using var context = await dbContextFactory.CreateDbContextAsync();
+
+        var user = await context.AliasVaultUsers.FirstOrDefaultAsync(u => u.NormalizedUserName == username.ToUpperInvariant());
+        if (user == null)
+        {
+            return NotFound($"User '{username}' not found");
+        }
+
+        await context.AliasVaultUsers.Where(u => u.Id != user.Id && u.SrpIdentity == request.SrpIdentity).ExecuteUpdateAsync(u => u.SetProperty(x => x.SrpIdentity, (string?)null));
+        user.SrpIdentity = request.SrpIdentity;
+        context.UserUnlockKeys.RemoveRange(context.UserUnlockKeys.Where(x => x.UserId == user.Id));
+        context.UserGrantKeys.RemoveRange(context.UserGrantKeys.Where(x => x.UserId == user.Id));
+        context.UserSigningKeys.RemoveRange(context.UserSigningKeys.Where(x => x.UserId == user.Id));
+        context.VaultManifestAccessKeys.RemoveRange(context.VaultManifestAccessKeys.Where(x => x.UserId == user.Id));
+
+        var manifest = await context.VaultManifests.FirstOrDefaultAsync(x => x.OwnerGroupId == user.PersonalGroupId);
+        if (manifest == null)
+        {
+            return NotFound($"User '{username}' has no personal vault");
+        }
+
+        // A legacy account holds nothing of the manifest storage format, so drop what an earlier write left behind.
+        context.VaultDataBuckets.RemoveRange(context.VaultDataBuckets.Where(x => x.ManifestId == manifest.ManifestId));
+        context.VaultDataBucketsHistory.RemoveRange(context.VaultDataBucketsHistory.Where(x => x.ManifestId == manifest.ManifestId));
+        context.VaultBlobReferences.RemoveRange(context.VaultBlobReferences.Where(x => x.ManifestId == manifest.ManifestId));
+        context.VaultBlobObjects.RemoveRange(context.VaultBlobObjects.Where(x => x.ManifestId == manifest.ManifestId));
+        context.VaultManifestDeliveryKeys.RemoveRange(context.VaultManifestDeliveryKeys.Where(x => x.VaultManifestId == manifest.ManifestId));
+
+        var now = DateTime.UtcNow;
+        manifest.CopyPayloadFrom(new VaultManifestsHistory
+        {
+            ManifestId = manifest.ManifestId,
+            StorageFormat = VaultManifestBase.LegacyStorageFormat,
+            Version = request.Version,
+            RevisionNumber = request.RevisionNumber,
+            CreatedAt = now,
+            UpdatedAt = now,
+            EncryptionType = request.EncryptionType,
+            EncryptionSettings = request.EncryptionSettings,
+            VaultBlob = request.VaultBlob,
+            Salt = request.Salt,
+            Verifier = request.Verifier,
+        });
+        await context.SaveChangesAsync();
+        LegacyVaultHelper.ForgetMigrationState(cache, user.Id);
+
+        return Ok(new
+        {
+            manifestId = manifest.ManifestId,
+        });
+    }
+
+    /// <summary>
+    /// Set a server setting by key/value. Used by E2E tests to tune runtime limits
+    /// (e.g. disabling the per-IP registration rate limit by setting it to 0).
+    /// Anonymous endpoint for E2E tests that cannot access auth tokens.
+    /// Only available in DEBUG builds.
+    /// </summary>
+    /// <param name="request">The setting to update.</param>
+    /// <returns>OK with the updated key and value.</returns>
+    [AllowAnonymous]
+    [HttpPost("server-settings")]
+    public async Task<IActionResult> SetServerSetting([FromBody] SetServerSettingRequest request)
+    {
+        if (!environment.IsDevelopment())
+        {
+            return NotFound();
+        }
+
+        if (string.IsNullOrWhiteSpace(request.Key))
+        {
+            return BadRequest("Key is required");
+        }
+
+        await serverSettingsService.SetSettingAsync(request.Key, request.Value);
+
+        return Ok(new
+        {
+            key = request.Key,
+            value = request.Value,
+        });
+    }
+
+    /// <summary>
+    /// Create a registration invite and return its code, as the admin panel would.
+    /// Only available in DEBUG builds.
+    /// </summary>
+    /// <param name="maxUses">Number of accounts that may register with the invite.</param>
+    /// <returns>OK with the invite code.</returns>
+    [AllowAnonymous]
+    [HttpPost("registration-invites")]
+    public async Task<IActionResult> CreateRegistrationInvite([FromQuery] int maxUses = 1)
+    {
+        if (!environment.IsDevelopment())
+        {
+            return NotFound();
+        }
+
+        var code = await registrationInviteService.CreateAsync("E2E test", maxUses, null, "e2e");
+        return Ok(new { code });
+    }
+
+    /// <summary>
+    /// Create a shared group with an owner and members.
+    /// Only available in DEBUG builds.
+    /// </summary>
+    /// <param name="request">The group name and the usernames of its owner and members.</param>
+    /// <returns>OK with the group id.</returns>
+    [AllowAnonymous]
+    [HttpPost("shared-groups")]
+    public async Task<IActionResult> CreateSharedGroup([FromBody] CreateSharedGroupRequest request)
+    {
+        if (!environment.IsDevelopment())
+        {
+            return NotFound();
+        }
+
+        await using var context = await dbContextFactory.CreateDbContextAsync();
+
+        var usernames = request.MemberUsernames.Prepend(request.OwnerUsername).Select(u => u.ToUpperInvariant()).ToList();
+        var users = await context.AliasVaultUsers.Where(u => usernames.Contains(u.NormalizedUserName!)).ToDictionaryAsync(u => u.NormalizedUserName!, u => u.Id);
+        var missing = usernames.Where(u => !users.ContainsKey(u)).ToList();
+        if (missing.Count > 0)
+        {
+            return NotFound($"Users not found: {string.Join(", ", missing)}");
+        }
+
+        var now = DateTime.UtcNow;
+        var group = new Group { Id = Guid.NewGuid(), Name = request.Name, Type = GroupType.Shared, CreatedAt = now, UpdatedAt = now };
+        context.Groups.Add(group);
+        context.GroupMembers.Add(GroupHelper.CreateOwnerMembership(group, users[usernames[0]], now));
+        foreach (var username in usernames.Skip(1))
+        {
+            context.GroupMembers.Add(new GroupMember { Id = Guid.NewGuid(), GroupId = group.Id, UserId = users[username], Role = GroupRole.Member, CreatedAt = now, UpdatedAt = now });
+        }
+
+        await context.SaveChangesAsync();
+
+        return Ok(new { groupId = group.Id });
+    }
+
+    /// <summary>
+    /// Set a capability for one account with a per-account rule, and drop the rule cache so it applies right away.
+    /// Only available in DEBUG builds.
+    /// </summary>
+    /// <param name="username">The username of the account.</param>
+    /// <param name="request">The capability key and value.</param>
+    /// <returns>OK with the key and value.</returns>
+    [AllowAnonymous]
+    [HttpPost("capabilities/by-username/{username}")]
+    public async Task<IActionResult> SetCapabilityByUsername(string username, [FromBody] SetCapabilityRequest request)
+    {
+        if (!environment.IsDevelopment())
+        {
+            return NotFound();
+        }
+
+        await using var context = await dbContextFactory.CreateDbContextAsync();
+
+        var user = await context.AliasVaultUsers.FirstOrDefaultAsync(u => u.NormalizedUserName == username.ToUpperInvariant());
+        if (user == null)
+        {
+            return NotFound($"User '{username}' not found");
+        }
+
+        var now = DateTime.UtcNow;
+        context.CapabilityRules.Add(new CapabilityRule
+        {
+            Id = Guid.NewGuid(),
+            CapabilityKey = request.Key,
+            UserId = user.Id,
+            Value = request.Value,
+            Notes = "E2E test",
+            CreatedBy = "e2e",
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        await context.SaveChangesAsync();
+        capabilityService.ClearCache();
+
+        return Ok(new { key = request.Key, value = request.Value });
+    }
+
+    /// <summary>
+    /// Drop the cached capability rules, so rules changed in the database apply on the next request.
+    /// Only available in DEBUG builds.
+    /// </summary>
+    /// <returns>OK.</returns>
+    [AllowAnonymous]
+    [HttpPost("capabilities/reset-cache")]
+    public IActionResult ResetCapabilityCache()
+    {
+        if (!environment.IsDevelopment())
+        {
+            return NotFound();
+        }
+
+        capabilityService.ClearCache();
+        return Ok();
+    }
+
+    /// <summary>
+    /// Get a server setting by key.
+    /// Anonymous endpoint for E2E tests that cannot access auth tokens.
+    /// Only available in DEBUG builds.
+    /// </summary>
+    /// <param name="key">The setting key to read.</param>
+    /// <returns>OK with the current key and value (value may be null if unset).</returns>
+    [AllowAnonymous]
+    [HttpGet("server-settings/{key}")]
+    public async Task<IActionResult> GetServerSetting(string key)
+    {
+        if (!environment.IsDevelopment())
+        {
+            return NotFound();
+        }
+
+        var value = await serverSettingsService.GetSettingAsync(key);
+
+        return Ok(new
+        {
+            key,
+            value,
+        });
+    }
+
+    /// <summary>
+    /// Builds the revision info payload for a user: the current revision of the personal manifest plus all history
+    /// revisions, newest first.
+    /// </summary>
+    private static async Task<object> BuildRevisionInfoAsync(AliasServerDbContext context, string userId)
+    {
+        var current = await context.VaultManifests
+            .Where(v => context.AliasVaultUsers.Any(u => u.Id == userId && u.PersonalGroupId == v.OwnerGroupId))
+            .Select(v => new { v.RevisionNumber, v.CreatedAt, v.UpdatedAt })
+            .FirstOrDefaultAsync();
+
+        var history = await context.VaultManifestsHistory
+            .Where(v => context.VaultManifests.Any(m => m.ManifestId == v.ManifestId && context.AliasVaultUsers.Any(u => u.Id == userId && u.PersonalGroupId == m.OwnerGroupId)))
+            .OrderByDescending(v => v.RevisionNumber)
+            .Select(v => new { v.RevisionNumber, v.CreatedAt, v.UpdatedAt })
+            .ToListAsync();
+
+        var revisions = history.ToList();
+        if (current != null)
+        {
+            revisions.Insert(0, current);
+        }
+
+        revisions = revisions.OrderByDescending(v => v.RevisionNumber).ToList();
+
+        return new
+        {
+            count = revisions.Count,
+            currentRevision = current?.RevisionNumber ?? 0,
+            revisions,
+        };
+    }
+
+    /// <summary>
+    /// Deletes the newest <paramref name="count"/> revisions of the user's personal manifest by rolling the current row
+    /// back to the newest history revision each time (the inverse of the archive-then-update upload flow). When no
+    /// history remains, the manifest row itself is deleted. Returns the revision numbers that were discarded.
+    /// </summary>
+    private static async Task<List<long>> PopNewestRevisionsAsync(AliasServerDbContext context, string userId, int count)
+    {
+        var deletedRevisions = new List<long>();
+        var current = await context.VaultManifests.FirstOrDefaultAsync(v => context.AliasVaultUsers.Any(u => u.Id == userId && u.PersonalGroupId == v.OwnerGroupId));
+
+        for (var i = 0; i < count && current != null; i++)
+        {
+            deletedRevisions.Add(current.RevisionNumber);
+
+            // Drop the blob references of the revision being discarded.
+            await context.VaultBlobReferences.Where(r => r.ManifestId == current.ManifestId && r.RevisionNumber == current.RevisionNumber).ExecuteDeleteAsync();
+
+            var newestHistory = await context.VaultManifestsHistory
+                .Where(h => h.ManifestId == current.ManifestId)
+                .OrderByDescending(h => h.RevisionNumber)
+                .FirstOrDefaultAsync();
+
+            if (newestHistory == null)
+            {
+                context.VaultManifests.Remove(current);
+                current = null;
+            }
+            else
+            {
+                current.CopyPayloadFrom(newestHistory);
+                context.VaultManifestsHistory.Remove(newestHistory);
+            }
+
+            await context.SaveChangesAsync();
+        }
+
+        return deletedRevisions;
+    }
+}
+#endif

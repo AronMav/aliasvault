@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 
 import { createTestUser, type TestUser } from '../helpers/test-api';
 
+import { waitForVaultOpen } from './helpers';
 import { waitForPopupReady as waitForPopupReadyState, Timeouts } from './waits';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -64,23 +65,8 @@ export const test = base.extend<TestFixtures>({
 
     // Create new context if we don't have one for this file
     if (!cachedContext) {
-      cachedContext = await chromium.launchPersistentContext('', {
-        headless: false, // Extensions require headed mode
-        args: [
-          `--disable-extensions-except=${EXTENSION_PATH}`,
-          `--load-extension=${EXTENSION_PATH}`,
-          '--no-first-run',
-          '--disable-gpu',
-        ],
-      });
+      ({ context: cachedContext, extensionId: cachedExtensionId } = await createFreshContext());
       contextTestFile = currentTestFile;
-
-      // Wait for service worker and get extension ID
-      let [background] = cachedContext.serviceWorkers();
-      if (!background) {
-        background = await cachedContext.waitForEvent('serviceworker');
-      }
-      cachedExtensionId = background.url().split('/')[2];
     }
 
     await use(cachedContext);
@@ -168,7 +154,7 @@ export async function openPopup(
  * @param timeout - Maximum time to wait in milliseconds (default: 30000)
  */
 export async function waitForLoggedIn(popup: Page, timeout: number = 30000): Promise<void> {
-  await popup.getByRole('button', { name: 'Vault' }).waitFor({ state: 'visible', timeout });
+  await waitForVaultOpen(popup, timeout);
 }
 
 /**
@@ -263,7 +249,12 @@ export async function fullLoginFlow(
  */
 export async function createFreshContext(): Promise<{ context: BrowserContext; extensionId: string }> {
   const context = await chromium.launchPersistentContext('', {
-    headless: false, // Extensions require headed mode
+    /*
+     * Headless unless run with `--headed`/`--debug`. The `chromium` channel is the full browser in new headless
+     * mode, which loads extensions; the default headless shell does not.
+     */
+    channel: 'chromium',
+    headless: isHeadless(),
     args: [
       `--disable-extensions-except=${EXTENSION_PATH}`,
       `--load-extension=${EXTENSION_PATH}`,
@@ -280,4 +271,16 @@ export async function createFreshContext(): Promise<{ context: BrowserContext; e
   const extensionId = background.url().split('/')[2];
 
   return { context, extensionId };
+}
+
+/**
+ * Whether to launch headless: the project's `headless` option, which the `--headed` CLI flag overrides.
+ */
+function isHeadless(): boolean {
+  try {
+    return base.info().project.use.headless ?? true;
+  } catch {
+    // Called outside a running test or hook.
+    return true;
+  }
 }

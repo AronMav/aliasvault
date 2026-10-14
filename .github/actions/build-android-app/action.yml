@@ -18,35 +18,20 @@ runs:
   using: "composite"
   steps:
     - name: Setup Node.js
-      uses: actions/setup-node@v6
+      uses: actions/setup-node@v7
       with:
         node-version: '24'
         cache: 'npm'
         cache-dependency-path: apps/mobile-app/package-lock.json
 
     - name: Build core libraries
-      shell: bash
-      run: |
-        cd ./core
-        chmod +x build-and-distribute.sh
-        ./build-and-distribute.sh
+      uses: ./.github/actions/build-core-libraries
+      with:
+        target: android
 
     - name: Verify core library distribution
       shell: bash
       run: |
-        # Verify TypeScript core libraries
-        TARGET_DIRS=(
-          "apps/mobile-app/utils/dist/core/models"
-          "apps/mobile-app/utils/dist/core/vault"
-        )
-        for dir in "${TARGET_DIRS[@]}"; do
-          if [ ! -d "$dir" ]; then
-            echo "❌ Error: Directory $dir does not exist"
-            exit 1
-          fi
-        done
-        echo "✅ TypeScript core libraries verified"
-
         # Verify Android native libraries (Rust core)
         JNILIBS_DIR="apps/mobile-app/android/app/src/main/jniLibs"
         REQUIRED_ABIS=("arm64-v8a" "armeabi-v7a" "x86_64")
@@ -95,7 +80,7 @@ runs:
       working-directory: apps/mobile-app
 
     - name: Setup Java
-      uses: actions/setup-java@v5
+      uses: actions/setup-java@v6
       with:
         distribution: 'temurin'
         java-version: '17'

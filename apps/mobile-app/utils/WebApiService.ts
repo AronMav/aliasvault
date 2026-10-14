@@ -1,14 +1,15 @@
 import { Buffer } from 'buffer';
 
-import { AppInfo } from '@/utils/AppInfo';
-import type { StatusResponse, VaultResponse, AuthLogModel, RefreshToken } from '@/utils/dist/core/models/webapi';
+import { AppInfo } from '@aliasvault/client/platform/AppInfo';
+import type { StatusResponse, VaultResponse, AuthLogModel, AuthLogsResponse, RefreshToken, SessionsResponse } from '@aliasvault/models/webapi';
 
 import i18n from '@/i18n';
 
-import { ClientUpgradeRequiredError } from './types/errors/ClientUpgradeRequiredError';
+import { ApiRequestError } from '@aliasvault/client/api/errors/ApiRequestError';
+import { ClientUpgradeRequiredError } from '@aliasvault/client/api/errors/ClientUpgradeRequiredError';
 import { LocalAuthError } from './types/errors/LocalAuthError';
-import { PayloadTooLargeError } from './types/errors/PayloadTooLargeError';
-import { logoutEventEmitter } from '@/events/LogoutEventEmitter';
+import { PayloadTooLargeError } from '@aliasvault/client/api/errors/PayloadTooLargeError';
+import { logoutEventEmitter } from '@aliasvault/client/api/LogoutEventEmitter';
 import NativeVaultManager from '@/specs/NativeVaultManager';
 
 type RequestInit = globalThis.RequestInit;
@@ -24,7 +25,7 @@ type NativeWebApiResponse = {
 
 /**
  * Service class for interacting with the web API.
- * This class now acts as a proxy to the native layer, where all WebAPI calls are executed.
+ * Endpoints are unversioned (e.g. `Email/1`); the native layer resolves them against the current base URL (v2).
  */
 export class WebApiService {
   /**
@@ -32,7 +33,7 @@ export class WebApiService {
    */
   public async getBaseUrl(): Promise<string> {
     const apiUrl = await this.getApiUrl();
-    return apiUrl.replace(/\/$/, '') + '/v1/';
+    return apiUrl.replace(/\/$/, '') + '/v2/';
   }
 
   /**
@@ -47,7 +48,6 @@ export class WebApiService {
 
   /**
    * Fetch data from the API with authentication headers and access token refresh retry.
-   * This method now proxies to the native layer which handles auth and token refresh.
    */
   public async authFetch<T>(
     endpoint: string,
@@ -81,16 +81,15 @@ export class WebApiService {
         endpoint,
         options.body as string | null ?? null,
         JSON.stringify(headers),
-        true // requiresAuth
+        true, // requiresAuth
       );
 
       const response: NativeWebApiResponse = JSON.parse(responseJson);
 
-      // If native layer returns 401 session is truly expired
-      // The native layer has already tried to refresh the token, so this is a final failure
+      // If native layer returns 401 session is truly expired (native layer already attempted token refresh automatically).
       if (response.statusCode === 401) {
-        logoutEventEmitter.emit('auth.errors.sessionExpired');
-        throw new Error(i18n.t('auth.errors.sessionExpired'));
+        logoutEventEmitter.emit('common.errors.sessionExpired');
+        throw new Error(i18n.t('common.errors.sessionExpired'));
       }
 
       // Server refused this client version.
@@ -103,7 +102,9 @@ export class WebApiService {
       }
 
       if (response.statusCode >= 400 && throwOnError) {
-        throw new Error(i18n.t('auth.errors.httpError', { status: response.statusCode }));
+        const error = new ApiRequestError(response.statusCode, extractApiErrorCode(response.body));
+        error.message = i18n.t('auth.errors.httpError', { status: response.statusCode });
+        throw error;
       }
 
       // Parse response body if requested
@@ -121,7 +122,6 @@ export class WebApiService {
 
   /**
    * Fetch data from the API without authentication headers and without access token refresh retry.
-   * This method now proxies to the native layer.
    */
   public async rawFetch(
     endpoint: string,
@@ -152,7 +152,7 @@ export class WebApiService {
         endpoint,
         options.body as string | null ?? null,
         JSON.stringify(headers),
-        false // requiresAuth = false
+        false, // requiresAuth
       );
 
       const nativeResponse: NativeWebApiResponse = JSON.parse(responseJson);
@@ -232,15 +232,15 @@ export class WebApiService {
         endpoint,
         null,
         JSON.stringify(headers),
-        true // requiresAuth
+        true, // requiresAuth
       );
 
       const response: NativeWebApiResponse = JSON.parse(responseJson);
 
       // Handle auth errors
       if (response.statusCode === 401) {
-        logoutEventEmitter.emit('auth.errors.sessionExpired');
-        throw new Error(i18n.t('auth.errors.sessionExpired'));
+        logoutEventEmitter.emit('common.errors.sessionExpired');
+        throw new Error(i18n.t('common.errors.sessionExpired'));
       }
 
       if (response.statusCode >= 400) {
@@ -324,7 +324,7 @@ export class WebApiService {
          * If session expired, logout the user immediately as otherwise this would
          * trigger a server offline banner.
          */
-        logoutEventEmitter.emit('auth.errors.sessionExpired');
+        logoutEventEmitter.emit('common.errors.sessionExpired');
         throw error;
       }
 
@@ -345,7 +345,7 @@ export class WebApiService {
    * Get the active sessions (logged in devices) for the current user from the server.
    */
   public async getActiveSessions(): Promise<RefreshToken[]> {
-    return this.get<RefreshToken[]>('Security/sessions');
+    return (await this.get<SessionsResponse>('Security/sessions')).sessions;
   }
 
   /**
@@ -359,13 +359,13 @@ export class WebApiService {
    * Get the auth logs for the current user from the server.
    */
   public async getAuthLogs(): Promise<AuthLogModel[]> {
-    return this.get<AuthLogModel[]>('Security/authlogs');
+    return (await this.get<AuthLogsResponse>('Security/authlogs')).authLogs;
   }
 
   /**
    * Get the currently configured API URL from native storage.
    */
-  private async getApiUrl(): Promise<string> {
+  public async getApiUrl(): Promise<string> {
     try {
       const apiUrl = await NativeVaultManager.getApiUrl();
       return apiUrl || AppInfo.DEFAULT_API_URL;
@@ -374,4 +374,22 @@ export class WebApiService {
       return AppInfo.DEFAULT_API_URL;
     }
   }
+}
+
+/**
+ * Extract the structured API error code (e.g. "VAULT_NOT_UP_TO_DATE") from an error response body.
+ */
+function extractApiErrorCode(body: string | null | undefined): string | null {
+  try {
+    const parsed = JSON.parse(body ?? '') as { code?: unknown; title?: unknown };
+    for (const value of [parsed.code, parsed.title]) {
+      // Server error codes are uppercase enum names
+      if (typeof value === 'string' && /^[A-Z0-9_]{2,64}$/.test(value)) {
+        return value;
+      }
+    }
+  } catch {
+    // Body is empty or not JSON (e.g. proxy error page).
+  }
+  return null;
 }

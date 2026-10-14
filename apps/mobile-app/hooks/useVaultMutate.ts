@@ -1,29 +1,19 @@
-import { Buffer } from 'buffer';
-
 import { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import Toast from 'react-native-toast-message';
 
-import type { EncryptionKeyDerivationParams } from '@/utils/dist/core/models/metadata';
-import type { PasswordChangeInitiateResponse, Vault, VaultPasswordChangeRequest } from '@/utils/dist/core/models/webapi';
-import { FieldKey, getFieldValue } from '@/utils/dist/core/models/vault';
-import EncryptionUtility from '@/utils/EncryptionUtility';
-import { SrpUtility } from '@/utils/SrpUtility';
+import type { UnlockKeyDerivationParams } from '@aliasvault/models/metadata';
+import { VaultKeyAlgorithm, type PasswordChangeInitiateResponse, type PasswordChangeRequest } from '@aliasvault/models/webapi';
+import { MasterPasswordService, PasswordChangedElsewhereError } from '@aliasvault/client/auth/MasterPasswordService';
+import { SrpAuthService } from '@aliasvault/client/auth/SrpAuthService';
+import { VaultSyncHoldReason } from '@aliasvault/client/sync/VaultSyncHold';
 
 import { useVaultSync } from '@/hooks/useVaultSync';
-
-import { AppErrorCode, formatErrorWithCode } from '@/utils/types/errors/AppErrorCodes';
-import { PayloadTooLargeError } from '@/utils/types/errors/PayloadTooLargeError';
 
 import { useApp } from '@/context/AppContext';
 import { useDb } from '@/context/DbContext';
 import { useWebApi } from '@/context/WebApiContext';
 import NativeVaultManager from '@/specs/NativeVaultManager';
-
-type VaultPostResponse = {
-  status: number;
-  newRevisionNumber: number;
-}
 
 type VaultMutationOptions = {
   onSuccess?: () => void;
@@ -36,7 +26,7 @@ type VaultMutationOptions = {
  */
 export function useVaultMutate() : {
   executeVaultMutation: (operation: () => Promise<void>, options?: VaultMutationOptions) => Promise<void>;
-  executeVaultPasswordChange: (currentPasswordHashBase64: string, newPasswordPlainText: string, options?: VaultMutationOptions) => Promise<void>;
+  executeVaultPasswordChange: (currentUnlockKeyBase64: string, newPasswordPlainText: string) => Promise<void>;
   isLoading: boolean;
   syncStatus: string;
   } {
@@ -49,48 +39,6 @@ export function useVaultMutate() : {
   const { syncVault } = useVaultSync();
   const syncInProgressRef = useRef(false);
   const syncQueuedRef = useRef(false);
-
-  /**
-   * Prepare vault for password change operation.
-   */
-  const prepareVaultForPasswordChange = useCallback(async (): Promise<Vault> => {
-    const syncState = await NativeVaultManager.getSyncState();
-    const currentRevision = syncState.serverRevision;
-    const encryptedDb = await NativeVaultManager.getEncryptedDatabase();
-    if (!encryptedDb) {
-      throw new Error(t('vault.errors.failedToGetEncryptedDatabase'));
-    }
-
-    const privateEmailDomains = await dbContext.sqliteClient!.getPrivateEmailDomains();
-    const items = await dbContext.sqliteClient!.items.getAll();
-    const privateEmailAddresses = items
-      .map(item => getFieldValue(item, FieldKey.LoginEmail))
-      .filter((email): email is string => email != null && email !== '')
-      .filter((email, index, self) => self.indexOf(email) === index)
-      .filter(email => {
-        return privateEmailDomains.some(domain => email.toLowerCase().endsWith(`@${domain.toLowerCase()}`));
-      });
-
-    const username = authContext.username;
-    if (!username) {
-      throw new Error(t('vault.errors.usernameNotFound'));
-    }
-
-    return {
-      blob: encryptedDb,
-      createdAt: new Date().toISOString(),
-      credentialsCount: items.length,
-      currentRevisionNumber: currentRevision,
-      emailAddressList: privateEmailAddresses,
-      privateEmailDomainList: [],
-      hiddenPrivateEmailDomainList: [],
-      publicEmailDomainList: [],
-      encryptionPublicKey: '',
-      updatedAt: new Date().toISOString(),
-      username: username,
-      version: (await dbContext.sqliteClient!.getDatabaseVersion())?.version ?? '0.0.0'
-    };
-  }, [dbContext, authContext, t]);
 
   /**
    * Trigger background sync without blocking the UI.
@@ -162,7 +110,7 @@ export function useVaultMutate() : {
   ): Promise<void> => {
     await operation();
 
-    // Set uploading state BEFORE refreshing sync state to prevent "pending" flash
+    // Set uploading state before refreshing sync state to prevent "pending" flash
     dbContext.setIsUploading(true);
 
     // Refresh sync state to update isDirty flag
@@ -174,132 +122,47 @@ export function useVaultMutate() : {
   }, [dbContext, triggerBackgroundSync]);
 
   /**
-   * Execute the provided operation (e.g. create/update/delete credential)
+   * Change the master password: prove the current one, re-encrypt the Account Key with the new password's KEK, commit
+   * on the server, then refresh the local key chain and derivation params. The vault itself is not re-encrypted.
    */
-  const executePasswordChangeOperation = useCallback(async (
-    currentPasswordHashBase64: string,
-    newPasswordPlainText: string,
-    options: VaultMutationOptions
-  ) : Promise<void> => {
-    setSyncStatus('Saving changes to vault');
+  const executePasswordChangeOperation = useCallback(async (currentUnlockKeyBase64: string, newPasswordPlainText: string): Promise<void> => {
+    const chainJson = await NativeVaultManager.getAccountKeyChain();
+    const encryptedAccountKey = chainJson ? (JSON.parse(chainJson) as { encryptedAccountKey?: string }).encryptedAccountKey : undefined;
+    const storedParams = await NativeVaultManager.getUnlockKeyDerivationParams();
+    if (!encryptedAccountKey || !storedParams) {
+      throw new Error('Password change requires an unlocked account-key vault');
+    }
 
-    const data = await webApi.authFetch<PasswordChangeInitiateResponse>('Auth/change-password/initiate');
-    const currentSalt = data.salt;
-    const currentServerEphemeral = data.serverEphemeral;
-
-    // Convert base64 string to hex string
-    const currentPasswordHashString = Buffer.from(currentPasswordHashBase64, 'base64').toString('hex').toUpperCase();
-
-    // Get username from the auth context, always lowercase and trimmed which is required for the argon2id key derivation
-    const username = authContext.username?.toLowerCase().trim();
-    if (!username) {
-      throw new Error(t('common.errors.unknownError'));
+    const challenge = await webApi.authFetch<PasswordChangeInitiateResponse>('Auth/change-password/initiate');
+    if (challenge.salt !== (JSON.parse(storedParams) as UnlockKeyDerivationParams).salt) {
+      throw new PasswordChangedElsewhereError();
     }
 
     /**
      * Use srpIdentity from server response if available, otherwise fall back to username.
      * Note: the fallback can be removed in the future after 0.26.0+ is deployed.
      */
-    const srpIdentity = data.srpIdentity ?? username;
+    const srpIdentity = challenge.srpIdentity ?? SrpAuthService.normalizeUsername(authContext.username ?? '');
+    const currentPasswordHashString = await SrpAuthService.srpPasswordHash(currentUnlockKeyBase64, challenge.encryptionType);
+    const currentProof = await SrpAuthService.deriveClientProof(challenge.salt, srpIdentity, currentPasswordHashString, challenge.serverEphemeral);
+    const next = await SrpAuthService.prepareNewPassword(newPasswordPlainText, srpIdentity);
+    const { newEncryptedAccountKey } = await MasterPasswordService.reencryptAccountKey(encryptedAccountKey, currentUnlockKeyBase64, next.unlockKeyBase64);
 
-    // Derive the SRP client proof for the current password to authorize the change.
-    const currentClientProof = await SrpUtility.deriveClientProof(
-      currentSalt,
-      srpIdentity,
-      currentPasswordHashString,
-      currentServerEphemeral
-    );
+    await webApi.post<PasswordChangeRequest, void>('Auth/change-password', {
+      currentClientPublicEphemeral: currentProof.clientPublicEphemeral,
+      currentClientSessionProof: currentProof.clientSessionProof,
+      newPasswordSalt: next.salt,
+      newPasswordVerifier: next.verifier,
+      newEncryptedAccountKey,
+      newEncryptedAccountKeyAlgorithm: VaultKeyAlgorithm.Aes256Gcm,
+      newEncryptionType: next.encryptionType,
+      newEncryptionSettings: next.encryptionSettings,
+    }, false);
 
-    // Generate salt and verifier for new password using native SRP
-    const newSalt = await SrpUtility.generateSalt();
-    /**
-     * Derive with the parameters the server reports for this vault, and report them back alongside
-     * the verifier; the server records what is reported here, so these two have to be the same
-     * values. Substituting this build's defaults would overrule whatever the deployment registers
-     * accounts with, and the web client would then be refused its own parameters as too weak on the
-     * next password change. The app has no view of that deployment setting, so the vault's own
-     * parameters are the only ones it can carry forward without overruling anything.
-     */
-    const newEncryptionType = data.encryptionType;
-    const newEncryptionSettings = data.encryptionSettings;
-    const newPasswordHash = await EncryptionUtility.deriveKeyFromPassword(newPasswordPlainText, newSalt, newEncryptionType, newEncryptionSettings);
-    const newPasswordHashString = Buffer.from(newPasswordHash).toString('hex').toUpperCase();
-
-    // Store the new encryption key and derivation parameters locally
-    try {
-      const newEncryptionKeyDerivationParams : EncryptionKeyDerivationParams = {
-        encryptionType: newEncryptionType,
-        encryptionSettings: newEncryptionSettings,
-        salt: newSalt,
-      };
-
-      await dbContext.storeEncryptionKey(Buffer.from(newPasswordHash).toString('base64'));
-      await dbContext.storeEncryptionKeyDerivationParams(newEncryptionKeyDerivationParams);
-
-      /**
-       * Persist the new encrypted database with the new encryption key by starting and committing a transaction.
-       * which simulates a vault mutation operation. As part of this operation, a new encrypted database is created
-       * locally which can then be uploaded to the server.
-       */
-      await NativeVaultManager.beginTransaction();
-      await NativeVaultManager.commitTransaction();
-
-      // Unlock the newly persisted database to ensure it works and the new encryption key will be persisted in the keychain.
-      await NativeVaultManager.unlockVault();
-    } catch {
-      // If any part of this fails, we need logout the user as the local vault and stored encryption key are now potentially corrupt.
-      await authContext.logout(t('common.errors.unknownErrorTryAgain'));
-    }
-
-    // Generate SRP password change data (verifier for the new password) using native SRP
-    const newVerifier = await SrpUtility.deriveVerifier(newSalt, srpIdentity, newPasswordHashString);
-
-    // Prepare vault for password change
-    const vault = await prepareVaultForPasswordChange();
-    setSyncStatus(t('vault.uploadingVaultToServer'));
-
-    // Convert default vault object to password change vault object
-    const passwordChangeVault : VaultPasswordChangeRequest = {
-      ...vault,
-      currentClientPublicEphemeral: currentClientProof.clientPublicEphemeral,
-      currentClientSessionProof: currentClientProof.clientSessionProof,
-      newPasswordSalt: newSalt,
-      newPasswordVerifier: newVerifier,
-      newPasswordEncryptionType: newEncryptionType,
-      newPasswordEncryptionSettings: newEncryptionSettings
-    };
-
-    try {
-      // Capture mutation sequence before upload for atomic state update
-      const syncState = await NativeVaultManager.getSyncState();
-
-      // Upload to server
-      const response = await webApi.post<typeof passwordChangeVault, VaultPostResponse>('Vault/change-password', passwordChangeVault);
-
-      /**
-       * Determine if the server responds with vault revision number, as API < 0.17.0 did not.
-       * TODO: Remove this once we have a minimum required API version of 0.17.0.
-       */
-      const newRevisionNumber = response.newRevisionNumber ?? passwordChangeVault.currentRevisionNumber + 1;
-
-      // If we get here, it means we have a valid connection to the server.
-      await NativeVaultManager.setOfflineMode(false);
-
-      // Update revision atomically with sync state (clears dirty flag if no mutations during upload)
-      await NativeVaultManager.markVaultClean(syncState.mutationSequence, newRevisionNumber);
-      options.onSuccess?.();
-    } catch (error) {
-      console.error('Error during password change operation:', error);
-      if (error instanceof PayloadTooLargeError) {
-        /*
-         * Server rejected the upload with HTTP 413. Re-throw with a translated, coded error
-         * so the UI can show a targeted "vault too large" message instead of a generic failure.
-         */
-        throw new Error(formatErrorWithCode(t('common.errors.vaultTooLarge'), AppErrorCode.UPLOAD_TOO_LARGE));
-      }
-      throw error;
-    }
-  }, [dbContext, authContext, webApi, prepareVaultForPasswordChange, t]);
+    // Like a login: new params first (the sync compares the salt), then cache the server's new chain and reopen the session.
+    await dbContext.storeUnlockKeyDerivationParams({ salt: next.salt, encryptionType: next.encryptionType, encryptionSettings: next.encryptionSettings });
+    await NativeVaultManager.resolveVaultKey(next.unlockKeyBase64);
+  }, [dbContext, authContext, webApi]);
 
   /**
    * Hook to execute a vault mutation which uploads a new encrypted vault to the server.
@@ -322,69 +185,28 @@ export function useVaultMutate() : {
   }, [executeMutateOperation, t]);
 
   /**
-   * Hook to execute a password change which uploads a new encrypted vault to the server
-   * with updated SRP verifier and salt.
-   *
-   * Unlike regular mutations, password change REQUIRES a pre-sync to ensure we're
-   * re-encrypting the latest vault. Cannot proceed offline.
+   * Change the master password, then sync in the background.
+   * @throws {IncorrectPasswordError} when the current password does not open the Account Key.
+   * @throws {PasswordChangedElsewhereError} when the password was already changed on another device.
+   * @throws {ApiRequestError} when the server rejects the change.
    */
-  const executeVaultPasswordChange = useCallback(async (
-    currentPasswordHashBase64: string,
-    newPasswordPlainText: string,
-    options: VaultMutationOptions = {}
-  ) => {
+  const executeVaultPasswordChange = useCallback(async (currentUnlockKeyBase64: string, newPasswordPlainText: string): Promise<void> => {
     try {
       setIsLoading(true);
-      setSyncStatus(t('vault.checkingForVaultUpdates'));
-
-      // Password change requires online - must sync first to get latest vault before re-encryption
-      const syncSuccess = await new Promise<boolean>((resolve) => {
-        syncVault({
-          onStatus: (message) => setSyncStatus(message),
-          onSuccess: () => resolve(true),
-          onError: (error) => {
-            Toast.show({
-              type: 'error',
-              text1: t('common.error'),
-              text2: error,
-              position: 'bottom'
-            });
-            options.onError?.(new Error(error));
-            resolve(false);
-          },
-          onOffline: () => {
-            Toast.show({
-              type: 'error',
-              text1: t('common.error'),
-              text2: t('vault.errors.passwordChangeRequiresOnline'),
-              position: 'bottom'
-            });
-            options.onError?.(new Error(t('vault.errors.passwordChangeRequiresOnline')));
-            resolve(false);
-          }
-        });
-      });
-
-      if (!syncSuccess) {
-        return;
+      setSyncStatus(t('settings.securitySettings.changePassword.initiatingChange'));
+      // Hold the vault sync so no sync compares the server's new salt with the stored old one in between.
+      await NativeVaultManager.setVaultSyncHold(VaultSyncHoldReason.PasswordChange);
+      try {
+        await executePasswordChangeOperation(currentUnlockKeyBase64, newPasswordPlainText);
+      } finally {
+        await NativeVaultManager.setVaultSyncHold(null);
       }
-
-      // Now execute the password change operation
-      await executePasswordChangeOperation(currentPasswordHashBase64, newPasswordPlainText, options);
-    } catch (error) {
-      console.error('Error during password change:', error);
-      Toast.show({
-        type: 'error',
-        text1: t('common.error'),
-        text2: t('common.errors.unknownError'),
-        position: 'bottom'
-      });
-      options.onError?.(error instanceof Error ? error : new Error(t('common.errors.unknownError')));
     } finally {
       setIsLoading(false);
       setSyncStatus('');
     }
-  }, [syncVault, executePasswordChangeOperation, t]);
+    void triggerBackgroundSync({});
+  }, [executePasswordChangeOperation, triggerBackgroundSync, t]);
 
   return {
     executeVaultMutation,

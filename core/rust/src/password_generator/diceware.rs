@@ -1,18 +1,17 @@
 //! Diceware passphrase generator.
 //!
-//! Ported from the MIT-licensed `SpamOK.PasswordGenerator` Diceware algorithm. Picks
-//! `word_count` words uniformly at random from the selected language wordlist, applies
-//! capitalization, joins them with a separator, and optionally adds a random alphanumeric
-//! "salt" character.
+//! Ported from the MIT-licensed `SpamOK.PasswordGenerator` Diceware algorithm. Picks `word_count` words uniformly at random
+//! from the selected language wordlist, applies capitalization, joins them with a separator, and optionally adds a random
+//! alphanumeric "salt" character.
 
-use rand::RngCore;
+use rand::Rng;
 
 use super::{unbiased_index, wordlists, Capitalization, PasswordSettings, Salt, Separator};
 
 const ALPHANUMERIC: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 /// Generate a Diceware passphrase based on the supplied settings.
-pub fn generate<R: RngCore + ?Sized>(settings: &PasswordSettings, rng: &mut R) -> String {
+pub fn generate<R: Rng + ?Sized>(settings: &PasswordSettings, rng: &mut R) -> String {
     let words = wordlists::list(&settings.language);
 
     let chosen: Vec<String> = (0..settings.word_count)
@@ -42,11 +41,7 @@ fn separator_char(separator: Separator) -> Option<char> {
 }
 
 /// Apply the configured capitalization to a single word.
-fn capitalize_word<R: RngCore + ?Sized>(
-    word: &str,
-    capitalization: Capitalization,
-    rng: &mut R,
-) -> String {
+fn capitalize_word<R: Rng + ?Sized>(word: &str, capitalization: Capitalization, rng: &mut R) -> String {
     match capitalization {
         Capitalization::None => word.to_string(),
         Capitalization::Lowercase => word.to_lowercase(),
@@ -54,9 +49,7 @@ fn capitalize_word<R: RngCore + ?Sized>(
         Capitalization::TitleCase => {
             let mut chars = word.chars();
             match chars.next() {
-                Some(first) => {
-                    first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
-                }
+                Some(first) => first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
                 None => String::new(),
             }
         }
@@ -74,23 +67,22 @@ fn capitalize_word<R: RngCore + ?Sized>(
 }
 
 /// Add a random alphanumeric salt character to the passphrase based on the salt option.
-fn add_salt<R: RngCore + ?Sized>(passphrase: String, salt: Salt, rng: &mut R) -> String {
-    if matches!(salt, Salt::None) {
-        return passphrase;
-    }
-
-    let salt_chars: Vec<char> = ALPHANUMERIC.chars().collect();
-    let salt_char = salt_chars[unbiased_index(rng, salt_chars.len())];
-
+fn add_salt<R: Rng + ?Sized>(passphrase: String, salt: Salt, rng: &mut R) -> String {
     match salt {
-        Salt::Prefix => format!("{}{}", salt_char, passphrase),
-        Salt::Suffix => format!("{}{}", passphrase, salt_char),
+        Salt::None => passphrase,
+        Salt::Prefix => format!("{}{}", random_alphanumeric(rng), passphrase),
+        Salt::Suffix => format!("{}{}", passphrase, random_alphanumeric(rng)),
         Salt::Sprinkle => {
+            let salt_char = random_alphanumeric(rng);
             let mut chars: Vec<char> = passphrase.chars().collect();
             let index = unbiased_index(rng, chars.len() + 1);
             chars.insert(index, salt_char);
             chars.into_iter().collect()
         }
-        Salt::None => passphrase,
     }
+}
+
+/// Pick one random alphanumeric character.
+fn random_alphanumeric<R: Rng + ?Sized>(rng: &mut R) -> char {
+    char::from(ALPHANUMERIC.as_bytes()[unbiased_index(rng, ALPHANUMERIC.len())])
 }

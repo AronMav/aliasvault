@@ -10,14 +10,14 @@ namespace AliasVault.Api;
 using AliasVault.Shared.Models.Configuration;
 
 /// <summary>
-/// Configuration class for the Client project with values loaded from appsettings.json.
+/// Configuration class for the API project with values loaded from appsettings.json.
 /// </summary>
 public class Config : SharedConfig
 {
     /// <summary>
     /// Gets or sets a value indicating whether public registration is enabled.
     /// </summary>
-    public bool PublicRegistrationEnabled { get; set; }
+    public virtual bool PublicRegistrationEnabled { get; set; }
 
     /// <summary>
     /// Gets or sets the list of private email domains that are available.

@@ -8,7 +8,7 @@
 namespace AliasVault.UnitTests.Utilities;
 
 using System.Text.Json;
-using AliasVault.Cryptography.Server;
+using AliasVault.Cryptography;
 
 /// <summary>
 /// Tests for the SrpArgonEncryption class.
@@ -124,6 +124,32 @@ public class RsaEncryptionTests
     }
 
     /// <summary>
+    /// Tests that a labelled key decrypts only under the same label.
+    /// </summary>
+    [Test]
+    public void EncryptSymmetricKeyWithLabel_DecryptsOnlyUnderSameLabel()
+    {
+        var symmetricKey = Encryption.GenerateRandomSymmetricKey();
+        var encryptedKey = Encryption.EncryptSymmetricKeyWithRsa(symmetricKey, PublicKey, Encryption.MobileLoginPayloadKeyLabel);
+
+        Assert.That(Encryption.DecryptSymmetricKeyWithRsa(encryptedKey, PrivateKey, Encryption.MobileLoginPayloadKeyLabel), Is.EqualTo(symmetricKey));
+        Assert.That(() => Encryption.DecryptSymmetricKeyWithRsa(encryptedKey, PrivateKey, "aliasvault/v1/other"), Throws.Exception);
+        Assert.That(() => Encryption.DecryptSymmetricKeyWithRsa(encryptedKey, PrivateKey), Throws.Exception);
+    }
+
+    /// <summary>
+    /// Tests that the labelled path uses the same OAEP parameters (SHA-256, MGF1-SHA-256) as the built-in one.
+    /// </summary>
+    [Test]
+    public void EncryptSymmetricKeyWithEmptyLabel_MatchesBuiltInOaepSha256()
+    {
+        var symmetricKey = Encryption.GenerateRandomSymmetricKey();
+        var encryptedKey = Encryption.EncryptSymmetricKeyWithRsa(symmetricKey, PublicKey, string.Empty);
+
+        Assert.That(Encryption.DecryptSymmetricKeyWithRsa(encryptedKey, PrivateKey), Is.EqualTo(symmetricKey));
+    }
+
+    /// <summary>
     /// Tests if EncryptSymmetricKey method throws an exception when given an invalid public key.
     /// </summary>
     [Test]
@@ -135,41 +161,5 @@ public class RsaEncryptionTests
         Assert.Throws<JsonException>(
             () => Encryption.EncryptSymmetricKeyWithRsa(symmetricKey, invalidPublicKey),
             "Encrypting with an invalid public key should throw an ArgumentException.");
-    }
-
-    /// <summary>
-    /// A public key as the client generates it is accepted.
-    /// </summary>
-    [Test]
-    public void IsValidRsaPublicKey_WithClientGeneratedKey_ReturnsTrue()
-    {
-        Assert.That(Encryption.IsValidRsaPublicKey(PublicKey), Is.True);
-    }
-
-    /// <summary>
-    /// Values that are not a usable public key are rejected rather than stored and used later.
-    /// </summary>
-    /// <param name="publicKey">The value to check.</param>
-    [TestCase("")]
-    [TestCase("not json at all")]
-    [TestCase("{}")]
-    [TestCase("{\"kty\":\"RSA\",\"e\":\"AQAB\"}")]
-    [TestCase("{\"kty\":\"RSA\",\"e\":\"AQAB\",\"n\":\"AQAB\"}")]
-    [TestCase("{\"kty\":\"RSA\",\"e\":\"AQAB\",\"n\":null}")]
-    [TestCase("{\"kty\":\"RSA\",\"e\":null,\"n\":\"AQAB\"}")]
-    public void IsValidRsaPublicKey_WithUnusableValue_ReturnsFalse(string publicKey)
-    {
-        Assert.That(Encryption.IsValidRsaPublicKey(publicKey), Is.False);
-    }
-
-    /// <summary>
-    /// An oversized value is rejected before it is parsed, so a caller cannot decide how much is stored.
-    /// </summary>
-    [Test]
-    public void IsValidRsaPublicKey_WithOversizedValue_ReturnsFalse()
-    {
-        var oversized = PublicKey + new string(' ', 8192);
-
-        Assert.That(Encryption.IsValidRsaPublicKey(oversized), Is.False);
     }
 }

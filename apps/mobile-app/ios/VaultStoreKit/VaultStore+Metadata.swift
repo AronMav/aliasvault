@@ -56,6 +56,11 @@ extension VaultStore {
         }
     }
 
+    /// The id of the user's personal manifest as the last sync recorded it, or nil before the first pull.
+    public func getPersonalManifestId() -> String? {
+        return VaultSyncEngine.persistedState(forKey: VaultSyncEngine.personalManifestIdStateKey, in: userDefaults) as? String
+    }
+
     // MARK: - Username Storage
 
     /// Store the username
@@ -107,22 +112,64 @@ extension VaultStore {
         userDefaults.synchronize()
     }
 
-    /// Check if the stored server version is greater than or equal to the specified version
-    /// - Parameter targetVersion: The version to compare against (e.g., "0.25.0")
-    /// - Returns: true if stored server version >= targetVersion, false if server version not available or less than target
-    public func isServerVersionGreaterThanOrEqualTo(_ targetVersion: String) -> Bool {
-        guard let serverVersion = getServerVersion() else {
-            return false // No server version stored yet
-        }
-        return VersionComparison.isGreaterThanOrEqualTo(serverVersion, targetVersion)
+    // MARK: - Capabilities Storage
+
+    /// Set the capabilities the server resolved for this account, as a JSON object
+    public func setCapabilities(_ json: String) {
+        userDefaults.set(json, forKey: VaultConstants.capabilitiesKey)
+    }
+
+    /// Get the capabilities the server resolved for this account, as a JSON object
+    public func getCapabilities() -> String? {
+        return userDefaults.string(forKey: VaultConstants.capabilitiesKey)
     }
 
     // MARK: - Sync State Storage (isDirty, mutationSequence, isSyncing)
 
-    /// Set the dirty flag indicating local changes need to be synced
+    /// Set the dirty flag indicating local changes need to be synced. Clearing it forgets the pending scopes
+    /// with it, since a clean vault has nothing left to push.
     public func setIsDirty(_ isDirty: Bool) {
         userDefaults.set(isDirty, forKey: VaultConstants.isDirtyKey)
+        if !isDirty {
+            userDefaults.removeObject(forKey: VaultConstants.dirtyScopesKey)
+        }
         userDefaults.synchronize()
+    }
+
+    /// Mark the vault dirty and record what the mutation touched, so the next sync can push only that scope.
+    /// - Parameter scope: The mutation scope, defaulting to a full-manifest change
+    public func markDirty(scope: String = VaultMutationScope.main) {
+        setIsDirty(true)
+        addDirtyScope(scope)
+    }
+
+    /// The mutation scopes that have pending changes.
+    public func getDirtyScopes() -> [String] {
+        return userDefaults.stringArray(forKey: VaultConstants.dirtyScopesKey) ?? []
+    }
+
+    /// Record one scope as having pending changes.
+    /// - Parameter scope: The mutation scope; an unknown one counts as a full-manifest change
+    public func addDirtyScope(_ scope: String) {
+        let known = VaultMutationScope.known(scope)
+        var scopes = getDirtyScopes()
+        guard !scopes.contains(known) else {
+            return
+        }
+        scopes.append(known)
+        userDefaults.set(scopes, forKey: VaultConstants.dirtyScopesKey)
+        userDefaults.synchronize()
+    }
+
+    /// The random id of this install, created on first use and shared by the app and the autofill extension.
+    /// Per-device vault rows (item usage statistics) are keyed by it.
+    public func getOrCreateDeviceId() -> String {
+        if let deviceId = userDefaults.string(forKey: VaultConstants.deviceIdKey), !deviceId.isEmpty {
+            return deviceId
+        }
+        let deviceId = UUID().uuidString.lowercased()
+        userDefaults.set(deviceId, forKey: VaultConstants.deviceIdKey)
+        return deviceId
     }
 
     /// Get the dirty flag
@@ -164,6 +211,7 @@ extension VaultStore {
     public func getSyncState() -> SyncStateResult {
         return SyncStateResult(
             isDirty: getIsDirty(),
+            dirtyScopes: getDirtyScopes(),
             mutationSequence: getMutationSequence(),
             serverRevision: getCurrentVaultRevisionNumber(),
             isSyncing: getIsSyncing()
@@ -180,12 +228,14 @@ extension VaultStore {
     ///   - markDirty: If true, marks vault as dirty and increments mutation sequence
     ///   - serverRevision: Optional server revision to set
     ///   - expectedMutationSeq: If provided, only store if current sequence matches
+    ///   - scope: What the mutation touched, when it marks the vault dirty
     /// - Returns: (success, mutationSequence) - success=false if expectedMutationSeq didn't match
     public func storeEncryptedVaultWithSyncState(
         encryptedVault: String,
         markDirty: Bool = false,
         serverRevision: Int? = nil,
-        expectedMutationSeq: Int? = nil
+        expectedMutationSeq: Int? = nil,
+        scope: String = VaultMutationScope.main
     ) throws -> (success: Bool, mutationSequence: Int) {
         var mutationSequence = getMutationSequence()
 
@@ -203,7 +253,7 @@ extension VaultStore {
 
         if markDirty {
             setMutationSequence(mutationSequence)
-            setIsDirty(true)
+            self.markDirty(scope: scope)
         }
 
         if let revision = serverRevision {
@@ -239,6 +289,7 @@ extension VaultStore {
     /// Clear all sync state (used on logout)
     public func clearSyncState() {
         userDefaults.removeObject(forKey: VaultConstants.isDirtyKey)
+        userDefaults.removeObject(forKey: VaultConstants.dirtyScopesKey)
         userDefaults.removeObject(forKey: VaultConstants.mutationSequenceKey)
         userDefaults.removeObject(forKey: VaultConstants.isSyncingKey)
         userDefaults.synchronize()

@@ -1,0 +1,58 @@
+#!/bin/sh
+# Set the default values
+DEFAULT_SUPPORT_EMAIL=""
+DEFAULT_PUBLIC_REGISTRATION_ENABLED="true"
+
+# Use the provided environment variables if they exist, otherwise use defaults
+SUPPORT_EMAIL=${SUPPORT_EMAIL:-$DEFAULT_SUPPORT_EMAIL}
+PUBLIC_REGISTRATION_ENABLED=${PUBLIC_REGISTRATION_ENABLED:-$DEFAULT_PUBLIC_REGISTRATION_ENABLED}
+
+# Create SSL directory if it doesn't exist
+mkdir -p /etc/nginx/ssl
+
+# Generate self-signed SSL certificate if not exists
+if [ ! -f /etc/nginx/ssl/nginx.crt ] || [ ! -f /etc/nginx/ssl/nginx.key ]; then
+    echo "Generating new SSL certificate (10 years validity)..."
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout /etc/nginx/ssl/nginx.key \
+        -out /etc/nginx/ssl/nginx.crt \
+        -subj "/C=US/ST=State/L=City/O=Organization/CN=localhost"
+
+    # Set proper permissions
+    chmod 644 /etc/nginx/ssl/nginx.crt
+    chmod 600 /etc/nginx/ssl/nginx.key
+fi
+
+# Remove the default API URL as it's only used for local dev/debugging.
+# The app will use a relative URL instead (base url + "/api/" which is the default for the Docker setup).
+sed -i "s|\"ApiUrl\": \"http://localhost:5100\",||g" /usr/share/nginx/html/appsettings.json
+
+# Update support email in appsettings.json
+if [ ! -z "$SUPPORT_EMAIL" ]; then
+    sed -i "s|\"SupportEmail\": \".*\"|\"SupportEmail\": \"$SUPPORT_EMAIL\"|g" /usr/share/nginx/html/appsettings.json
+else
+    sed -i "s|\"SupportEmail\": \".*\"|\"SupportEmail\": \"\"|g" /usr/share/nginx/html/appsettings.json
+fi
+
+# Update public registration enabled in appsettings.json
+sed -i "s|\"PublicRegistrationEnabled\": \".*\"|\"PublicRegistrationEnabled\": \"$PUBLIC_REGISTRATION_ENABLED\"|g" /usr/share/nginx/html/appsettings.json
+
+# Update deployment mode (install / build / aio) so the footer can show how this
+# instance was deployed. Comes from .env via install.sh; defaults to empty.
+DEPLOYMENT_MODE=${DEPLOYMENT_MODE:-}
+if grep -q "DeploymentMode" /usr/share/nginx/html/appsettings.json; then
+    sed -i "s|\"DeploymentMode\": \".*\"|\"DeploymentMode\": \"$DEPLOYMENT_MODE\"|g" /usr/share/nginx/html/appsettings.json
+else
+    sed -i "s|\"PublicRegistrationEnabled\": \"$PUBLIC_REGISTRATION_ENABLED\"|\"PublicRegistrationEnabled\": \"$PUBLIC_REGISTRATION_ENABLED\",\n    \"DeploymentMode\": \"$DEPLOYMENT_MODE\"|g" /usr/share/nginx/html/appsettings.json
+fi
+
+# Update the terms URL new users must accept at registration. Empty (the default) skips the terms step.
+TERMS_URL=${TERMS_URL:-}
+if grep -q "TermsUrl" /usr/share/nginx/html/appsettings.json; then
+    sed -i "s|\"TermsUrl\": \".*\"|\"TermsUrl\": \"$TERMS_URL\"|g" /usr/share/nginx/html/appsettings.json
+else
+    sed -i "s|\"DeploymentMode\": \"$DEPLOYMENT_MODE\"|\"DeploymentMode\": \"$DEPLOYMENT_MODE\",\n    \"TermsUrl\": \"$TERMS_URL\"|g" /usr/share/nginx/html/appsettings.json
+fi
+
+# Start the application
+nginx -g "daemon off;"

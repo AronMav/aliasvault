@@ -25,17 +25,21 @@ import kotlinx.coroutines.withContext
 import net.aliasvault.app.qrscanner.QRScannerActivity
 import net.aliasvault.app.vaultstore.AppError
 import net.aliasvault.app.vaultstore.VaultStore
+import net.aliasvault.app.vaultstore.interfaces.CryptoOperationCallback
 import net.aliasvault.app.vaultstore.keystoreprovider.AndroidKeystoreProvider
+import net.aliasvault.app.vaultstore.models.VaultMutationScope
 import net.aliasvault.app.vaultstore.storageprovider.AndroidStorageProvider
 import net.aliasvault.app.webapi.WebApiService
 import org.json.JSONArray
 import org.json.JSONObject
+import uniffi.aliasvault_core.ItemUsageAction
 
 /**
  * The native vault manager that manages the vault store and all input/output operations on it.
  * This class implements the NativeVaultManagerSpec React Native interface and then calls the
  * VaultStore class to perform the actual operations.
  *
+ * Other platform implementations: NativeVaultManager.swift (iOS), spec in specs/NativeVaultManager.ts.
  * @param reactContext The React context
  */
 @Suppress("TooManyFunctions") // Required by React Native TurboModule interface
@@ -99,6 +103,12 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
         var passwordUnlockPromise: Promise? = null
 
         /**
+         * Whether the pending password unlock resolves with the unlock key instead of true.
+         */
+        @Volatile
+        var passwordUnlockReturnsKey: Boolean = false
+
+        /**
          * Static holder for authentication context (title, subtitle) to support password fallback
          * when PIN is cancelled in authenticateUser flow.
          */
@@ -125,8 +135,7 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
     }
 
     /**
-     * Clear session data only (for forced logout).
-     * Preserves vault data on disk for recovery on next login.
+     * Clear the vault for a forced logout, keeping only the username for the login prefill.
      * @param promise The promise to resolve
      */
     @ReactMethod
@@ -177,7 +186,7 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
     @ReactMethod
     override fun getVaultMetadata(promise: Promise) {
         try {
-            val metadata = vaultStore.getMetadata()
+            val metadata = vaultStore.getVaultMetadata()
             promise.resolve(metadata)
         } catch (e: Exception) {
             Log.e(TAG, "Error getting vault metadata", e)
@@ -240,35 +249,35 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
     }
 
     /**
-     * Store the encryption key in memory only (no keystore persistence).
-     * Use this to test if a password-derived key is valid before persisting.
-     * @param base64EncryptionKey The encryption key as a base64 encoded string
+     * Open a session in memory with the unlock key or the Account Key, without keystore persistence.
+     * Use this to test if a key is valid before persisting.
+     * @param base64Key The unlock key or Account Key as a base64 encoded string
      * @param promise The promise to resolve
      */
     @ReactMethod
-    override fun storeEncryptionKeyInMemory(base64EncryptionKey: String, promise: Promise) {
+    override fun storeAccountKeyInMemory(base64Key: String, promise: Promise) {
         try {
-            vaultStore.storeEncryptionKeyInMemory(base64EncryptionKey)
+            vaultStore.storeAccountKeyInMemory(base64Key)
             promise.resolve(null)
         } catch (e: Exception) {
-            Log.e(TAG, "Error storing encryption key in memory", e)
-            promise.reject("ERR_STORE_KEY_MEMORY", "Failed to store encryption key in memory: ${e.message}", e)
+            Log.e(TAG, "Error storing Account Key in memory", e)
+            promise.reject("ERR_STORE_KEY_MEMORY", "Failed to store Account Key in memory: ${e.message}", e)
         }
     }
 
     /**
-     * Store the encryption key in memory AND persist to keystore (may trigger biometric prompt).
-     * @param base64EncryptionKey The encryption key as a base64 encoded string
+     * Open a session with the unlock key or the Account Key AND persist the Account Key to keystore (may trigger biometric prompt).
+     * @param base64Key The unlock key or Account Key as a base64 encoded string
      * @param promise The promise to resolve
      */
     @ReactMethod
-    override fun storeEncryptionKey(base64EncryptionKey: String, promise: Promise) {
+    override fun storeAccountKey(base64Key: String, promise: Promise) {
         try {
-            vaultStore.storeEncryptionKey(base64EncryptionKey)
+            vaultStore.storeAccountKey(base64Key)
             promise.resolve(null)
         } catch (e: Exception) {
-            Log.e(TAG, "Error storing encryption key", e)
-            promise.reject("ERR_STORE_KEY", "Failed to store encryption key: ${e.message}", e)
+            Log.e(TAG, "Error storing Account Key", e)
+            promise.reject("ERR_STORE_KEY", "Failed to store Account Key: ${e.message}", e)
         }
     }
 
@@ -289,9 +298,9 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
      * @param promise The promise to resolve
      */
     @ReactMethod
-    override fun storeEncryptionKeyDerivationParams(keyDerivationParams: String, promise: Promise) {
+    override fun storeUnlockKeyDerivationParams(keyDerivationParams: String, promise: Promise) {
         try {
-            vaultStore.storeEncryptionKeyDerivationParams(keyDerivationParams)
+            vaultStore.storeUnlockKeyDerivationParams(keyDerivationParams)
             promise.resolve(null)
         } catch (e: Exception) {
             Log.e(TAG, "Error storing key derivation params", e)
@@ -308,9 +317,9 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
      * @param promise The promise to resolve
      */
     @ReactMethod
-    override fun getEncryptionKeyDerivationParams(promise: Promise) {
+    override fun getUnlockKeyDerivationParams(promise: Promise) {
         try {
-            val params = vaultStore.getEncryptionKeyDerivationParams()
+            val params = vaultStore.getUnlockKeyDerivationParams()
             promise.resolve(params)
         } catch (e: Exception) {
             Log.e(TAG, "Error getting key derivation params", e)
@@ -323,14 +332,67 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
     }
 
     /**
-     * Encrypt the decryption key for mobile login.
+     * The id of the user's personal manifest as the last sync recorded it, or null before the first pull.
+     * @param promise The promise to resolve
+     */
+    @ReactMethod
+    override fun getPersonalManifestId(promise: Promise) {
+        promise.resolve(vaultStore.database.getPersonalManifestId())
+    }
+
+    /**
+     * Decrypt an invitation's vault name with the session account private key; null when the session holds none that opens it.
+     * @param encryptedName The base64 RSA-OAEP ciphertext of the name
+     * @param promise The promise to resolve
+     */
+    @ReactMethod
+    override fun decryptInvitationName(encryptedName: String, promise: Promise) {
+        promise.resolve(vaultStore.decryptWithAccountPrivateKey(encryptedName))
+    }
+
+    /**
+     * Resolve and store the vault key right after login from the unlock key (see VaultStore.resolveVaultKey).
+     * Resolves with the vault key; rejects with the native error code when the chain does not open or the session is gone.
+     * @param base64DerivedKey The password-derived key as base64
+     * @param promise The promise to resolve
+     */
+    @ReactMethod
+    override fun resolveVaultKey(base64DerivedKey: String, promise: Promise) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val key = vaultStore.resolveVaultKey(webApiService, base64DerivedKey)
+                withContext(Dispatchers.Main) { promise.resolve(key) }
+            } catch (e: AppError) {
+                withContext(Dispatchers.Main) { promise.reject(e.code, e.message, e) }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) { promise.reject("E-001", "Failed to resolve the vault key: ${e.message}", e) }
+            }
+        }
+    }
+
+    /**
+     * Get the stored account-key chain JSON, or null for a legacy account.
+     * @param promise The promise to resolve
+     */
+    @ReactMethod
+    override fun getAccountKeyChain(promise: Promise) {
+        try {
+            promise.resolve(vaultStore.getAccountKeyChain())
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting account key chain", e)
+            promise.reject("ERR_GET_ACCOUNT_KEY_CHAIN", "Failed to get account key chain: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Encrypt the Account Key for mobile login.
      * @param publicKeyJWK The public key in JWK format
      * @param promise The promise to resolve
      */
     @ReactMethod
-    override fun encryptDecryptionKeyForMobileLogin(publicKeyJWK: String, promise: Promise) {
+    override fun encryptAccountKeyForMobileLogin(publicKeyJWK: String, promise: Promise) {
         try {
-            val encryptedKey = vaultStore.encryptDecryptionKeyForMobileLogin(publicKeyJWK)
+            val encryptedKey = vaultStore.encryptAccountKeyForMobileLogin(publicKeyJWK)
             promise.resolve(encryptedKey)
         } catch (e: Exception) {
             Log.e(TAG, "Error encrypting key for mobile login", e)
@@ -354,21 +416,6 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
         } catch (e: Exception) {
             Log.e(TAG, "Error checking encrypted database", e)
             promise.reject("ERR_CHECK_DB", "Failed to check encrypted database: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Get the encrypted database.
-     * @param promise The promise to resolve
-     */
-    @ReactMethod
-    override fun getEncryptedDatabase(promise: Promise) {
-        try {
-            val encryptedDb = vaultStore.getEncryptedDatabase()
-            promise.resolve(encryptedDb)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error getting encrypted database", e)
-            promise.reject("ERR_GET_DB", "Failed to get encrypted database: ${e.message}", e)
         }
     }
 
@@ -405,9 +452,10 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
                         is Float -> rowMap.putDouble(key, value.toDouble())
                         is Double -> rowMap.putDouble(key, value)
                         is String -> rowMap.putString(key, value)
+                        // Tagged so the JS client can decode BLOB columns back to bytes.
                         is ByteArray -> rowMap.putString(
                             key,
-                            android.util.Base64.encodeToString(value, android.util.Base64.NO_WRAP),
+                            "av-blob-base64:" + android.util.Base64.encodeToString(value, android.util.Base64.NO_WRAP),
                         )
                         else -> rowMap.putString(key, value.toString())
                     }
@@ -485,9 +533,9 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
      * @param promise The promise to resolve
      */
     @ReactMethod
-    override fun commitTransaction(promise: Promise) {
+    override fun commitTransaction(scope: String, promise: Promise) {
         try {
-            vaultStore.commitTransaction()
+            vaultStore.commitTransaction(VaultMutationScope.known(scope))
             promise.resolve(null)
         } catch (e: Exception) {
             Log.e(TAG, "Error committing transaction", e)
@@ -524,9 +572,9 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
      * @param promise The promise to resolve
      */
     @ReactMethod
-    override fun persistAndMarkDirty(promise: Promise) {
+    override fun persistAndMarkDirty(scope: String, promise: Promise) {
         try {
-            vaultStore.persistAndMarkDirty()
+            vaultStore.persistAndMarkDirty(VaultMutationScope.known(scope))
             promise.resolve(null)
         } catch (e: Exception) {
             Log.e(TAG, "Error persisting and marking dirty", e)
@@ -808,7 +856,7 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
      * Derive a key from a password using Argon2Id.
      * @param password The password to derive from
      * @param salt The salt to use
-     * @param encryptionType The type of encryption (should be "Argon2Id")
+     * @param encryptionType The type of encryption ("Argon2Id" or "Argon2IdHkdf")
      * @param encryptionSettings JSON string with encryption parameters
      * @param promise The promise to resolve
      */
@@ -930,23 +978,6 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
         } catch (e: Exception) {
             Log.e(TAG, "Error setting autofill copy-TOTP-on-fill setting", e)
             promise.reject("ERR_SET_AUTOFILL_SETTING", "Failed to set autofill copy-TOTP-on-fill setting: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Generate a TOTP code from a Base32-encoded secret.
-     * Delegates to the shared Kotlin TotpGenerator so the JS layer can reuse
-     * the same RFC 6238 implementation as the autofill service. Returns null
-     * for invalid secrets.
-     */
-    @ReactMethod
-    override fun generateTotpCode(secret: String, promise: Promise) {
-        try {
-            val code = net.aliasvault.app.utils.TotpGenerator.generateCode(secret)
-            promise.resolve(code)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error generating TOTP code", e)
-            promise.reject("ERR_TOTP_GENERATE", "Failed to generate TOTP code: ${e.message}", e)
         }
     }
 
@@ -1100,6 +1131,7 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
      * @param promise The promise to resolve.
      */
     @ReactMethod
+    @Suppress("LongParameterList") // Signature is dictated by the TurboModule spec
     override fun executeWebApiRequest(
         method: String,
         endpoint: String,
@@ -1137,6 +1169,23 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
         } catch (e: Exception) {
             Log.e(TAG, "Error executing WebAPI request", e)
             promise.reject("ERR_WEB_API_REQUEST", "Failed to execute WebAPI request: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Record a copied value in its item's usage statistics (this device's row); the next sync pushes it.
+     * @param itemId The item the value belongs to
+     * @param manifestId The manifest the item belongs to
+     * @param promise The promise to resolve
+     */
+    @ReactMethod
+    override fun recordItemCopy(itemId: String, manifestId: String, promise: Promise) {
+        try {
+            vaultStore.recordItemUsage(itemId, manifestId, ItemUsageAction.COPY)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error recording item usage", e)
+            promise.reject("ERR_RECORD_ITEM_USAGE", "Failed to record item usage: ${e.message}", e)
         }
     }
 
@@ -1237,22 +1286,6 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
     // MARK: - Server Version Management
 
     /**
-     * Check if the stored server version is greater than or equal to the specified version.
-     * @param targetVersion The version to compare against (e.g., "0.25.0")
-     * @param promise The promise to resolve.
-     */
-    @ReactMethod
-    override fun isServerVersionGreaterThanOrEqualTo(targetVersion: String, promise: Promise) {
-        try {
-            val isGreaterOrEqual = vaultStore.metadata.isServerVersionGreaterThanOrEqualTo(targetVersion)
-            promise.resolve(isGreaterOrEqual)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error comparing server version", e)
-            promise.reject("ERR_COMPARE_SERVER_VERSION", "Failed to compare server version: ${e.message}", e)
-        }
-    }
-
-    /**
      * Get the stored server version, or null if none has been stored yet.
      * @param promise The promise to resolve.
      */
@@ -1263,6 +1296,20 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
         } catch (e: Exception) {
             Log.e(TAG, "Error getting server version", e)
             promise.reject("ERR_GET_SERVER_VERSION", "Failed to get server version: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Get the capabilities the server resolved for this account as a JSON object, or null if none were stored yet.
+     * @param promise The promise to resolve.
+     */
+    @ReactMethod
+    override fun getCapabilities(promise: Promise) {
+        try {
+            promise.resolve(vaultStore.metadata.getCapabilities())
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting capabilities", e)
+            promise.reject("ERR_GET_CAPABILITIES", "Failed to get capabilities: ${e.message}", e)
         }
     }
 
@@ -1281,6 +1328,22 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
         } catch (e: Exception) {
             Log.e(TAG, "Error setting offline mode", e)
             promise.reject("ERR_SET_OFFLINE_MODE", "Failed to set offline mode: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Hold vault syncing while an operation runs that a sync must not race, or release it with null.
+     * @param reason The operation taking the hold, or null to release it.
+     * @param promise The promise to resolve.
+     */
+    @ReactMethod
+    override fun setVaultSyncHold(reason: String?, promise: Promise) {
+        try {
+            vaultStore.setVaultSyncHold(reason)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting the vault sync hold", e)
+            promise.reject("ERR_SET_VAULT_SYNC_HOLD", "Failed to set the vault sync hold: ${e.message}", e)
         }
     }
 
@@ -1317,7 +1380,7 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
                     putBoolean("hasDirtyChanges", versionCheck.syncState.isDirty)
                     putBoolean("isOffline", false)
                     putBoolean("requiresLogout", false)
-                    putNull("errorKey")
+                    putNull("errorCode")
                 }
                 withContext(Dispatchers.Main) {
                     promise.resolve(resultMap)
@@ -1326,7 +1389,6 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
                 withContext(Dispatchers.Main) {
                     // Check for specific error types that require logout
                     val requiresLogout = e.isAuthenticationError || e.isVersionError
-                    val errorKey = e.translationKey
                     val isOffline = e.isNetworkError
 
                     if (isOffline) {
@@ -1337,7 +1399,7 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
                             putBoolean("hasDirtyChanges", syncState.isDirty)
                             putBoolean("isOffline", true)
                             putBoolean("requiresLogout", false)
-                            putNull("errorKey")
+                            putNull("errorCode")
                         }
                         promise.resolve(resultMap)
                     } else {
@@ -1347,11 +1409,7 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
                             putBoolean("hasDirtyChanges", false)
                             putBoolean("isOffline", false)
                             putBoolean("requiresLogout", requiresLogout)
-                            if (errorKey != null) {
-                                putString("errorKey", errorKey)
-                            } else {
-                                putNull("errorKey")
-                            }
+                            putString("errorCode", e.code)
                         }
                         promise.resolve(resultMap)
                     }
@@ -1365,7 +1423,7 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
                         putBoolean("hasDirtyChanges", false)
                         putBoolean("isOffline", false)
                         putBoolean("requiresLogout", false)
-                        putNull("errorKey")
+                        putNull("errorCode")
                     }
                     promise.resolve(resultMap)
                 }
@@ -1392,6 +1450,11 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
                     } else {
                         putNull("error")
                     }
+                    if (result.errorMessage != null) {
+                        putString("errorMessage", result.errorMessage)
+                    } else {
+                        putNull("errorMessage")
+                    }
                 }
                 withContext(Dispatchers.Main) {
                     promise.resolve(resultMap)
@@ -1400,6 +1463,105 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
                 withContext(Dispatchers.Main) {
                     Log.e(TAG, "Error syncing vault with server", e)
                     promise.reject("VAULT_SYNC_ERROR", "Failed to sync vault: ${e.message}", e)
+                }
+            }
+        }
+    }
+
+    /**
+     * The logs of the recent sync engine runs as JSON text, newest first (developer tools).
+     * @param promise The promise to resolve
+     */
+    @ReactMethod
+    override fun getVaultSyncLogs(promise: Promise) {
+        promise.resolve(vaultStore.getVaultSyncLogs())
+    }
+
+    /**
+     * Classify the pending manifest migration (see VaultStore.getVaultMigrationStatus). Rejects with the native error code.
+     * @param promise The promise to resolve with the migration kind.
+     */
+    @ReactMethod
+    override fun getVaultMigrationStatus(promise: Promise) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val kind = vaultStore.getVaultMigrationStatus(webApiService)
+                withContext(Dispatchers.Main) {
+                    promise.resolve(kind)
+                }
+            } catch (e: AppError) {
+                withContext(Dispatchers.Main) {
+                    promise.reject(e.code, e.message, e)
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Log.e(TAG, "Error classifying the pending vault migration", e)
+                    promise.reject("VAULT_MIGRATION_STATUS_ERROR", "Failed to classify the pending vault migration: ${e.message}", e)
+                }
+            }
+        }
+    }
+
+    /**
+     * Run the pending manifest migration and push it (see VaultStore.migrateVaultManifest). Failures resolve with the error code.
+     * @param promise The promise to resolve with the migration result.
+     */
+    @ReactMethod
+    override fun migrateVaultManifest(promise: Promise) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val result = vaultStore.migrateVaultManifest(webApiService)
+                val resultMap = Arguments.createMap().apply {
+                    putBoolean("success", result.success)
+                    putBoolean("pushed", result.pushed)
+                    if (result.error != null) {
+                        putString("error", result.error)
+                    } else {
+                        putNull("error")
+                    }
+                    if (result.errorMessage != null) {
+                        putString("errorMessage", result.errorMessage)
+                    } else {
+                        putNull("errorMessage")
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    promise.resolve(resultMap)
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Log.e(TAG, "Error migrating the vault", e)
+                    promise.reject("VAULT_MIGRATION_ERROR", "Failed to migrate the vault: ${e.message}", e)
+                }
+            }
+        }
+    }
+
+    /**
+     * Run a sharing operation of the sync engine (see VaultStore.runSharingOperation). Failures resolve with the error code.
+     * @param operation The operation: `createSharedManifest` or `inviteToSharedManifest`.
+     * @param paramsJson What the operation acts on, as a JSON object.
+     * @param promise The promise to resolve with the operation result.
+     */
+    @ReactMethod
+    override fun runSharingOperation(operation: String, paramsJson: String, promise: Promise) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val result = vaultStore.runSharingOperation(operation, JSONObject(paramsJson), webApiService)
+                val resultMap = Arguments.createMap().apply {
+                    putBoolean("success", result.success)
+                    putBoolean("vaultUpgradeRequired", result.vaultUpgradeRequired)
+                    putString("apiErrorCode", result.apiErrorCode)
+                    putString("error", result.error)
+                    putString("errorMessage", result.errorMessage)
+                }
+                withContext(Dispatchers.Main) {
+                    promise.resolve(resultMap)
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Log.e(TAG, "Error running the sharing operation", e)
+                    promise.reject("VAULT_SHARING_ERROR", "Failed to run the sharing operation: ${e.message}", e)
                 }
             }
         }
@@ -1484,14 +1646,14 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
     /**
      * Show native PIN setup UI.
      * Launches the native PinUnlockActivity in setup mode.
-     * Gets the vault encryption key from memory (vault must be unlocked).
+     * Gets the Account Key from memory (vault must be unlocked): the PIN protects that
+     * key, never the vault key.
      * @param promise The promise to resolve when setup completes or rejects if cancelled/error.
      */
     @ReactMethod
     override fun showPinSetup(promise: Promise) {
-        // Get encryption key first
-        vaultStore.getEncryptionKey(object : net.aliasvault.app.vaultstore.interfaces.CryptoOperationCallback {
-            override fun onSuccess(encryptionKey: String) {
+        vaultStore.getAccountKey(object : net.aliasvault.app.vaultstore.interfaces.CryptoOperationCallback {
+            override fun onSuccess(accountKey: String) {
                 try {
                     val activity = currentActivity
                     if (activity == null) {
@@ -1505,7 +1667,7 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
                     // Launch PIN setup activity
                     val intent = android.content.Intent(activity, net.aliasvault.app.pinunlock.PinUnlockActivity::class.java)
                     intent.putExtra(net.aliasvault.app.pinunlock.PinUnlockActivity.EXTRA_MODE, net.aliasvault.app.pinunlock.PinUnlockActivity.MODE_SETUP)
-                    intent.putExtra(net.aliasvault.app.pinunlock.PinUnlockActivity.EXTRA_SETUP_ENCRYPTION_KEY, encryptionKey)
+                    intent.putExtra(net.aliasvault.app.pinunlock.PinUnlockActivity.EXTRA_SETUP_ACCOUNT_KEY, accountKey)
 
                     activity.startActivityForResult(intent, PIN_SETUP_REQUEST_CODE)
                 } catch (e: Exception) {
@@ -1515,8 +1677,8 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
             }
 
             override fun onError(error: Exception) {
-                Log.e(TAG, "Error getting encryption key for PIN setup", error)
-                promise.reject("ERR_SETUP_PIN", "Failed to get encryption key: ${error.message}", error)
+                Log.e(TAG, "Error getting Account Key for PIN setup", error)
+                promise.reject("ERR_SETUP_PIN", "Failed to get Account Key: ${error.message}", error)
             }
         })
     }
@@ -1563,14 +1725,33 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
 
     /**
      * Show native password unlock screen.
-     * Returns encryption key (base64) if successful, null if cancelled.
+     * Returns true if successful, null if cancelled.
      *
      * @param title Custom title for the password unlock screen. If null or empty, uses default.
      * @param subtitle Custom subtitle for the password unlock screen. If null or empty, uses default.
-     * @param promise The promise to resolve with encryption key or null.
+     * @param promise The promise to resolve with true or null.
      */
     @ReactMethod
     override fun showPasswordUnlock(title: String?, subtitle: String?, buttonText: String?, promise: Promise) {
+        presentPasswordUnlock(title, subtitle, buttonText, false, promise)
+    }
+
+    /**
+     * Show native password unlock screen and resolve with the unlock key (base64), or null if cancelled.
+     *
+     * @param title Custom title for the password unlock screen. If null or empty, uses default.
+     * @param subtitle Custom subtitle for the password unlock screen. If null or empty, uses default.
+     * @param promise The promise to resolve with the unlock key or null.
+     */
+    @ReactMethod
+    override fun showPasswordUnlockForKey(title: String?, subtitle: String?, buttonText: String?, promise: Promise) {
+        presentPasswordUnlock(title, subtitle, buttonText, true, promise)
+    }
+
+    /**
+     * Launch the password unlock activity for showPasswordUnlock and showPasswordUnlockForKey.
+     */
+    private fun presentPasswordUnlock(title: String?, subtitle: String?, buttonText: String?, returnUnlockKey: Boolean, promise: Promise) {
         val activity = currentActivity
         if (activity == null) {
             promise.reject("NO_ACTIVITY", "No activity available", null)
@@ -1579,6 +1760,7 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
 
         // Store promise in static companion object so MainActivity can resolve it directly
         passwordUnlockPromise = promise
+        passwordUnlockReturnsKey = returnUnlockKey
 
         // Launch password unlock activity
         val intent = Intent(activity, net.aliasvault.app.passwordunlock.PasswordUnlockActivity::class.java)
@@ -1812,8 +1994,6 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
         }
     }
 
-    // MARK: - Sync State Management
-
     /**
      * Get the sync state (isDirty, mutationSequence, serverRevision, isSyncing).
      * @param promise The promise to resolve.
@@ -1822,8 +2002,11 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
     override fun getSyncState(promise: Promise) {
         try {
             val syncState = vaultStore.getSyncState()
+            val dirtyScopes = Arguments.createArray()
+            syncState.dirtyScopes.forEach { dirtyScopes.pushString(it) }
             val result = Arguments.createMap()
             result.putBoolean("isDirty", syncState.isDirty)
+            result.putArray("dirtyScopes", dirtyScopes)
             result.putInt("mutationSequence", syncState.mutationSequence)
             result.putInt("serverRevision", syncState.serverRevision)
             result.putBoolean("isSyncing", syncState.isSyncing)
@@ -1856,296 +2039,26 @@ class NativeVaultManager(reactContext: ReactApplicationContext) :
         }
     }
 
+    // region Client core bridge
+
     /**
-     * Clear encrypted vault and reset sync state to force a fresh download on next sync.
-     * Deletes the corrupted vault and resets sync state so sync will download fresh.
-     * Called when existing vault cannot be decrypted (e.g. password changed).
-     * @param promise The promise to resolve when complete.
+     * Call one Rust core function by name with JSON-encoded positional arguments. The client core's Rust
+     * binding (platform/NativeRustCore.ts) routes every call through here.
+     * @param name The uniffi function name in camelCase.
+     * @param argsJson The positional arguments as a JSON array.
+     * @param promise Resolves with the result as JSON text.
      */
     @ReactMethod
-    override fun clearEncryptedVaultForFreshDownload(promise: Promise) {
-        try {
-            // Delete only the encrypted database file (not all storage)
-            val encryptedDbFile = java.io.File(reactApplicationContext.filesDir, "encrypted_database.db")
-            if (encryptedDbFile.exists()) {
-                encryptedDbFile.delete()
-                Log.d(TAG, "Deleted corrupted encrypted database for fresh download")
+    override fun rustCall(name: String, argsJson: String, promise: Promise) {
+        CoroutineScope(Dispatchers.Default).launch {
+            try {
+                promise.resolve(RustCoreDispatcher.call(name, argsJson))
+            } catch (e: Exception) {
+                Log.e(TAG, "Rust core call '$name' failed", e)
+                promise.reject("RUST_CORE_ERROR", "Rust core call '$name' failed: ${e.message}", e)
             }
-
-            // Close in-memory database connection if open
-            vaultStore.clearCache()
-
-            // Reset sync state - set isDirty=false and revision=0 so sync sees server as newer
-            vaultStore.metadata.setIsDirty(false)
-            vaultStore.setVaultRevisionNumber(0)
-
-            promise.resolve(null)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error clearing encrypted vault for fresh download", e)
-            promise.reject("ERR_CLEAR_VAULT_FOR_DOWNLOAD", "Failed to clear vault for fresh download: ${e.message}", e)
         }
     }
 
-    // MARK: - SRP Functions (via Rust Core UniFFI)
-
-    /**
-     * Generate a cryptographic salt for SRP.
-     * @param promise The promise to resolve with the generated salt (hex string).
-     */
-    @ReactMethod
-    override fun srpGenerateSalt(promise: Promise) {
-        try {
-            val salt = uniffi.aliasvault_core.srpGenerateSalt()
-            promise.resolve(salt)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error generating SRP salt", e)
-            promise.reject("ERR_SRP_GENERATE_SALT", "Failed to generate SRP salt: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Derive the SRP private key (x) from credentials.
-     * @param salt The salt (hex string).
-     * @param identity The identity (username).
-     * @param passwordHash The password hash (hex string).
-     * @param promise The promise to resolve with the private key (hex string).
-     */
-    @ReactMethod
-    override fun srpDerivePrivateKey(salt: String, identity: String, passwordHash: String, promise: Promise) {
-        try {
-            val privateKey = uniffi.aliasvault_core.srpDerivePrivateKey(salt, identity, passwordHash)
-            promise.resolve(privateKey)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error deriving SRP private key", e)
-            promise.reject("ERR_SRP_DERIVE_PRIVATE_KEY", "Failed to derive SRP private key: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Derive the SRP verifier (v) from a private key.
-     * @param privateKey The private key (hex string).
-     * @param promise The promise to resolve with the verifier (hex string).
-     */
-    @ReactMethod
-    override fun srpDeriveVerifier(privateKey: String, promise: Promise) {
-        try {
-            val verifier = uniffi.aliasvault_core.srpDeriveVerifier(privateKey)
-            promise.resolve(verifier)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error deriving SRP verifier", e)
-            promise.reject("ERR_SRP_DERIVE_VERIFIER", "Failed to derive SRP verifier: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Generate client ephemeral values (a, A) for SRP.
-     * @param promise The promise to resolve with JSON containing public and secret values.
-     */
-    @ReactMethod
-    override fun srpGenerateEphemeral(promise: Promise) {
-        try {
-            val ephemeral = uniffi.aliasvault_core.srpGenerateEphemeral()
-            val result = Arguments.createMap()
-            result.putString("public", ephemeral.public)
-            result.putString("secret", ephemeral.secret)
-            promise.resolve(result)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error generating SRP ephemeral", e)
-            promise.reject("ERR_SRP_GENERATE_EPHEMERAL", "Failed to generate SRP ephemeral: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Derive the SRP session key and proof.
-     * @param clientSecret The client secret (a, hex string).
-     * @param serverPublic The server public value (B, hex string).
-     * @param salt The salt (hex string).
-     * @param identity The identity (username).
-     * @param privateKey The private key (x, hex string).
-     * @param promise The promise to resolve with JSON containing key and proof.
-     */
-    @ReactMethod
-    override fun srpDeriveSession(
-        clientSecret: String,
-        serverPublic: String,
-        salt: String,
-        identity: String,
-        privateKey: String,
-        promise: Promise,
-    ) {
-        try {
-            val session = uniffi.aliasvault_core.srpDeriveSession(
-                clientSecret,
-                serverPublic,
-                salt,
-                identity,
-                privateKey,
-            )
-            val result = Arguments.createMap()
-            result.putString("key", session.key)
-            result.putString("proof", session.proof)
-            promise.resolve(result)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error deriving SRP session", e)
-            promise.reject("ERR_SRP_DERIVE_SESSION", "Failed to derive SRP session: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Pick which of an item's URLs a favicon should be fetched from, and the Logos.Source
-     * key it is stored under.
-     * @param urls The item's URLs, in the order the item lists them.
-     * @param promise Resolves with a JSON string, or null when no URL qualifies.
-     */
-    @ReactMethod
-    override fun selectFaviconTarget(urls: ReadableArray, promise: Promise) {
-        try {
-            val urlList = (0 until urls.size()).mapNotNull { urls.getString(it) }
-            val target = uniffi.aliasvault_core.selectFaviconTarget(urlList)
-            if (target == null) {
-                promise.resolve(null)
-                return
-            }
-
-            val json = JSONObject()
-                .put("url", target.url)
-                .put("source", target.source)
-            promise.resolve(json.toString())
-        } catch (e: Exception) {
-            Log.e(TAG, "Error selecting favicon target", e)
-            promise.reject("ERR_SELECT_FAVICON_TARGET", "Failed to select favicon target: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Generate a password or passphrase from a JSON-serialized PasswordSettings object.
-     * The "Type" field selects the generator ("basic" or "diceware").
-     * @param settingsJson The JSON-serialized password settings.
-     * @param promise The promise to resolve with the generated password/passphrase.
-     */
-    @ReactMethod
-    override fun generatePassword(settingsJson: String, promise: Promise) {
-        try {
-            val password = uniffi.aliasvault_core.generatePassword(settingsJson)
-            promise.resolve(password)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error generating password", e)
-            promise.reject("ERR_GENERATE_PASSWORD", "Failed to generate password: ${e.message}", e)
-        }
-    }
-
-    /**
-     * List the bundled Diceware wordlist language codes (first is the default, English).
-     * @param promise The promise to resolve with the array of language codes.
-     */
-    @ReactMethod
-    override fun getDicewareLanguages(promise: Promise) {
-        try {
-            val languages = uniffi.aliasvault_core.getDicewareLanguages()
-            val result = Arguments.createArray()
-            languages.forEach { result.pushString(it) }
-            promise.resolve(result)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error getting diceware languages", e)
-            promise.reject("ERR_GET_DICEWARE_LANGUAGES", "Failed to get diceware languages: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Generate a random identity from a JSON-serialized request.
-     * @param requestJson The JSON-serialized identity request (language, gender, ageRange).
-     * @param promise The promise to resolve with the identity as a JSON string.
-     */
-    @ReactMethod
-    override fun generateIdentity(requestJson: String, promise: Promise) {
-        try {
-            val identityJson = uniffi.aliasvault_core.generateIdentity(requestJson)
-            promise.resolve(identityJson)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error generating identity", e)
-            promise.reject("ERR_GENERATE_IDENTITY", "Failed to generate identity: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Generate a username from a JSON-serialized name input (firstName, lastName, birthDate).
-     * @param inputJson The JSON-serialized name input.
-     * @param promise The promise to resolve with the generated username.
-     */
-    @ReactMethod
-    override fun generateIdentityUsername(inputJson: String, promise: Promise) {
-        try {
-            val username = uniffi.aliasvault_core.generateIdentityUsername(inputJson)
-            promise.resolve(username)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error generating identity username", e)
-            promise.reject("ERR_GENERATE_IDENTITY_USERNAME", "Failed to generate username: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Generate an email prefix from a JSON-serialized name input (firstName, lastName, birthDate).
-     * @param inputJson The JSON-serialized name input.
-     * @param promise The promise to resolve with the generated email prefix.
-     */
-    @ReactMethod
-    override fun generateIdentityEmailPrefix(inputJson: String, promise: Promise) {
-        try {
-            val emailPrefix = uniffi.aliasvault_core.generateIdentityEmailPrefix(inputJson)
-            promise.resolve(emailPrefix)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error generating identity email prefix", e)
-            promise.reject("ERR_GENERATE_IDENTITY_EMAIL_PREFIX", "Failed to generate email prefix: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Generate a random alphanumeric email prefix that is not based on any identity.
-     * @param length The desired prefix length.
-     * @param promise The promise to resolve with the generated prefix.
-     */
-    @ReactMethod
-    override fun generateRandomEmailPrefix(length: Double, promise: Promise) {
-        try {
-            val prefix = uniffi.aliasvault_core.generateRandomEmailPrefix(length.toUInt())
-            promise.resolve(prefix)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error generating random email prefix", e)
-            promise.reject("ERR_GENERATE_RANDOM_EMAIL_PREFIX", "Failed to generate random email prefix: ${e.message}", e)
-        }
-    }
-
-    /**
-     * List the bundled identity dictionary language codes.
-     * @param promise The promise to resolve with the array of language codes.
-     */
-    @ReactMethod
-    override fun getIdentityLanguages(promise: Promise) {
-        try {
-            val languages = uniffi.aliasvault_core.getIdentityLanguages()
-            val result = Arguments.createArray()
-            languages.forEach { result.pushString(it) }
-            promise.resolve(result)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error getting identity languages", e)
-            promise.reject("ERR_GET_IDENTITY_LANGUAGES", "Failed to get identity languages: ${e.message}", e)
-        }
-    }
-
-    /**
-     * List the identity age range option values ("random" plus 5-year ranges).
-     * @param promise The promise to resolve with the array of age range values.
-     */
-    @ReactMethod
-    override fun getIdentityAgeRanges(promise: Promise) {
-        try {
-            val ageRanges = uniffi.aliasvault_core.getIdentityAgeRanges()
-            val result = Arguments.createArray()
-            ageRanges.forEach { result.pushString(it) }
-            promise.resolve(result)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error getting identity age ranges", e)
-            promise.reject("ERR_GET_IDENTITY_AGE_RANGES", "Failed to get identity age ranges: ${e.message}", e)
-        }
-    }
+    // endregion
 }

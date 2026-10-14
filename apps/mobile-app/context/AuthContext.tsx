@@ -1,8 +1,6 @@
-import { Buffer } from 'buffer';
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
-import EncryptionUtility from '@/utils/EncryptionUtility';
 import type { AuthMethod } from '@/utils/AppUnlockUtility';
 
 import { useDb } from '@/context/DbContext';
@@ -28,7 +26,7 @@ type AuthContextType = {
   clearAuthUserInitiated: (errorMessage?: string) => Promise<void>;
   /**
    * Clear auth for forced logout (e.g., 401 error, token revocation).
-   * Preserves vault data for potential RPO recovery - user didn't choose to logout.
+   * Clears the vault too, keeps the username for the login prefill.
    */
   clearAuthForced: (errorMessage?: string) => Promise<void>;
   setAuthMethods: (methods: AuthMethod[]) => Promise<void>;
@@ -36,7 +34,7 @@ type AuthContextType = {
   setAutoLockTimeout: (timeout: number) => Promise<void>;
   setOfflineMode: (isOffline: boolean) => void;
   verifyPassword: (password: string) => Promise<string | null>;
-  getEncryptionKeyDerivationParams: () => Promise<{ salt: string; encryptionType: string; encryptionSettings: string } | null>;
+  getUnlockKeyDerivationParams: () => Promise<{ salt: string; encryptionType: string; encryptionSettings: string } | null>;
   // Autofill methods
   shouldShowAutofillReminder: boolean;
   markAutofillConfigured: () => Promise<void>;
@@ -138,8 +136,8 @@ export const AuthProvider: React.FC<{
 
   /**
    * Clear authentication data for forced logout (e.g., 401 error, token revocation).
-   * Preserves vault data for potential RPO recovery - user didn't choose to logout.
-   * The vault will be recovered on next login if the password hasn't changed.
+   * Clears the vault and everything derived from it; the next login pulls a fresh one.
+   * Keeps the username for the login prefill.
    *
    * This is the base logout function. clearAuthUserInitiated builds on top of this.
    */
@@ -160,10 +158,10 @@ export const AuthProvider: React.FC<{
       // Non-fatal error - continue with logout
     }
 
-    // Clear auth tokens and session in native layer (preserves vault data)
+    // Clear auth tokens and the vault in native layer (keeps the username)
     await NativeVaultManager.clearAuthTokens();
     await NativeVaultManager.clearSession();
-    EncryptionUtility.clearRsaPrivateKeyCache();
+    dbContext?.clearDatabase();
 
     // Clear from AsyncStorage (for backward compatibility)
     // TODO: Remove AsyncStorage cleanup in future version 0.25.0+
@@ -176,13 +174,13 @@ export const AuthProvider: React.FC<{
     }
 
     setIsLoggedIn(false);
-  }, []);
+  }, [dbContext]);
 
   /**
    * Clear authentication data for user-initiated logout (e.g., user clicks logout button).
    * Clears ALL data including vault - user explicitly chose to logout.
    *
-   * Builds on clearAuthForced by also clearing vault data and username.
+   * Builds on clearAuthForced by also clearing the username.
    */
   const clearAuthUserInitiated = useCallback(async (errorMessage?: string): Promise<void> => {
     // First, perform the base forced logout (clears session, tokens, PIN, credentials)
@@ -191,9 +189,6 @@ export const AuthProvider: React.FC<{
     // Additionally clear username (forced logout preserves it for login prefill)
     await NativeVaultManager.clearUsername();
     await AsyncStorage.removeItem('username'); // TODO: Remove in 0.25.0+
-
-    // Clear ALL vault data - user explicitly chose to logout
-    dbContext?.clearDatabase();
 
     setUsername(null);
   }, [dbContext, clearAuthForced]);
@@ -234,17 +229,17 @@ export const AuthProvider: React.FC<{
    * Get the encryption key derivation parameters from native storage.
    * Returns parsed parameters or null if not available.
    */
-  const getEncryptionKeyDerivationParams = useCallback(async (): Promise<{
+  const getUnlockKeyDerivationParams = useCallback(async (): Promise<{
     salt: string;
     encryptionType: string;
     encryptionSettings: string;
   } | null> => {
     try {
-      const encryptionKeyDerivationParams = await NativeVaultManager.getEncryptionKeyDerivationParams();
-      if (!encryptionKeyDerivationParams) {
+      const unlockKeyDerivationParams = await NativeVaultManager.getUnlockKeyDerivationParams();
+      if (!unlockKeyDerivationParams) {
         return null;
       }
-      return JSON.parse(encryptionKeyDerivationParams);
+      return JSON.parse(unlockKeyDerivationParams);
     } catch (error) {
       console.error('Failed to get encryption key derivation params:', error);
       return null;
@@ -252,33 +247,26 @@ export const AuthProvider: React.FC<{
   }, []);
 
   /**
-   * Verify the password. Returns the current password hash if the password is correct, otherwise returns null.
+   * Verify the password. Returns its unlock key (base64) if the password is correct, otherwise returns null.
    */
   const verifyPassword = useCallback(async (password: string): Promise<string | null> => {
     // Get the key derivation parameters
-    const params = await getEncryptionKeyDerivationParams();
+    const params = await getUnlockKeyDerivationParams();
     if (!params) {
       throw new Error('Failed to verify current password. Please try again.');
     }
 
-    // Derive the encryption key from the password using the stored parameters
-    const passwordHash = await EncryptionUtility.deriveKeyFromPassword(
-      password,
-      params.salt,
-      params.encryptionType,
-      params.encryptionSettings
-    );
-
-    const currentPasswordHashBase64 = Buffer.from(passwordHash).toString('base64');
+    // Derive the unlock key from the password using the stored parameters
+    const unlockKeyBase64 = await NativeVaultManager.deriveKeyFromPassword(password, params.salt, params.encryptionType, params.encryptionSettings);
 
     // Check if the current password is correct
-    const isValid = await dbContext.verifyEncryptionKey(currentPasswordHashBase64);
+    const isValid = await dbContext.verifyUnlockKey(unlockKeyBase64);
     if (!isValid) {
       return null;
     }
 
-    return currentPasswordHashBase64;
-  }, [dbContext, getEncryptionKeyDerivationParams]);
+    return unlockKeyBase64;
+  }, [dbContext, getUnlockKeyDerivationParams]);
 
   /**
    * Load autofill state from storage
@@ -325,7 +313,7 @@ export const AuthProvider: React.FC<{
     setAutoLockTimeout,
     markAutofillConfigured,
     verifyPassword,
-    getEncryptionKeyDerivationParams,
+    getUnlockKeyDerivationParams,
     setOfflineMode,
   }), [
     isLoggedIn,
@@ -343,7 +331,7 @@ export const AuthProvider: React.FC<{
     setAutoLockTimeout,
     markAutofillConfigured,
     verifyPassword,
-    getEncryptionKeyDerivationParams,
+    getUnlockKeyDerivationParams,
     setOfflineMode,
   ]);
 

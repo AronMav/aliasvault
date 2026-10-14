@@ -1,0 +1,36 @@
+//-----------------------------------------------------------------------
+// <copyright file="ManifestGrant.cs" company="aliasvault">
+// Copyright (c) aliasvault. All rights reserved.
+// Licensed under the AGPLv3 license. See LICENSE.md file in the project root for full license information.
+// </copyright>
+//-----------------------------------------------------------------------
+
+namespace AliasVault.Shared.Models.WebApi.V2.Groups;
+
+using System.ComponentModel.DataAnnotations;
+
+/// <summary>
+/// One recipient's access to a shared manifest: the manifest's VEK encrypted with a public key of theirs.
+/// </summary>
+public class ManifestGrant
+{
+    /// <summary>Gets or sets the recipient this grant is for.</summary>
+    public required string RecipientUserId { get; set; }
+
+    /// <summary>Gets or sets the id of the recipient account public key used to encrypt (see <see cref="GroupMemberInfo.AccountPublicKeyId"/>).</summary>
+    public required Guid RecipientAccountPublicKeyId { get; set; }
+
+    /// <summary>Gets or sets the manifest VEK encrypted with that public key (base64), decryptable only by the recipient.</summary>
+    public required string EncryptedVek { get; set; }
+
+    /// <summary>Gets or sets the vault's name encrypted with the same public key, null when the client encrypted none.</summary>
+    public string? EncryptedName { get; set; }
+
+    /// <summary>Gets or sets the caller's signature over <see cref="EncryptedName"/>, required when a name is sent.</summary>
+    [StringLength(255)]
+    public string? EncryptedNameSignature { get; set; }
+
+    /// <summary>Gets or sets the caller's signature over the grant.</summary>
+    [StringLength(255)]
+    public required string Signature { get; set; }
+}

@@ -23,29 +23,20 @@
 
     <ItemGroup>
       <AdditionalFiles Include="..\..\stylecop.json" Link="stylecop.json" />
-      <EmbeddedResource Include="TestData\AliasClientDb_encrypted_base64_1.0.0.txt" />
-      <EmbeddedResource Include="TestData\TestAttachment.txt" />
-      <None Remove="TestData\TestImportBitwarden.csv" />
-      <EmbeddedResource Include="TestData\TestImportBitwarden.csv" />
-      <None Remove="TestData\TestVault.avux" />
-      <EmbeddedResource Include="TestData\TestVault.avux" />
-      <None Remove="TestData\TestVault.avex" />
-      <EmbeddedResource Include="TestData\TestVault.avex" />
-      <None Remove="TestData\TestKeePassWithAttachment.kdbx" />
-      <EmbeddedResource Include="TestData\TestKeePassWithAttachment.kdbx" />
     </ItemGroup>
 
     <ItemGroup>
-        <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.10" />
-        <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
+        <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.12" />
+        <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.10.1" />
         <PackageReference Include="NUnit" Version="4.6.1" />
-        <PackageReference Include="NUnit3TestAdapter" Version="6.2.0" />
-        <PackageReference Include="NUnit.Analyzers" Version="4.14.0">
+        <PackageReference Include="Otp.NET" Version="1.4.1" />
+        <PackageReference Include="NUnit3TestAdapter" Version="6.3.0" />
+        <PackageReference Include="NUnit.Analyzers" Version="4.15.0">
           <PrivateAssets>all</PrivateAssets>
           <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
         </PackageReference>
-        <PackageReference Include="Microsoft.Playwright.NUnit" Version="1.61.0" />
-        <PackageReference Include="coverlet.collector" Version="10.0.1">
+        <PackageReference Include="Microsoft.Playwright.NUnit" Version="1.63.0" />
+        <PackageReference Include="coverlet.collector" Version="10.1.0">
           <PrivateAssets>all</PrivateAssets>
           <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
         </PackageReference>
@@ -57,11 +48,8 @@
 
     <ItemGroup>
       <ProjectReference Include="..\..\AliasVault.Admin\AliasVault.Admin.csproj" />
-      <ProjectReference Include="..\..\AliasVault.Api\AliasVault.Api.csproj" />
       <ProjectReference Include="..\..\Databases\AliasServerDb\AliasServerDb.csproj" />
-      <ProjectReference Include="..\..\Utilities\AliasVault.TotpGenerator\AliasVault.TotpGenerator.csproj" />
       <ProjectReference Include="..\AliasVault.IntegrationTests\AliasVault.IntegrationTests.csproj" />
-      <ProjectReference Include="..\Server\AliasVault.E2ETests.Client.Server\AliasVault.E2ETests.Client.Server.csproj" />
     </ItemGroup>
 
     <ItemGroup>

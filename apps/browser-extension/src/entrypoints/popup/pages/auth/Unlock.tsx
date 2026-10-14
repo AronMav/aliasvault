@@ -1,3 +1,9 @@
+import { ClientUpgradeRequiredError } from '@aliasvault/client/api/errors/ClientUpgradeRequiredError';
+import { ServerUpdateRequiredError } from '@aliasvault/client/api/errors/ServerUpdateRequiredError';
+import { VaultVersionIncompatibleError } from '@aliasvault/client/api/errors/VaultVersionIncompatibleError';
+import { describeAuthError, formatErrorMessage } from '@aliasvault/client/auth/AuthErrorMessage';
+import { VaultKeyService } from '@aliasvault/client/auth/VaultKeyService';
+import { logoutReasonKey } from '@aliasvault/client/sync/VaultSync';
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
@@ -8,6 +14,7 @@ import LogoutConfirmModal from '@/entrypoints/popup/components/Dialogs/LogoutCon
 import MobileUnlockModal from '@/entrypoints/popup/components/Dialogs/MobileUnlockModal';
 import HeaderButton from '@/entrypoints/popup/components/HeaderButton';
 import { HeaderIcon, HeaderIconType } from '@/entrypoints/popup/components/Icons/HeaderIcons';
+import Icon from '@/entrypoints/popup/components/Icons/Icon';
 import LoadingSpinner from '@/entrypoints/popup/components/LoadingSpinner';
 import UsernameAvatar from '@/entrypoints/popup/components/Unlock/UsernameAvatar';
 import { useApp } from '@/entrypoints/popup/context/AppContext';
@@ -16,27 +23,18 @@ import { useDb } from '@/entrypoints/popup/context/DbContext';
 import { useHeaderButtons } from '@/entrypoints/popup/context/HeaderButtonsContext';
 import { useLoading } from '@/entrypoints/popup/context/LoadingContext';
 import { useWebApi } from '@/entrypoints/popup/context/WebApiContext';
+import { useFinishBackgroundAuth } from '@/entrypoints/popup/hooks/useFinishBackgroundAuth';
 import { PopoutUtility } from '@/entrypoints/popup/utils/PopoutUtility';
-import SrpUtility from '@/entrypoints/popup/utils/SrpUtility';
 
-import { SrpAuthService } from '@/utils/auth/SrpAuthService';
+import { logFailure } from '@/utils/Diagnostics';
 import { LocalPreferencesService } from '@/utils/LocalPreferencesService';
 import { sendMessage } from '@/utils/messaging/ExtensionMessaging';
-import {
-  getPinLength,
-  isPinEnabled,
-  PinLockedError,
-  IncorrectPinError,
-  InvalidPinFormatError,
-  resetFailedAttempts,
-  unlockWithPin
-} from '@/utils/PinUnlockService';
-import { hasErrorCode, getErrorMessage, extractErrorCode, AppErrorCode } from '@/utils/types/errors/AppErrorCodes';
-import { ClientUpgradeRequiredError } from '@/utils/types/errors/ClientUpgradeRequiredError';
-import { VaultVersionIncompatibleError } from '@/utils/types/errors/VaultVersionIncompatibleError';
-import type { MobileLoginResult } from '@/utils/types/messaging/MobileLoginResult';
+import { getPinLength, isPinEnabled, resetFailedAttempts } from '@/utils/PinUnlockService';
+import type { BackgroundAuthResult } from '@/utils/types/messaging/BackgroundAuthResult';
 
 import { vaultStateEvents } from '@/events/VaultStateEvents';
+
+import type { MobileLoginResult } from '@aliasvault/client/auth/MobileLoginService';
 
 /**
  * Concrete unlock screens the page can render. Mobile-app unlock is shown
@@ -56,7 +54,12 @@ const Unlock: React.FC = () => {
   const { setHeaderButtons } = useHeaderButtons();
 
   const webApi = useWebApi();
-  const srpUtil = new SrpUtility(webApi);
+  const finishBackgroundAuth = useFinishBackgroundAuth();
+
+  /**
+   * True while this page waits for a background unlock, so its own unlock does not trigger the cross-window reload.
+   */
+  const authInFlightRef = useRef(false);
 
   // Unlock mode state
   const [unlockMode, setUnlockMode] = useState<UnlockMode>('password');
@@ -66,7 +69,6 @@ const Unlock: React.FC = () => {
   // Password unlock state
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [passwordFailedAttempts, setPasswordFailedAttempts] = useState(0);
 
   // Brute force protection constants
   const MAX_PASSWORD_ATTEMPTS = 10;
@@ -106,7 +108,7 @@ const Unlock: React.FC = () => {
 
       const statusError = webApi.validateStatusResponse(statusResponse);
       if (statusError !== null) {
-        await app.logout(t('common.errors.' + statusError));
+        await app.logout(t(logoutReasonKey(statusError)));
         return { online: false, error: statusError };
       }
 
@@ -117,8 +119,18 @@ const Unlock: React.FC = () => {
       // Server refused this client version.
       if (err instanceof ClientUpgradeRequiredError) {
         setIsInitialLoading(false);
-        await app.logout(t('common.errors.clientVersionNotSupported'));
+        await app.logout(t('common.errors.clientNotSupported'));
         return { online: false, error: 'clientVersionNotSupported' };
+      }
+
+      /**
+       * The server is not compatible with this client (e.g. has not been updated to include V2 API required for manifest-v1 migration).
+       * Disable offline mode and let the main app UI explain the issue.
+       */
+      if (err instanceof ServerUpdateRequiredError) {
+        setIsInitialLoading(false);
+        await dbContext.setIsOffline(false);
+        return { online: false, error: null };
       }
 
       /**
@@ -139,16 +151,20 @@ const Unlock: React.FC = () => {
      * Initialize unlock page - check status and PIN availability
      */
     const initialize = async (): Promise<void> => {
-      const [pinEnabled, pinLength, lastUsed, storedAttempts] = await Promise.all([
+      // Pick up an unlock the background is still running because the popup was closed mid-unlock.
+      const pending = await runBackgroundAuth(() => sendMessage('AUTH_AWAIT_PENDING'));
+      if (pending?.status === 'success') {
+        return;
+      }
+
+      const [pinEnabled, pinLength, lastUsed] = await Promise.all([
         isPinEnabled(),
         getPinLength(),
         LocalPreferencesService.getLastUsedUnlockMethod(),
-        LocalPreferencesService.getPasswordUnlockFailedAttempts(),
       ]);
 
       setPinAvailable(pinEnabled);
       setPinLength(pinLength || 6);
-      setPasswordFailedAttempts(storedAttempts);
 
       /*
        * Pick the initial screen from the last-used method, falling back to
@@ -203,7 +219,9 @@ const Unlock: React.FC = () => {
    */
   useEffect(() => {
     return vaultStateEvents.onVaultUnlocked(() => {
-      window.location.reload();
+      if (!authInFlightRef.current) {
+        window.location.reload();
+      }
     });
   }, []);
 
@@ -255,124 +273,66 @@ const Unlock: React.FC = () => {
   }, [unlockMode]);
 
   /**
+   * Run a login or unlock flow in the background and show its outcome. Resolves to the outcome, or null when none ran.
+   */
+  const runBackgroundAuth = async (start: () => Promise<BackgroundAuthResult | null>): Promise<BackgroundAuthResult | null> => {
+    authInFlightRef.current = true;
+    let result: BackgroundAuthResult | null = null;
+    try {
+      result = await start();
+      if (result) {
+        await handleAuthResult(result);
+      }
+    } catch (err) {
+      logFailure('Unlock error', err);
+      setError(t('common.errors.unknownErrorTryAgain'));
+    } finally {
+      // After a success the page navigates away, keep ignoring the unlock event until then.
+      authInFlightRef.current = result?.status === 'success';
+    }
+    return result;
+  };
+
+  /**
+   * Show the outcome of a background login or unlock flow.
+   */
+  const handleAuthResult = async (result: BackgroundAuthResult): Promise<void> => {
+    switch (result.status) {
+      case 'success': {
+        const finishError = await finishBackgroundAuth(result.offline);
+        if (finishError) {
+          setError(finishError);
+        }
+        return;
+      }
+      case 'wrongPassword':
+        handlePasswordFailedAttempt(result.failedAttempts);
+        return;
+      case 'pinFailed':
+        handlePinFailure(result.reason, result.attemptsRemaining);
+        return;
+      case 'logout':
+        await app.logout(result.message ?? t(result.reasonKey ?? 'common.errors.unknownError'));
+        return;
+      case 'error':
+        setError(formatErrorMessage(result.error, t));
+        setPin('');
+        return;
+      default:
+        // A login flow finished while this page was open, reinitialize routes to where it left the popup.
+        navigate('/reinitialize', { replace: true });
+    }
+  };
+
+  /**
    * Handle password unlock (supports both online and offline mode)
    */
   const handlePasswordSubmit = async (e: React.FormEvent) : Promise<void> => {
     e.preventDefault();
     setError(null);
     showLoading();
-
-    const statusResult = await checkStatus();
-    if (statusResult.error) {
-      // Fatal error (e.g., version mismatch), already handled by checkStatus
-      hideLoading();
-      return;
-    }
-
-    try {
-      let passwordHashBase64: string;
-
-      if (statusResult.online) {
-        // Online mode: get encryption params from server for key derivation
-        const loginResponse = await srpUtil.initiateLogin(authContext.username!);
-
-        // Derive key from password using user's encryption settings
-        const credentials = await SrpAuthService.prepareCredentials(
-          password,
-          loginResponse.salt,
-          loginResponse.encryptionType,
-          loginResponse.encryptionSettings
-        );
-        passwordHashBase64 = credentials.passwordHashBase64;
-
-        // Store encryption params for future offline unlock
-        await dbContext.storeEncryptionKeyDerivationParams({
-          salt: loginResponse.salt,
-          encryptionType: loginResponse.encryptionType,
-          encryptionSettings: loginResponse.encryptionSettings,
-        });
-      } else {
-        // Offline mode: use stored encryption params to derive key
-        const storedParams = await sendMessage('GET_ENCRYPTION_KEY_DERIVATION_PARAMS');
-
-        if (!storedParams) {
-          // No stored params - can't unlock offline without having logged in before
-          setError(t('common.errors.serverNotAvailable'));
-          hideLoading();
-          return;
-        }
-
-        // Derive key from password using stored encryption settings
-        const credentials = await SrpAuthService.prepareCredentials(
-          password,
-          storedParams.salt,
-          storedParams.encryptionType,
-          storedParams.encryptionSettings
-        );
-        passwordHashBase64 = credentials.passwordHashBase64;
-
-        // Set offline mode
-        await dbContext.setIsOffline(true);
-      }
-
-      // Store the encryption key in session storage.
-      await dbContext.storeEncryptionKey(passwordHashBase64);
-
-      /*
-       * Load the stored vault from background (decrypts using stored encryption key).
-       * Throws an error with E-XXX code if decryption fails.
-       */
-      const sqliteClient = await dbContext.loadStoredDatabase();
-      if (!sqliteClient) {
-        // Edge case: no vault loaded but no error thrown (shouldn't happen)
-        throw new Error(t('common.errors.wrongPassword'));
-      }
-
-      // Check if there are pending migrations
-      if (await sqliteClient.hasPendingMigrations()) {
-        navigate('/upgrade', { replace: true });
-        hideLoading();
-        return;
-      }
-
-      // Clear dismiss until
-      await LocalPreferencesService.setVaultLockedDismissUntil(0);
-
-      // Reset PIN and password failed attempts on successful unlock
-      await resetFailedAttempts();
-      await LocalPreferencesService.resetPasswordUnlockFailedAttempts();
-      await LocalPreferencesService.setLastUsedUnlockMethod('password');
-      setPasswordFailedAttempts(0);
-
-      /*
-       * Navigate to reinitialize which will call syncVault to sync with server.
-       * Other windows will pick up the encryption-key storage event via
-       * vaultStateEvents.onVaultUnlocked and reload themselves.
-       */
-      navigate('/reinitialize', { replace: true });
-    } catch (err) {
-      // Server refused this client version.
-      if (err instanceof ClientUpgradeRequiredError) {
-        await app.logout(t('common.errors.clientVersionNotSupported'));
-      } else if (err instanceof VaultVersionIncompatibleError) {
-        // Check if it's a version incompatibility error
-        await app.logout(err.message);
-      } else if (hasErrorCode(err)) {
-        // Check if it's a decryption failure (E-203): this means wrong password
-        const errorCode = extractErrorCode(getErrorMessage(err, ''));
-        if (errorCode === AppErrorCode.VAULT_DECRYPT_FAILED) {
-          await handlePasswordFailedAttempt();
-        } else {
-          // Other error codes, show the formatted message as-is
-          setError(getErrorMessage(err, t('common.errors.wrongPassword')));
-        }
-      } else {
-        await handlePasswordFailedAttempt();
-      }
-      console.error('Unlock error:', err);
-    } finally {
-      hideLoading();
-    }
+    await runBackgroundAuth(() => sendMessage('AUTH_UNLOCK_PASSWORD', { password }));
+    hideLoading();
   };
 
   /**
@@ -418,100 +378,35 @@ const Unlock: React.FC = () => {
 
     setError(null);
     showLoading();
+    await runBackgroundAuth(() => sendMessage('AUTH_UNLOCK_PIN', { pin: pinToUse }));
+    hideLoading();
+  };
 
-    try {
-      // Unlock with PIN - this derives the encryption key from the PIN
-      const passwordHashBase64 = await unlockWithPin(pinToUse);
-
-      // Check if we're online or offline (for offline mode flag)
-      const statusResult = await checkStatus();
-      if (!statusResult.online) {
-        await dbContext.setIsOffline(true);
-      }
-
-      // Store the encryption key in session storage
-      await dbContext.storeEncryptionKey(passwordHashBase64);
-
-      /*
-       * Always unlock from local vault first.
-       * The /reinitialize page will call syncVault which handles:
-       * - Checking if server has newer version
-       * - Merging local changes with server if isDirty is true
-       * - Overwriting local with server if no local changes
-       *
-       * Throws an error with E-XXX code if decryption fails.
-       */
-      const sqliteClient = await dbContext.loadStoredDatabase();
-      if (!sqliteClient) {
-        // Edge case: no vault loaded but no error thrown (shouldn't happen)
-        throw new IncorrectPinError(3);
-      }
-
-      // Check if there are pending migrations
-      if (await sqliteClient.hasPendingMigrations()) {
-        navigate('/upgrade', { replace: true });
-        hideLoading();
-        return;
-      }
-
-      // Clear dismiss until
-      await LocalPreferencesService.setVaultLockedDismissUntil(0);
-      await LocalPreferencesService.setLastUsedUnlockMethod('pin');
-
-      /*
-       * Navigate to reinitialize which will call syncVault to sync with server.
-       * Other windows will pick up the encryption-key storage event via
-       * vaultStateEvents.onVaultUnlocked and reload themselves.
-       */
-      navigate('/reinitialize', { replace: true });
-      hideLoading();
-    } catch (err: unknown) {
-      if (err instanceof PinLockedError) {
-        setPinAvailable(false);
-        setUnlockMode('password');
-        setError(t('settings.unlockMethod.pinLocked'));
-      } else if (err instanceof IncorrectPinError) {
-        /* Show translatable error with attempts remaining */
-        const attemptsRemaining = err.attemptsRemaining;
-        if (attemptsRemaining === 1) {
-          setError(t('settings.unlockMethod.incorrectPinSingular'));
-        } else {
-          setError(t('settings.unlockMethod.incorrectPin', { attemptsRemaining }));
-        }
-        setPin('');
-      } else if (err instanceof InvalidPinFormatError) {
-        setError(t('settings.unlockMethod.invalidPinFormat'));
-        setPin('');
-      } else if (hasErrorCode(err)) {
-        // Check if it's a decryption failure, this means wrong PIN
-        const errorCode = extractErrorCode(getErrorMessage(err, ''));
-        if (errorCode === AppErrorCode.VAULT_DECRYPT_FAILED) {
-          // Decryption failed during PIN unlock = wrong PIN, treat as incorrect PIN
-          console.error('PIN unlock failed (decryption error):', err);
-          setError(t('settings.unlockMethod.incorrectPin', { attemptsRemaining: 3 }));
-        } else {
-          // Other error codes: show the formatted message as-is
-          console.error('PIN unlock failed:', err);
-          setError(getErrorMessage(err, t('common.errors.unknownErrorTryAgain')));
-        }
-        setPin('');
-      } else {
-        console.error('PIN unlock failed:', err);
-        setError(t('common.errors.unknownErrorTryAgain'));
-        setPin('');
-      }
-      hideLoading();
+  /**
+   * Show a rejected PIN.
+   */
+  const handlePinFailure = (reason: 'locked' | 'invalidFormat' | 'incorrect', attemptsRemaining?: number): void => {
+    if (reason === 'locked') {
+      setPinAvailable(false);
+      setUnlockMode('password');
+      setError(t('settings.unlockMethod.pinLocked'));
+      return;
     }
+
+    if (reason === 'invalidFormat') {
+      setError(t('settings.unlockMethod.invalidPinFormat'));
+    } else if (attemptsRemaining === 1) {
+      setError(t('settings.unlockMethod.incorrectPinSingular'));
+    } else {
+      setError(t('settings.unlockMethod.incorrectPin', { attemptsRemaining }));
+    }
+    setPin('');
   };
 
   /**
    * Handle failed password attempt with brute force protection
    */
-  const handlePasswordFailedAttempt = async (): Promise<void> => {
-    const newAttempts = passwordFailedAttempts + 1;
-    setPasswordFailedAttempts(newAttempts);
-    await LocalPreferencesService.setPasswordUnlockFailedAttempts(newAttempts);
-
+  const handlePasswordFailedAttempt = (newAttempts: number): void => {
     const remainingAttempts = MAX_PASSWORD_ATTEMPTS - newAttempts;
 
     // Clear password field
@@ -550,7 +445,7 @@ const Unlock: React.FC = () => {
       await webApi.revokeTokens();
       await authContext.clearAuthUserInitiated();
     } catch (error) {
-      console.error('Error during logout:', error);
+      logFailure('Error during logout', error);
     }
   };
 
@@ -560,6 +455,12 @@ const Unlock: React.FC = () => {
   const handleMobileUnlockSuccess = async (result: MobileLoginResult): Promise<void> => {
     showLoading();
     try {
+      // Check if the approval belongs to the same account as the current session.
+      if (authContext.username && result.username.toLowerCase() !== authContext.username.toLowerCase()) {
+        setError(t('apiErrors.USERNAME_MISMATCH'));
+        return;
+      }
+
       /*
        * Revoke the old refresh token (from existing logged in session) before setting new ones
        * that we get from the mobile login request.
@@ -569,9 +470,12 @@ const Unlock: React.FC = () => {
       // Set new auth tokens
       await authContext.setAuthTokens(result.username, result.token, result.refreshToken);
 
-      // Store the encryption key and derivation params
-      await dbContext.storeEncryptionKey(result.decryptionKey);
-      await dbContext.storeEncryptionKeyDerivationParams({
+      // The mobile device sends its stored key.
+      const accountKey = await VaultKeyService.refreshKeyChain(result.unlockKey, webApi);
+
+      // Store the Account Key and derivation params
+      await dbContext.storeAccountKey(accountKey);
+      await dbContext.storeUnlockKeyDerivationParams({
         salt: result.salt,
         encryptionType: result.encryptionType,
         encryptionSettings: result.encryptionSettings,
@@ -593,7 +497,7 @@ const Unlock: React.FC = () => {
       }
 
       // Check if there are pending migrations
-      if (await sqliteClient.hasPendingMigrations()) {
+      if (await sqliteClient.requiresLegacySqliteBlobMigration()) {
         navigate('/upgrade', { replace: true });
         hideLoading();
         return;
@@ -606,7 +510,6 @@ const Unlock: React.FC = () => {
       await resetFailedAttempts();
       await LocalPreferencesService.resetPasswordUnlockFailedAttempts();
       await LocalPreferencesService.setLastUsedUnlockMethod('mobile');
-      setPasswordFailedAttempts(0);
 
       /*
        * Navigate to reinitialize which will call syncVault to sync with server.
@@ -617,17 +520,14 @@ const Unlock: React.FC = () => {
     } catch (err) {
       // Server refused this client version.
       if (err instanceof ClientUpgradeRequiredError) {
-        await app.logout(t('common.errors.clientVersionNotSupported'));
+        await app.logout(t('common.errors.clientNotSupported'));
       } else if (err instanceof VaultVersionIncompatibleError) {
         // Check if it's a version incompatibility error
         await app.logout(err.message);
-      } else if (hasErrorCode(err)) {
-        // Error contains an error code (E-XXX), show the formatted message as-is
-        setError(getErrorMessage(err, t('common.errors.unknownErrorTryAgain')));
       } else {
-        setError(t('common.errors.unknownErrorTryAgain'));
+        setError(formatErrorMessage(await describeAuthError(err, { fallback: 'common.errors.unknownErrorTryAgain' }), t));
       }
-      console.error('Mobile unlock error:', err);
+      logFailure('Mobile unlock error', err);
     } finally {
       hideLoading();
     }
@@ -713,7 +613,7 @@ const Unlock: React.FC = () => {
               onChange={(e) => handlePinChange(e.target.value.replace(/\D/g, ''))}
               className="w-0 h-0 opacity-0 absolute"
               autoFocus
-              aria-label="PIN input"
+              aria-label={t('auth.pinInput')}
             />
 
             {/* On-Screen Numpad */}
@@ -744,11 +644,9 @@ const Unlock: React.FC = () => {
                   type="button"
                   onClick={handleBackspace}
                   className="h-12 flex items-center justify-center bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-900 dark:text-white rounded-lg transition-colors active:scale-95"
-                  aria-label="Backspace"
+                  aria-label={t('common.backspace')}
                 >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2M3 12l6.414 6.414a2 2 0 001.414.586H19a2 2 0 002-2V7a2 2 0 00-2-2h-8.172a2 2 0 00-1.414.586L3 12z" />
-                  </svg>
+                  <Icon name="backspace" className="w-5 h-5" />
                 </button>
               </div>
             </div>
@@ -833,9 +731,7 @@ const Unlock: React.FC = () => {
               onClick={() => setShowMobileUnlockModal(true)}
               className="w-full max-w-md mt-4 px-4 py-2 text-sm font-medium text-center text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-100 focus:ring-4 focus:ring-gray-200 dark:bg-gray-600 dark:text-white dark:border-gray-500 dark:hover:bg-gray-500 dark:focus:ring-gray-700 flex items-center justify-center gap-2"
             >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"></path>
-              </svg>
+              <Icon name="device-mobile" className="w-5 h-5" />
               {t('auth.unlockWithMobile')}
             </button>
           )}

@@ -99,7 +99,7 @@ public class CredentialIdentityStore {
                 let identity = ASPasswordCredentialIdentity(
                     serviceIdentifier: ASCredentialServiceIdentifier(identifier: urlString, type: .URL),
                     user: identifier,
-                    recordIdentifier: credential.id.uuidString
+                    recordIdentifier: credential.id.uuidString.lowercased()
                 )
 
                 return identity
@@ -121,7 +121,7 @@ public class CredentialIdentityStore {
             let userName = passkey.userName ?? credential.identifier
 
             // Convert passkey.Id to bytes for credentialID
-            let credentialId = try? PasskeyHelper.guidToBytes(passkey.id.uuidString)
+            let credentialId = try? PasskeyAuthenticator.guidToBytes(passkey.id.uuidString)
 
             // For passkeys, we use the rpId from the passkey itself, not the service URL
             // This is because passkeys are tied to the RP ID, which may differ from the service URL
@@ -130,7 +130,7 @@ public class CredentialIdentityStore {
                 userName: userName,
                 credentialID: credentialId ?? Data(),  // WebAuthn credential ID (16-byte GUID)
                 userHandle: passkey.userHandle ?? Data(),
-                recordIdentifier: passkey.id.uuidString
+                recordIdentifier: passkey.id.uuidString.lowercased()
             )
         }
     }

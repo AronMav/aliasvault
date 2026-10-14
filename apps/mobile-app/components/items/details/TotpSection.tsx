@@ -1,14 +1,15 @@
 import React, { useState, useEffect } from 'react';
 
-import { generateTotpCode } from '@/utils/TotpUtility';
 import { useTranslation } from 'react-i18next';
 import { View, StyleSheet, TouchableOpacity, Platform } from 'react-native';
 import Toast from 'react-native-toast-message';
 
 import { copyToClipboardWithExpiration } from '@/utils/ClipboardUtility';
-import type { Item, TotpCode } from '@/utils/dist/core/models/vault';
+import { generateTotpCode } from '@aliasvault/client/items/TotpUtility';
+import type { Item, TotpCode } from '@aliasvault/models/vault';
 
 import { useColors } from '@/hooks/useColorScheme';
+import { useRecordItemCopy } from '@/hooks/useRecordItemCopy';
 import { ThemedText } from '@/components/themed/ThemedText';
 import { ThemedView } from '@/components/themed/ThemedView';
 import { useDb } from '@/context/DbContext';
@@ -40,6 +41,7 @@ export const TotpSection: React.FC<TotpSectionProps> = ({ item }) : React.ReactN
   const colors = useColors();
   const dbContext = useDb();
   const { t } = useTranslation();
+  const recordItemCopy = useRecordItemCopy();
 
   /**
    * Get the remaining seconds in the current TOTP window.
@@ -66,6 +68,7 @@ export const TotpSection: React.FC<TotpSectionProps> = ({ item }) : React.ReactN
 
       // Use centralized clipboard utility
       await copyToClipboardWithExpiration(code, timeoutSeconds);
+      recordItemCopy({ Id: item.Id, ManifestId: item.ManifestId });
 
       if (Platform.OS !== 'android') {
         // Only show toast on iOS, Android already shows a native toast on clipboard interactions.
@@ -91,7 +94,7 @@ export const TotpSection: React.FC<TotpSectionProps> = ({ item }) : React.ReactN
       }
 
       try {
-        const codes = await dbContext.sqliteClient.settings.getTotpCodesForItem(item.Id);
+        const codes = await dbContext.sqliteClient.items.getTotpCodesForItem(item);
         setTotpCodes(codes);
       } catch (error) {
         console.error('Error loading TOTP codes:', error);
@@ -105,7 +108,7 @@ export const TotpSection: React.FC<TotpSectionProps> = ({ item }) : React.ReactN
     let cancelled = false;
 
     /**
-     * Generate codes for all current TOTP entries via the native bridge and
+     * Generate codes for all current TOTP entries via the Rust core and
      * push them into state. Falls back to "Error" only when no previous code
      * exists for that entry, so the display doesn't flicker when a single
      * tick fails.
@@ -114,7 +117,7 @@ export const TotpSection: React.FC<TotpSectionProps> = ({ item }) : React.ReactN
       const results = await Promise.all(
         totpCodes.map(async (code) => ({
           id: code.Id,
-          value: await generateTotpCode(code.SecretKey),
+          value: await generateTotpCode(code.SecretKey, code),
         }))
       );
       if (cancelled) return;

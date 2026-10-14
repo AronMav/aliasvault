@@ -2,15 +2,26 @@ package net.aliasvault.app.vaultstore
 
 import android.os.SystemClock
 import android.util.Log
-import io.requery.android.database.sqlite.SQLiteDatabase
 import kotlinx.coroutines.suspendCancellableCoroutine
 import net.aliasvault.app.vaultstore.interfaces.CryptoOperationCallback
 import net.aliasvault.app.vaultstore.interfaces.ItemOperationCallback
 import net.aliasvault.app.vaultstore.keystoreprovider.BiometricAuthCallback
 import net.aliasvault.app.vaultstore.keystoreprovider.KeystoreProvider
+import net.aliasvault.app.vaultstore.models.BuiltinLogos
 import net.aliasvault.app.vaultstore.models.Item
+import net.aliasvault.app.vaultstore.models.ItemField
 import net.aliasvault.app.vaultstore.models.StoreVaultResult
+import net.aliasvault.app.vaultstore.models.TotpCode
+import net.aliasvault.app.vaultstore.models.VaultDataBucketCategory
+import net.aliasvault.app.vaultstore.models.VaultMutationScope
 import net.aliasvault.app.vaultstore.storageprovider.StorageProvider
+import org.json.JSONObject
+import uniffi.aliasvault_core.ItemUsageAction
+import uniffi.aliasvault_core.VaultException
+import uniffi.aliasvault_core.VaultItem
+import uniffi.aliasvault_core.rsaDecrypt
+import java.util.Date
+import java.util.UUID
 import kotlin.coroutines.resume
 
 /**
@@ -52,6 +63,9 @@ class VaultStore(
          * Hard cap on how long a recent-auth grace will be honored, regardless of caller input.
          */
         private const val MAX_AUTH_RECENCY_WINDOW_SECONDS: Double = 15.0
+
+        /** How long a sync hold stays valid without being released, so a crashed holder is forgotten. */
+        private const val VAULT_SYNC_HOLD_TTL_MS = 2 * 60 * 1000L
 
         /**
          * Get the instance of the vault store.
@@ -113,9 +127,8 @@ class VaultStore(
     // region Composed Components
 
     private val crypto = VaultCrypto(keystoreProvider, storageProvider)
-    internal val database = VaultDatabase(storageProvider, crypto)
-    private val itemRepository = net.aliasvault.app.vaultstore.repositories.ItemRepository(database)
     internal val metadata = VaultMetadataManager(storageProvider)
+    internal val database = VaultDatabase(storageProvider, crypto, metadata)
     private val auth = VaultAuth(
         storageProvider,
         onClearCache = {
@@ -124,8 +137,7 @@ class VaultStore(
         },
         onBackground = { clearLastSuccessfulAuth() },
     )
-    private val sync = VaultSync(database, metadata, crypto, storageProvider, itemRepository)
-    private val mutate = VaultMutate(database, itemRepository, metadata, crypto, auth, storageProvider)
+    private val sync = VaultSync(this, storageProvider)
     private val cache = VaultCache(crypto, database, keystoreProvider, storageProvider)
     private val passkey = VaultPasskey(database)
     private val pin by lazy {
@@ -144,11 +156,8 @@ class VaultStore(
     /**
      * Internal accessor for encryption key.
      */
-    internal var encryptionKey: ByteArray?
+    internal val encryptionKey: ByteArray?
         get() = crypto.encryptionKey
-        set(value) {
-            crypto.encryptionKey = value
-        }
 
     /**
      * Internal accessor for VaultAuth.
@@ -167,17 +176,18 @@ class VaultStore(
     // region Crypto Methods
 
     /**
-     * Store the encryption key.
+     * Open a session with the unlock key or the Account Key and persist the Account Key to keystore if biometrics
+     * are enabled.
      */
-    fun storeEncryptionKey(base64EncryptionKey: String) {
-        crypto.storeEncryptionKey(base64EncryptionKey, auth.getAuthMethods())
+    fun storeAccountKey(base64Key: String) {
+        crypto.storeAccountKey(base64Key, auth.getAuthMethods())
     }
 
     /**
-     * Store the encryption key in memory only.
+     * Open a session in memory only with the unlock key or the Account Key.
      */
-    fun storeEncryptionKeyInMemory(base64EncryptionKey: String) {
-        crypto.storeEncryptionKeyInMemory(base64EncryptionKey)
+    fun storeAccountKeyInMemory(base64Key: String) {
+        crypto.storeAccountKeyInMemory(base64Key)
     }
 
     /**
@@ -197,6 +207,13 @@ class VaultStore(
     }
 
     /**
+     * Get the Account Key, the key the keystore and PIN protect.
+     */
+    fun getAccountKey(callback: CryptoOperationCallback) {
+        crypto.getAccountKey(callback, auth.getAuthMethods())
+    }
+
+    /**
      * Check if biometric authentication is enabled and available.
      */
     fun isBiometricAuthEnabled(): Boolean {
@@ -206,15 +223,55 @@ class VaultStore(
     /**
      * Store the encryption key derivation parameters.
      */
-    fun storeEncryptionKeyDerivationParams(keyDerivationParams: String) {
-        crypto.storeEncryptionKeyDerivationParams(keyDerivationParams)
+    fun storeUnlockKeyDerivationParams(keyDerivationParams: String) {
+        crypto.storeUnlockKeyDerivationParams(keyDerivationParams)
     }
 
     /**
      * Get the encryption key derivation parameters.
      */
-    fun getEncryptionKeyDerivationParams(): String {
-        return crypto.getEncryptionKeyDerivationParams()
+    fun getUnlockKeyDerivationParams(): String {
+        return crypto.getUnlockKeyDerivationParams()
+    }
+
+    /**
+     * Store the account-key chain the native password unlock unwraps (null for a legacy account).
+     */
+    fun storeAccountKeyChain(chainJson: String?) {
+        crypto.storeAccountKeyChain(chainJson)
+    }
+
+    /**
+     * Get the stored account-key chain JSON, or null for a legacy account.
+     */
+    fun getAccountKeyChain(): String? {
+        return crypto.getAccountKeyChain()
+    }
+
+    /**
+     * The account private key (JWK) of the unlocked session, derived from the Account Key; null for an account without a keypair.
+     */
+    internal val accountPrivateKey: String?
+        get() = crypto.accountPrivateKey
+
+    /**
+     * The Account Key of the unlocked session (base64), which the sync engine opens the signing key with.
+     */
+    internal val accountKeyBase64: String?
+        get() = crypto.accountKeyBase64
+
+    /**
+     * Decrypt base64 RSA-OAEP ciphertext with the session's account private key as UTF-8 text, or null when the session
+     * holds no private key or it does not open the ciphertext.
+     */
+    fun decryptWithAccountPrivateKey(base64Ciphertext: String): String? {
+        val privateKey = accountPrivateKey ?: return null
+        return try {
+            rsaDecrypt(base64Ciphertext, privateKey).toString(Charsets.UTF_8)
+        } catch (e: VaultException) {
+            Log.w(TAG, "The account private key did not open the ciphertext", e)
+            null
+        }
     }
 
     /**
@@ -230,40 +287,41 @@ class VaultStore(
     }
 
     /**
-     * Encrypts the vault's encryption key using an RSA public key for mobile login.
+     * Encrypts the Account Key using an RSA public key for mobile login.
      */
-    fun encryptDecryptionKeyForMobileLogin(publicKeyJWK: String): String {
-        return crypto.encryptDecryptionKeyForMobileLogin(publicKeyJWK, auth.getAuthMethods())
+    fun encryptAccountKeyForMobileLogin(publicKeyJWK: String): String {
+        return crypto.encryptAccountKeyForMobileLogin(publicKeyJWK, auth.getAuthMethods())
     }
 
     /**
-     * Verify password and return encryption key if correct.
-     * Returns null if password is incorrect.
+     * Verify the password and return the unlock key if correct. Returns null if the
+     * password is incorrect.
      *
      * @param password The password to verify
-     * @return The base64-encoded encryption key if password is correct, null otherwise
+     * @return The base64-encoded unlock key if password is correct, null otherwise
      */
     @Suppress("SwallowedException")
     fun verifyPassword(password: String): String? {
         return try {
             // Get encryption key derivation parameters
-            val params = crypto.getEncryptionKeyDerivationParams()
+            val params = crypto.getUnlockKeyDerivationParams()
             val paramsJson = org.json.JSONObject(params)
             val salt = paramsJson.getString("salt")
             val encryptionType = paramsJson.getString("encryptionType")
             val encryptionSettings = paramsJson.getString("encryptionSettings")
 
-            // Derive key from password
+            // Derive the unlock key from the password and open the chain; a wrong password fails to open it.
             val derivedKey = crypto.deriveKeyFromPassword(password, salt, encryptionType, encryptionSettings)
+            val vaultEncryptionKey = crypto.openAccountKeyChain(derivedKey).vaultEncryptionKey
 
             // Try to decrypt the vault to verify the password is correct
             val encryptedDb = database.getEncryptedDatabase()
             val encryptedDbBytes = android.util.Base64.decode(encryptedDb, android.util.Base64.NO_WRAP)
 
             // Attempt decryption to verify password is correct
-            VaultCrypto.decrypt(encryptedDbBytes, derivedKey)
+            VaultCrypto.decrypt(encryptedDbBytes, vaultEncryptionKey)
 
-            // If decryption succeeded, return the key as base64
+            // If decryption succeeded, return the unlock key as base64
             android.util.Base64.encodeToString(derivedKey, android.util.Base64.NO_WRAP)
         } catch (e: Exception) {
             // Password incorrect or decryption failed - intentionally return null
@@ -301,10 +359,10 @@ class VaultStore(
      * Unlock the vault.
      */
     fun unlockVault() {
-        // A nil-to-non-nil transition means the keystore just released the key after biometric.
-        val hadKeyInMemory = encryptionKey != null
+        // A nil-to-non-nil transition means the keystore just released the Account Key after biometric.
+        val hadKeyInMemory = crypto.accountKey != null
         database.unlockVault(auth.getAuthMethods())
-        if (!hadKeyInMemory && encryptionKey != null) {
+        if (!hadKeyInMemory && crypto.accountKey != null) {
             markSuccessfulAuth()
         }
     }
@@ -324,128 +382,36 @@ class VaultStore(
      * Execute a read-only SQL query (SELECT) on the vault.
      */
     fun executeQuery(queryString: String, params: Array<Any?>): List<Map<String, Any?>> {
-        val db = database.dbConnection ?: error("Database not initialized")
-
-        // Process params - convert base64-prefixed strings to ByteArray for blob binding
-        val convertedParams = params.map { param ->
-            when {
-                param == null -> null
-                param is String && param.startsWith(BASE64_BLOB_PREFIX) -> {
-                    val base64 = param.removePrefix(BASE64_BLOB_PREFIX)
-                    android.util.Base64.decode(base64, android.util.Base64.NO_WRAP)
-                }
-                param is ByteArray -> param
-                else -> param.toString()
-            }
-        }.toTypedArray()
-
-        val cursor = db.query(queryString, convertedParams)
-        val results = mutableListOf<Map<String, Any?>>()
-
-        cursor.use {
-            val columnNames = it.columnNames
-            while (it.moveToNext()) {
-                val row = mutableMapOf<String, Any?>()
-                for (columnName in columnNames) {
-                    val colIndex = it.getColumnIndexOrThrow(columnName)
-                    val colType = it.getType(colIndex)
-                    when (colType) {
-                        android.database.Cursor.FIELD_TYPE_NULL -> row[columnName] = null
-                        android.database.Cursor.FIELD_TYPE_INTEGER -> row[columnName] = it.getLong(colIndex)
-                        android.database.Cursor.FIELD_TYPE_FLOAT -> row[columnName] = it.getDouble(colIndex)
-                        android.database.Cursor.FIELD_TYPE_STRING -> row[columnName] = it.getString(colIndex)
-                        android.database.Cursor.FIELD_TYPE_BLOB -> row[columnName] = it.getBlob(colIndex)
-                    }
-                }
-                results.add(row)
-            }
-        }
-
-        return results
+        return database.query(queryString, bridgeParams(params))
     }
 
     /**
      * Execute an SQL update on the vault that mutates it.
      */
     fun executeUpdate(queryString: String, params: Array<Any?>): Int {
-        val db = database.dbConnection ?: error("Database not initialized")
-
-        // Process params - convert base64-prefixed strings to ByteArray for blob binding
-        val processedParams = params.map { param ->
-            when {
-                param == null -> null
-                param is String && param.startsWith(BASE64_BLOB_PREFIX) -> {
-                    val base64 = param.removePrefix(BASE64_BLOB_PREFIX)
-                    android.util.Base64.decode(base64, android.util.Base64.NO_WRAP)
-                }
-                param is ByteArray -> param
-                else -> param.toString()
-            }
-        }
-
-        val stmt = db.compileStatement(queryString)
-        try {
-            processedParams.forEachIndexed { index, value ->
-                when (value) {
-                    null -> stmt.bindNull(index + 1)
-                    is ByteArray -> stmt.bindBlob(index + 1, value)
-                    else -> stmt.bindString(index + 1, value.toString())
-                }
-            }
-            stmt.execute()
-        } finally {
-            stmt.close()
-        }
-
-        // Get the number of affected rows
-        val affectedCursor = db.rawQuery("SELECT changes()", null)
-        affectedCursor.use {
-            if (it.moveToFirst()) {
-                return it.getInt(0)
-            }
-        }
-        return 0
+        return database.execute(queryString, bridgeParams(params))
     }
 
     /**
-     * Execute a raw SQL command on the vault without parameters.
-     * Splits the query by semicolons to handle multiple statements.
-     *
-     * Note: Migration SQL scripts handle their own transactions and PRAGMA statements.
-     * PRAGMA foreign_keys statements MUST be executed outside of transactions to take effect,
-     * which is why we execute them using rawQuery instead of compileStatement.
+     * Bridge parameters as SQL values: base64-prefixed strings bind as a BLOB, everything else as text.
+     */
+    private fun bridgeParams(params: Array<Any?>): List<Any?> = params.map { param ->
+        when {
+            param == null -> null
+            param is String && param.startsWith(BASE64_BLOB_PREFIX) -> {
+                android.util.Base64.decode(param.removePrefix(BASE64_BLOB_PREFIX), android.util.Base64.NO_WRAP)
+            }
+            param is ByteArray -> param
+            else -> param.toString()
+        }
+    }
+
+    /**
+     * Execute a raw SQL script (one or more statements) on the vault without parameters.
+     * Migration scripts handle their own transactions and PRAGMA statements.
      */
     fun executeRaw(queryString: String) {
-        val db = database.dbConnection ?: error("Database not initialized")
-
-        // Strip BOM (U+FEFF) that may be present at the start of SQL strings.
-        val cleanedQuery = queryString.trimStart('\uFEFF')
-
-        // Split by semicolons to handle multiple statements and filter out empty ones
-        cleanedQuery.split(";")
-            .map { it.trim().trimStart('\uFEFF') }
-            .filter { it.isNotEmpty() && !it.startsWith("--") }
-            .forEach { trimmed ->
-                val upperTrimmed = trimmed.uppercase()
-                when {
-                    // Handle PRAGMA statements using rawQuery (required for PRAGMA to work properly)
-                    upperTrimmed.startsWith("PRAGMA") -> db.rawQuery(trimmed, null)?.close()
-                    // Handle transaction control statements using execSQL
-                    isTransactionControlStatement(upperTrimmed) -> db.execSQL(trimmed)
-                    // Use compileStatement for all other SQL (DDL and DML)
-                    else -> db.compileStatement(trimmed).execute()
-                }
-            }
-    }
-
-    /**
-     * Check if a SQL statement is a transaction control statement.
-     */
-    private fun isTransactionControlStatement(upperStatement: String): Boolean {
-        return upperStatement.startsWith("BEGIN TRANSACTION") ||
-            upperStatement.startsWith("BEGIN") ||
-            upperStatement.startsWith("COMMIT") ||
-            upperStatement.startsWith("ROLLBACK")
+        database.executeScript(queryString)
     }
 
     /**
@@ -456,17 +422,11 @@ class VaultStore(
     }
 
     /**
-     * Commit a SQL transaction on the vault.
-     * This also atomically marks the vault as dirty and increments the mutation sequence
-     * for proper sync tracking.
+     * Commit a SQL transaction on the vault. The commit persists the vault and marks it dirty for the sync.
+     * @param scope What the mutation touched, so the next sync can push only that scope
      */
-    fun commitTransaction() {
-        database.commitTransaction()
-
-        // Atomically mark vault as dirty and increment mutation sequence
-        // This ensures sync can properly detect local changes
-        metadata.setIsDirty(true)
-        metadata.incrementMutationSequence()
+    fun commitTransaction(scope: String = VaultMutationScope.MAIN) {
+        database.commitTransaction(scope)
     }
 
     /**
@@ -477,49 +437,83 @@ class VaultStore(
     }
 
     /**
-     * Persist the in-memory database to encrypted storage and mark as dirty.
-     * Used after migrations where SQL handles its own transactions but we need to persist and sync.
-     * This does NOT commit any SQL transaction - it just persists the current state of the database.
+     * Persist the in-memory database to encrypted storage and mark as dirty, without committing a SQL
+     * transaction. Used after migrations whose scripts manage their own transactions.
+     * @param scope What the mutation touched, so the next sync can push only that scope
      */
-    fun persistAndMarkDirty() {
-        database.persistDatabaseToEncryptedStorage()
-
-        // Atomically mark vault as dirty and increment mutation sequence
-        // This ensures sync can properly detect local changes
-        metadata.setIsDirty(true)
-        metadata.incrementMutationSequence()
+    fun persistAndMarkDirty(scope: String = VaultMutationScope.MAIN) {
+        database.persistAndMarkDirty(scope)
     }
 
     /**
-     * Get all items from the vault.
+     * Get all items from the vault. Archived and trashed items are excluded, so this is safe to use
+     * as the autofill candidate list.
      */
     fun getAllItems(): List<Item> {
-        return itemRepository.getAll()
+        return database.connection().getAllActiveItems().mapNotNull(::toItem)
     }
 
     /**
-     * Get the first non-deleted TOTP secret for an item, or null when none exists.
+     * Get the first non-deleted TOTP code for an item, or null when none exists.
      * Used by the autofill service to copy a credential's current TOTP code to
      * the clipboard at fill time.
      */
-    fun getTotpSecretForItem(itemId: String): String? {
+    fun getTotpForItem(itemId: String, manifestId: String): TotpCode? {
         if (!database.isVaultUnlocked()) {
             return null
         }
         return try {
-            itemRepository.getTotpSecretForItem(itemId)
+            database.connection().getTotpCodesForItem(itemId.lowercase(), manifestId).firstOrNull()?.let {
+                TotpCode(secretKey = it.secretKey, algorithm = it.algorithm, digits = it.digits.toInt(), period = it.period.toInt())
+            }
         } catch (e: Exception) {
-            android.util.Log.e(TAG, "Error getting TOTP secret for item", e)
+            android.util.Log.e(TAG, "Error getting TOTP code for item", e)
             null
         }
     }
 
     /**
-     * Attempts to get all items using only the cached encryption key.
+     * Record one use of an item (autofill, copy or passkey assertion) in its usage statistics.
+     * Persists the vault and marks it dirty, so the next sync pushes it.
+     */
+    fun recordItemUsage(itemId: String, manifestId: String, action: ItemUsageAction) {
+        // Usage statistics live in their own data bucket, pushed without a full manifest write.
+        val deviceId = metadata.getOrCreateDeviceId()
+        database.withTransaction(VaultDataBucketCategory.STATS) { db -> db.recordItemUse(itemId.lowercase(), manifestId, deviceId, action) }
+    }
+
+    /**
+     * An item from the Rust core as the model the autofill layer works with.
+     */
+    private fun toItem(row: VaultItem): Item? {
+        val id = runCatching { UUID.fromString(row.id) }.getOrNull() ?: return null
+        // A built-in logo carries no bytes: it is drawn from the shared catalog, keyed by its Source.
+        val logo = if (row.logoKind == "builtin") row.logoSource?.let { BuiltinLogos.svgFor(it) }?.toByteArray(Charsets.UTF_8) else row.logo
+        return Item(
+            id = id,
+            manifestId = row.manifestId,
+            name = row.name,
+            itemType = row.itemType,
+            logo = logo,
+            folderId = row.folderId?.let { runCatching { UUID.fromString(it) }.getOrNull() },
+            folderPath = row.folderPath.ifEmpty { null },
+            fields = row.fields.map {
+                ItemField(it.fieldKey, it.label, it.fieldType, it.value, it.isHidden, it.displayOrder.toInt(), it.isCustomField, it.enableHistory)
+            },
+            hasPasskey = row.hasPasskey,
+            hasAttachment = row.hasAttachment,
+            hasTotp = row.hasTotp,
+            createdAt = Date(row.createdAtMs),
+            updatedAt = Date(row.updatedAtMs),
+        )
+    }
+
+    /**
+     * Attempts to get all items using only the Account Key held in memory.
      */
     fun tryGetAllItems(callback: ItemOperationCallback): Boolean {
-        if (crypto.encryptionKey == null) {
-            android.util.Log.d(TAG, "Encryption key not in memory, authentication required")
+        if (crypto.accountKey == null) {
+            android.util.Log.d(TAG, "Account Key not in memory, authentication required")
             return false
         }
 
@@ -528,7 +522,7 @@ class VaultStore(
                 unlockVault()
             }
 
-            callback.onSuccess(itemRepository.getAll())
+            callback.onSuccess(getAllItems())
             return true
         } catch (e: Exception) {
             android.util.Log.e(TAG, "Error retrieving items", e)
@@ -553,8 +547,8 @@ class VaultStore(
 
         if (!wasBiometricEnabled && isBiometricEnabled) {
             try {
-                crypto.storeEncryptionKey(
-                    android.util.Base64.encodeToString(crypto.encryptionKey, android.util.Base64.NO_WRAP),
+                crypto.storeAccountKey(
+                    android.util.Base64.encodeToString(crypto.accountKey, android.util.Base64.NO_WRAP),
                     authMethods,
                 )
             } catch (e: Exception) {
@@ -606,8 +600,8 @@ class VaultStore(
     /**
      * Get the metadata.
      */
-    fun getMetadata(): String {
-        return metadata.getMetadata()
+    fun getVaultMetadata(): String {
+        return metadata.getVaultMetadata()
     }
 
     /**
@@ -659,28 +653,27 @@ class VaultStore(
         return metadata.getOfflineMode()
     }
 
+    /**
+     * Hold vault syncing while an operation runs that a sync must not race (e.g. a password change), or release it with null.
+     */
+    fun setVaultSyncHold(reason: String?) {
+        storageProvider.setVaultSyncHold(reason?.let { JSONObject().put("reason", it).put("heldAt", System.currentTimeMillis()).toString() })
+    }
+
+    /**
+     * The reason syncing is on hold, or null when no unexpired hold is held.
+     */
+    fun getVaultSyncHoldReason(): String? {
+        val hold = storageProvider.getVaultSyncHold()?.let { JSONObject(it) } ?: return null
+        if (System.currentTimeMillis() - hold.optLong("heldAt") >= VAULT_SYNC_HOLD_TTL_MS) {
+            return null
+        }
+        return hold.optString("reason").takeIf { it.isNotEmpty() }
+    }
+
     // endregion
 
     // region Sync Methods
-
-    /**
-     * Check if a new vault version is available on the server.
-     */
-    suspend fun isNewVaultVersionAvailable(webApiService: net.aliasvault.app.webapi.WebApiService): Map<String, Any?> {
-        return sync.isNewVaultVersionAvailable(webApiService)
-    }
-
-    /**
-     * Download and store the vault from the server.
-     */
-    suspend fun downloadVault(webApiService: net.aliasvault.app.webapi.WebApiService, newRevision: Int): Boolean {
-        val result = sync.downloadVault(webApiService, newRevision)
-        // Re-unlock vault if it was unlocked before download
-        if (result && isVaultUnlocked()) {
-            unlockVault()
-        }
-        return result
-    }
 
     /**
      * Get the sync state.
@@ -714,6 +707,7 @@ class VaultStore(
         markDirty: Boolean = false,
         serverRevision: Int? = null,
         expectedMutationSeq: Int? = null,
+        scope: String = VaultMutationScope.MAIN,
     ): StoreVaultResult {
         var mutationSequence = metadata.getMutationSequence()
 
@@ -731,7 +725,7 @@ class VaultStore(
 
         if (markDirty) {
             metadata.setMutationSequence(mutationSequence)
-            metadata.setIsDirty(true)
+            metadata.markDirty(scope)
         }
 
         if (serverRevision != null) {
@@ -749,36 +743,72 @@ class VaultStore(
     }
 
     /**
-     * Upload the vault to the server.
+     * The vault encryption key held in memory, as base64, or null while the vault is locked.
      */
-    suspend fun uploadVault(webApiService: net.aliasvault.app.webapi.WebApiService): VaultUploadResult {
-        return mutate.uploadVault(webApiService)
+    fun getEncryptionKeyBase64(): String? {
+        return encryptionKey?.let { android.util.Base64.encodeToString(it, android.util.Base64.NO_WRAP) }
     }
 
     /**
-     * Fetch the server vault (encrypted blob).
+     * Forget what the sync engine learned about the stored vault (revisions, fingerprints, key chain), so the next
+     * sync starts from the server as if this device had never pulled. Used when the vault is discarded.
      */
-    suspend fun fetchServerVault(webApiService: net.aliasvault.app.webapi.WebApiService): VaultResponse {
-        return sync.fetchServerVault(webApiService)
+    fun clearSyncEngineState() {
+        storageProvider.clearSyncEngineState()
+        crypto.storeAccountKeyChain(null)
     }
 
     /**
-     * Check vault version including sync state.
+     * One status call: whether the server holds newer state than this device.
      */
     suspend fun checkVaultVersion(webApiService: net.aliasvault.app.webapi.WebApiService): VaultVersionCheckResult {
         return sync.checkVaultVersion(webApiService)
     }
 
     /**
-     * Unified vault sync method that handles all sync scenarios.
+     * Resolve and store the vault key right after login from the unlock key (see VaultSync.resolveVaultKey).
+     */
+    suspend fun resolveVaultKey(webApiService: net.aliasvault.app.webapi.WebApiService, derivedKeyBase64: String): String {
+        return sync.resolveVaultKey(webApiService, derivedKeyBase64)
+    }
+
+    /**
+     * Full vault sync through the Rust sync engine.
      */
     suspend fun syncVaultWithServer(webApiService: net.aliasvault.app.webapi.WebApiService): VaultSyncResult {
-        val result = sync.syncVaultWithServer(webApiService)
-        // Re-unlock vault if it was unlocked before sync and action was download/merge
-        if (result.success && (result.action == SyncAction.DOWNLOADED || result.action == SyncAction.MERGED) && isVaultUnlocked()) {
-            unlockVault()
-        }
-        return result
+        return sync.syncVaultWithServer(webApiService)
+    }
+
+    /**
+     * The logs of the recent sync engine runs as JSON text, newest first (developer tools).
+     */
+    fun getVaultSyncLogs(): String {
+        return VaultSyncRunLog.persisted(storageProvider)
+    }
+
+    /**
+     * Classify the pending manifest migration (see VaultSync.getVaultMigrationStatus).
+     */
+    suspend fun getVaultMigrationStatus(webApiService: net.aliasvault.app.webapi.WebApiService): String {
+        return sync.getVaultMigrationStatus(webApiService)
+    }
+
+    /**
+     * Run the pending manifest migration and push it (see VaultSync.migrateVaultManifest).
+     */
+    suspend fun migrateVaultManifest(webApiService: net.aliasvault.app.webapi.WebApiService): VaultMigrationResult {
+        return sync.migrateVaultManifest(webApiService)
+    }
+
+    /**
+     * Run a sharing operation of the sync engine (see VaultSync.runSharingOperation).
+     */
+    suspend fun runSharingOperation(
+        operation: String,
+        params: org.json.JSONObject,
+        webApiService: net.aliasvault.app.webapi.WebApiService,
+    ): VaultSharingResult {
+        return sync.runSharingOperation(operation, params, webApiService)
     }
 
     // endregion
@@ -786,10 +816,10 @@ class VaultStore(
     // region Mutate Methods
 
     /**
-     * Execute a vault mutation operation.
+     * Push the pending local changes (after a native mutation).
      */
-    suspend fun mutateVault(webApiService: net.aliasvault.app.webapi.WebApiService): Boolean {
-        return mutate.mutateVault(webApiService)
+    suspend fun mutateVault(webApiService: net.aliasvault.app.webapi.WebApiService) {
+        sync.mutateVault(webApiService)
     }
 
     // endregion
@@ -797,115 +827,74 @@ class VaultStore(
     // region Passkey Methods
 
     /**
-     * Get a passkey by its credential ID (the WebAuthn credential ID).
-     */
-    fun getPasskeyByCredentialId(credentialId: ByteArray): net.aliasvault.app.vaultstore.models.Passkey? {
-        return passkey.getPasskeyByCredentialId(credentialId)
-    }
-
-    /**
-     * Get all passkeys for an item.
-     */
-    @Suppress("UnusedParameter")
-    fun getPasskeysForItem(
-        itemId: java.util.UUID,
-        db: io.requery.android.database.sqlite.SQLiteDatabase,
-    ): List<net.aliasvault.app.vaultstore.models.Passkey> {
-        return passkey.getPasskeysForItem(itemId)
-    }
-
-    /**
-     * Get all passkeys for a specific relying party identifier (RP ID).
-     */
-    fun getPasskeysForRpId(
-        rpId: String,
-    ): List<net.aliasvault.app.vaultstore.models.Passkey> {
-        return passkey.getPasskeysForRpId(rpId)
-    }
-
-    /**
      * Get passkeys with credential info for a specific rpId.
      */
-    fun getPasskeysWithCredentialInfo(
-        rpId: String,
-        userName: String? = null,
-        userId: ByteArray? = null,
-    ): List<net.aliasvault.app.vaultstore.repositories.PasskeyWithCredentialInfo> {
+    fun getPasskeysWithCredentialInfo(rpId: String, userName: String? = null, userId: ByteArray? = null): List<PasskeyWithItem> {
         return passkey.getPasskeysWithCredentialInfo(rpId, userName, userId)
     }
 
     /**
-     * Get all passkeys with their associated items in a single query.
+     * Get every passkey whose item is live, with the item's name and account.
      */
-    fun getAllPasskeysWithItems(): List<net.aliasvault.app.vaultstore.repositories.PasskeyWithItem> {
+    fun getAllPasskeysWithItems(): List<PasskeyWithItem> {
         return passkey.getAllPasskeysWithItems()
     }
 
     /**
-     * Get a passkey by its ID.
+     * Get a passkey by its ID, in any manifest.
      */
-    @Suppress("UnusedParameter")
-    fun getPasskeyById(
-        passkeyId: java.util.UUID,
-        db: io.requery.android.database.sqlite.SQLiteDatabase,
-    ): net.aliasvault.app.vaultstore.models.Passkey? {
+    fun getPasskeyById(passkeyId: UUID): net.aliasvault.app.vaultstore.models.Passkey? {
         return passkey.getPasskeyById(passkeyId)
     }
 
     /**
-     * Insert a new passkey into the database.
-     */
-    @Suppress("UnusedParameter")
-    fun insertPasskey(passkeyObj: net.aliasvault.app.vaultstore.models.Passkey, db: io.requery.android.database.sqlite.SQLiteDatabase) {
-        passkey.insertPasskey(passkeyObj)
-    }
-
-    /**
-     * Create an item with a passkey.
+     * Create an item with a passkey. The url is written as the item's login URL and names the favicon's domain.
      */
     fun createItemWithPasskey(
-        rpId: String,
+        url: String,
         userName: String?,
         displayName: String,
         passkeyObj: net.aliasvault.app.vaultstore.models.Passkey,
         logo: ByteArray? = null,
-    ): net.aliasvault.app.vaultstore.models.Item {
-        return passkey.createItemWithPasskey(rpId, userName, displayName, passkeyObj, logo)
+    ) {
+        passkey.createItemWithPasskey(url, userName, displayName, passkeyObj, logo)
     }
 
     /**
-     * Replace an existing passkey with a new one.
+     * Replace an existing passkey with a new one on the same item. The url names the domain the favicon was fetched for.
      */
+    @Suppress("LongParameterList") // One argument per value the replacement writes
     fun replacePasskey(
-        oldPasskeyId: java.util.UUID,
+        oldPasskeyId: UUID,
+        manifestId: String,
         newPasskey: net.aliasvault.app.vaultstore.models.Passkey,
         displayName: String,
+        url: String,
         logo: ByteArray? = null,
     ) {
-        passkey.replacePasskey(oldPasskeyId, newPasskey, displayName, logo)
+        passkey.replacePasskey(oldPasskeyId, manifestId, newPasskey, displayName, url, logo)
     }
 
     /**
      * Get Items that match an rpId but don't have a passkey yet.
      * Used for finding existing credentials that could have a passkey added to them.
      */
-    fun getItemsWithoutPasskeyForRpId(
-        rpId: String,
-        rpName: String? = null,
-        userName: String? = null,
-    ): List<net.aliasvault.app.vaultstore.repositories.ItemWithCredentialInfo> {
+    fun getItemsWithoutPasskeyForRpId(rpId: String, rpName: String? = null, userName: String? = null): List<ItemWithCredentialInfo> {
         return passkey.getItemsWithoutPasskeyForRpId(rpId, rpName, userName)
     }
 
     /**
-     * Add a passkey to an existing Item (merge passkey into existing credential).
+     * Add a passkey to an existing Item (merge passkey into existing credential). The url names the domain
+     * the favicon was fetched for.
      */
     fun addPasskeyToExistingItem(
-        itemId: java.util.UUID,
+        itemId: UUID,
+        manifestId: String,
         passkeyObj: net.aliasvault.app.vaultstore.models.Passkey,
+        url: String,
         logo: ByteArray? = null,
     ) {
-        passkey.addPasskeyToExistingItem(itemId, passkeyObj, logo)
+        passkey.addPasskeyToExistingItem(itemId, manifestId, passkeyObj, url, logo)
     }
 
     // endregion
@@ -921,14 +910,12 @@ class VaultStore(
     }
 
     /**
-     * Clear session data only (for forced logout).
-     * Preserves vault data on disk for recovery on next login.
-     * This is used when the user is forcibly logged out (e.g., 401, token revocation)
-     * to allow recovery of unsynced local changes.
+     * Clear the vault for a forced logout (e.g. 401, token revocation), keeping only the username for the login prefill.
      */
     fun clearSession() {
-        cache.clearSession()
-        clearLastSuccessfulAuth()
+        val username = getUsername()
+        clearVault()
+        username?.let { setUsername(it) }
     }
 
     /**
@@ -960,28 +947,25 @@ class VaultStore(
     }
 
     /**
-     * Get failed PIN attempts count.
-     */
-    fun getPinFailedAttempts(): Int {
-        return pin.getPinFailedAttempts()
-    }
-
-    /**
      * Setup PIN unlock.
      */
     @Throws(Exception::class)
-    fun setupPin(pinValue: String, vaultEncryptionKeyBase64: String) {
-        pin.setupPin(pinValue, vaultEncryptionKeyBase64)
+    fun setupPin(pinValue: String, accountKeyBase64: String) {
+        pin.setupPin(pinValue, accountKeyBase64)
     }
 
     /**
-     * Unlock with PIN.
+     * Unlock with PIN. Returns the Account Key, to open the session with.
      */
     @Throws(Exception::class)
     fun unlockWithPin(pinValue: String): String {
         val key = pin.unlockWithPin(pinValue)
         markSuccessfulAuth()
-        return key
+
+        val accountKey = crypto.openAccountKeyChain(android.util.Base64.decode(key, android.util.Base64.NO_WRAP)).accountKey
+        val accountKeyBase64 = android.util.Base64.encodeToString(accountKey, android.util.Base64.NO_WRAP)
+        LegacyKeyConversion.convertLegacyPinKey(pin, pinValue, key, accountKeyBase64)
+        return accountKeyBase64
     }
 
     /**

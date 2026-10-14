@@ -1,15 +1,27 @@
 {
     "name": "@aliasvault/models",
-    "version": "1.0.0",
+    "version": "0.31.0",
     "type": "module",
     "main": "dist/index.mjs",
     "types": "dist/index.d.mts",
+    "exports": {
+        "./colors": "./src/colors/index.ts",
+        "./colors/tailwind-preset": "./src/colors/tailwind-preset.cjs",
+        "./defaults": "./src/defaults/index.ts",
+        "./icons": "./src/icons/index.ts",
+        "./identity": "./src/identity/index.ts",
+        "./metadata": "./src/metadata/index.ts",
+        "./vault": "./src/vault/index.ts",
+        "./webapi": "./src/webapi/index.ts"
+    },
     "scripts": {
         "build": "tsup",
         "clean": "rm -rf dist",
         "lint": "eslint src",
         "lint:fix": "eslint src --fix",
-        "test": "vitest run"
+        "test": "vitest run --passWithNoTests",
+        "icons:generate": "node scripts/generate-icons.cjs",
+        "colors:generate": "node scripts/generate-colors.cjs"
     },
     "files": [
         "dist"

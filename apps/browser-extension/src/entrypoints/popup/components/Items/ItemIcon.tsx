@@ -1,13 +1,19 @@
-import React from 'react';
-
-import type { ItemTypeIconKey } from '@/utils/dist/core/models/icons';
-import { ItemTypeIconSvgs } from '@/utils/dist/core/models/icons';
-import type { Item } from '@/utils/dist/core/models/vault';
+import SqliteClient from '@aliasvault/client/database/SqliteClient';
+import { getBuiltinLogoSvg, ItemTypeIconSvgs } from '@aliasvault/models/icons';
 import {
   FieldKey,
+  LogoKinds,
   ItemTypes,
-} from '@/utils/dist/core/models/vault';
-import SqliteClient from '@/utils/SqliteClient';
+  type Item,
+} from '@aliasvault/models/vault';
+import React from 'react';
+
+import type { ItemTypeIconKey } from '@aliasvault/models/icons';
+
+/**
+ * Corner rounding for raster logos, proportional to the icon size so every size looks the same.
+ */
+const LOGO_ROUNDING = 'rounded-[17%]';
 
 type ItemIconProps = {
   item: Item;
@@ -30,28 +36,28 @@ const SvgIcon: React.FC<{ svg: string; className?: string }> = ({ svg, className
  */
 const detectCardBrand = (cardNumber: string | undefined): ItemTypeIconKey => {
   if (!cardNumber) {
-    return 'CreditCard';
+    return 'credit-card';
   }
 
   const cleaned = cardNumber.replace(/[\s-]/g, '');
   if (!/^\d{4,}/.test(cleaned)) {
-    return 'CreditCard';
+    return 'credit-card';
   }
 
   if (/^4/.test(cleaned)) {
-    return 'Visa';
+    return 'visa';
   }
   if (/^5[1-5]/.test(cleaned) || /^2[2-7]/.test(cleaned)) {
-    return 'Mastercard';
+    return 'mastercard';
   }
   if (/^3[47]/.test(cleaned)) {
-    return 'Amex';
+    return 'amex';
   }
   if (/^6(?:011|22|4[4-9]|5)/.test(cleaned)) {
-    return 'Discover';
+    return 'discover';
   }
 
-  return 'CreditCard';
+  return 'credit-card';
 };
 
 /**
@@ -64,14 +70,34 @@ const getCardIconSvg = (cardNumber: string | undefined): string => {
 /**
  * ItemIcon component - displays contextually appropriate icons based on item type
  *
+ * An icon the user picked (built-in or uploaded) wins for any item type.
+ * Otherwise:
  * For Login/Alias: Uses the Logo field if available, falls back to placeholder
  * For CreditCard: Shows card brand icons (Visa, Mastercard, Amex, Discover) based on card number
  * For Note: Shows a document/note icon
  */
 const ItemIcon: React.FC<ItemIconProps> = ({ item, className = 'w-8 h-8' }) => {
+  /*
+   * An icon the user picked themselves outranks the item type's own icon: they asked for this
+   * drawing on this item. Automatic favicons do not, so a card keeps showing a card.
+   */
+  const chosen = item.LogoInfo && item.LogoInfo.Kind !== LogoKinds.Favicon ? item.LogoInfo : null;
+  if (chosen?.Kind === LogoKinds.Builtin) {
+    const builtinSvg = getBuiltinLogoSvg(chosen.Source);
+    if (builtinSvg) {
+      return <SvgIcon svg={builtinSvg} className={className} />;
+    }
+  }
+  if (chosen?.Kind === LogoKinds.Custom) {
+    const uploadedSrc = item.Logo ? SqliteClient.imgSrcFromBytes(item.Logo) : null;
+    if (uploadedSrc) {
+      return <img src={uploadedSrc} alt={item.Name ?? 'Item'} className={`${className} flex-shrink-0 ${LOGO_ROUNDING}`} />;
+    }
+  }
+
   // For Note type, always show note icon
   if (item.ItemType === ItemTypes.Note) {
-    return <SvgIcon svg={ItemTypeIconSvgs.Note} className={className} />;
+    return <SvgIcon svg={ItemTypeIconSvgs.note} className={className} />;
   }
 
   // For CreditCard type, detect card brand and show appropriate icon
@@ -94,7 +120,7 @@ const ItemIcon: React.FC<ItemIconProps> = ({ item, className = 'w-8 h-8' }) => {
       <img
         src={logoSrc}
         alt={item.Name || 'Item'}
-        className={`${className} flex-shrink-0`}
+        className={`${className} flex-shrink-0 ${LOGO_ROUNDING}`}
         onError={(e) => {
           // On error, replace with placeholder icon
           const target = e.target as HTMLImageElement;
@@ -103,7 +129,7 @@ const ItemIcon: React.FC<ItemIconProps> = ({ item, className = 'w-8 h-8' }) => {
           if (parent) {
             const placeholder = document.createElement('div');
             placeholder.className = className;
-            placeholder.innerHTML = ItemTypeIconSvgs.Placeholder;
+            placeholder.innerHTML = ItemTypeIconSvgs.placeholder;
             parent.insertBefore(placeholder, target);
           }
         }}
@@ -112,7 +138,7 @@ const ItemIcon: React.FC<ItemIconProps> = ({ item, className = 'w-8 h-8' }) => {
   }
 
   // Default placeholder for Login/Alias without logo
-  return <SvgIcon svg={ItemTypeIconSvgs.Placeholder} className={className} />;
+  return <SvgIcon svg={ItemTypeIconSvgs.placeholder} className={className} />;
 };
 
 export default ItemIcon;

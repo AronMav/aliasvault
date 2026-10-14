@@ -2,23 +2,32 @@
  * Background script entry point - handles messages from the content script
  */
 
+import '@/platform/ClientServices';
+
+import { broadcastVaultUnlocked, handleAwaitPendingAuth, handleLoginWithPassword, handleLoginWithTwoFactor, handleUnlockWithPassword, handleUnlockWithPin } from '@/entrypoints/background/AuthHandler';
 import { handleResetAutoLockTimer, handlePopupHeartbeat, handleSetAutoLockTimeout, initializeAutoLockAlarm, handleAutoLockAlarm } from '@/entrypoints/background/AutolockTimeoutHandler';
-import { handleClipboardCopied, handleCancelClipboardClear, handleGetClipboardClearTimeout, handleSetClipboardClearTimeout, handleGetClipboardCountdownState } from '@/entrypoints/background/ClipboardClearHandler';
+import { handleClipboardCopied, handleSetClipboardClearTimeout, handleGetClipboardCountdownState } from '@/entrypoints/background/ClipboardClearHandler';
+import { handleBlockLoginSaveForDomain, handleDisableAutofillForSite, handleDismissVaultLockedPopup, handleGetContentSettings, handleGetLanguage, handleIsLoginSaveBlocked, restrictContentScriptStorage } from '@/entrypoints/background/ContentSettingsHandler';
 import { setupContextMenus } from '@/entrypoints/background/ContextMenu';
 import { handleGetWebAuthnSettings, handleWebAuthnCreate, handleWebAuthnGet, handlePasskeyPopupResponse, handleGetRequestData, handleGetMatchingPasskeys, handleWebAuthnGetAssertion } from '@/entrypoints/background/PasskeyHandler';
 import { handleOpenPopup, handlePopupWithItem, handleOpenPopupCreateCredential, handleToggleContextMenu } from '@/entrypoints/background/PopupMessageHandler';
-import { handleStoreSavePromptState, handleGetSavePromptState, handleClearSavePromptState, handleStoreLastAutofilled, handleGetLastAutofilled, handleClearLastAutofilled } from '@/entrypoints/background/SavePromptStateHandler';
-import { handleStoreTwoFactorState, handleGetTwoFactorState, handleClearTwoFactorState } from '@/entrypoints/background/TwoFactorStateHandler';
-import { handleCheckAuthStatus, handleClearPersistedFormValues, handleClearSession, handleClearVaultData, handleLockVault, handleGetFilteredItems, handleGetSearchItems, handleGetDefaultEmailDomain, handleGetDefaultIdentitySettings, handleGetEncryptionKey, handleGetEncryptionKeyDerivationParams, handleGetPasswordSettings, handleGeneratePassword, handleGetPersistedFormValues, handleGetVault, handlePersistFormValues, handleStoreEncryptionKey, handleStoreEncryptionKeyDerivationParams, handleStoreVaultMetadata, handleSyncVault, handleUploadVault, handleGetEncryptedVault, handleStoreEncryptedVault, handleGetSyncState, handleMarkVaultClean, handleGetServerRevision, handleCheckSyncStatus, handleFullVaultSync, handleCheckLoginDuplicate, handleSaveLoginCredential, handleAddUrlToCredential, handleIsUrlLinkedToCredential, handleGetLoginSaveSettings, handleSetLoginSaveEnabled, handleGetItemsWithTotp, handleSearchItemsWithTotp, handleGetTotpSecrets, handleGenerateTotpCode, handleSetRecentlySelected, handleGetRecentlySelected, handleExtractRootDomain, prewarmVaultCache } from '@/entrypoints/background/VaultMessageHandler';
+import { handleStoreSavePromptState, handleGetSavePromptState, handleClearSavePromptState, handleGetLastAutofilled, handleClearLastAutofilled } from '@/entrypoints/background/SavePromptStateHandler';
+import { handleGetTwoFactorPrompt, handleClearTwoFactorState } from '@/entrypoints/background/TwoFactorStateHandler';
+import { handleCheckAuthStatus, handleClearPersistedFormValues, handleClearSession, handleClearVaultData, handleLockVault, handleGetFilteredItems, handleGetSearchItems, handleGetEncryptionKey, handleGetUnlockKeyDerivationParams, handleGetPersistedFormValues, handleGetVaultMigrationStatus, handlePersistFormValues, handleStoreAccountKey, handleStoreUnlockKeyDerivationParams, handleStoreEncryptedVaultChunk, handleGetSyncState, handleMigrateVaultManifest, handleFullVaultSync, handleGroupCreateVault, handleGroupInviteMember, handleGroupUpdateVault, handleGroupRevokeAccess, handleCheckLoginDuplicate, handleSaveLoginCredential, handleAddUrlToCredential, handleIsUrlLinkedToCredential, handleGetLoginSaveSettings, handleGetItemsWithTotp, handleSearchItemsWithTotp, handleGetTotpCodes, handleGenerateTotpCode, handleGetAutofillCredential, handleRecordItemUsage, type AutofillSender } from '@/entrypoints/background/VaultMessageHandler';
+import { getCurrentAutofillFrameUrl } from '@/entrypoints/contentScript/AutofillFrameUrl';
 
+import { logFailure } from '@/utils/Diagnostics';
 import { LocalPreferencesService } from '@/utils/LocalPreferencesService';
 import { onMessage, sendMessage } from "@/utils/messaging/ExtensionMessaging";
+import type { IExtensionMessageProtocol } from "@/utils/messaging/ExtensionMessaging";
+import { isRpIdAllowedForCaller } from '@/utils/passkey/RelyingPartyValidation';
 import type { MatchingPasskeysResponse, WebAuthnAssertionResponse, WebAuthnPublicKeyGetPayload } from '@/utils/passkey/types';
-import { isRpIdAllowedForHost, validateWebAuthnRequest } from '@/utils/passkey/WebAuthnRequestValidation';
+import { getWebAuthnRequestRpId, validateWebAuthnRequest } from '@/utils/passkey/WebAuthnRequestValidation';
 import type { WebAuthnBridgeRequest } from '@/utils/passkey/WebAuthnRequestValidation';
-import { initRustCore } from '@/utils/RustCore';
 
 import { runStartupMigrations } from '@/migrations';
+
+import type { ExtensionMessage, GetReturnType, MaybePromise, Message } from '@webext-core/messaging';
 
 import { defineBackground, browser } from '#imports';
 
@@ -70,39 +79,88 @@ function getTrustedWebAuthnSenderContext(sender: WebAuthnMessageSender): Trusted
  * so each WebAuthn message keeps its own validation rule and fallback shape while sharing the
  * trust resolution and guard plumbing.
  */
-function withTrustedWebAuthnSender<T, U>(
+async function withTrustedWebAuthnSender<T, U>(
   sender: WebAuthnMessageSender,
-  validate: (context: TrustedWebAuthnSenderContext) => boolean,
+  validate: (context: TrustedWebAuthnSenderContext) => MaybePromise<boolean>,
   handle: (context: TrustedWebAuthnSenderContext) => T,
   onInvalid: U
-): T | U {
+): Promise<Awaited<T> | U> {
   const senderContext = getTrustedWebAuthnSenderContext(sender);
-  if (!senderContext || !validate(senderContext)) {
+  if (!senderContext || !(await validate(senderContext))) {
     return onInvalid;
   }
 
-  return handle(senderContext);
+  return await handle(senderContext);
 }
 
 /**
- * Notify content scripts in all tabs that the vault was unlocked, so any conditional passkey
- * request parked while the vault was locked can re-query and surface its passkeys.
+ * Validate a WebAuthn request and check that the sender may use the RP ID it names.
  */
-async function broadcastVaultUnlocked(): Promise<void> {
+async function isValidWebAuthnRequest(type: 'create' | 'get', request: WebAuthnBridgeRequest, context: TrustedWebAuthnSenderContext): Promise<boolean> {
+  if (!validateWebAuthnRequest(type, request, context.origin)) {
+    return false;
+  }
+
+  const rpId = getWebAuthnRequestRpId(type, request);
+  return rpId === undefined || (typeof rpId === 'string' && await isRpIdAllowedForCaller(rpId, context.origin, context.host));
+}
+
+/**
+ * True when the message comes from one of the extension's own pages (popup, expanded tab, passkey window),
+ * false for content scripts running inside web pages. Sensitive operations must never be serviceable from a content-script context.
+ */
+function isTrustedExtensionSender(sender: WebAuthnMessageSender): boolean {
+  const senderOrigin = typeof sender.origin === 'string' && sender.origin !== 'null' ? sender.origin : undefined;
+  const senderUrl = senderOrigin ?? sender.url ?? sender.tab?.url;
+  if (!senderUrl) {
+    return false;
+  }
+
   try {
-    const tabs = await browser.tabs.query({});
-    await Promise.all(tabs.map(async (tab) => {
-      if (tab.id === undefined) {
-        return;
-      }
-      try {
-        await sendMessage('VAULT_UNLOCKED', undefined, tab.id);
-      } catch {
-        // No receiving content script in this tab — ignore.
-      }
-    }));
+    return new URL(senderUrl).origin === new URL(browser.runtime.getURL('')).origin;
   } catch {
-    // tabs.query can fail in rare contexts — best-effort, ignore.
+    return false;
+  }
+}
+
+/**
+ * Register a handler that only the extension's own pages may call; a message from a content script is rejected.
+ */
+function onExtensionPageMessage<TType extends keyof IExtensionMessageProtocol>(
+  type: TType,
+  handler: (message: Message<IExtensionMessageProtocol, TType> & ExtensionMessage) => MaybePromise<GetReturnType<IExtensionMessageProtocol[TType]>>
+): void {
+  onMessage(type, (message) => {
+    if (!isTrustedExtensionSender(message.sender)) {
+      throw new Error(`${type} is only available to extension pages`);
+    }
+    return handler(message);
+  });
+}
+
+/**
+ * Resolve the tab and frame URL of a content-script message from the browser-supplied sender.
+ */
+function getAutofillSender(sender: { url?: string; frameId?: number; tab?: { id?: number; url?: string } }): AutofillSender {
+  const url = sender.url ?? (sender.frameId === 0 ? sender.tab?.url : undefined);
+  let pageUrl: string | null = null;
+  try {
+    pageUrl = url ? getCurrentAutofillFrameUrl(new URL(url)) : null;
+  } catch {
+    pageUrl = null;
+  }
+  return { tabId: sender.tab?.id, pageUrl };
+}
+
+/**
+ * Host of the content-script frame that sent a message, from the browser-supplied sender.
+ */
+function getSenderHostname(sender: { url?: string; frameId?: number; tab?: { id?: number; url?: string } }): string | null {
+  const { pageUrl } = getAutofillSender(sender);
+  try {
+    return pageUrl ? new URL(pageUrl).hostname || null : null;
+  } catch {
+    return null;
   }
 }
 
@@ -110,10 +168,10 @@ async function broadcastVaultUnlocked(): Promise<void> {
  * Validate a WebAuthn create request against the sender's trusted origin, then forward it to the
  * passkey create flow. Falls back when the sender is untrusted or validation fails.
  */
-function handleValidatedWebAuthnCreate(data: WebAuthnBridgeRequest, sender: WebAuthnMessageSender): Promise<unknown> | { fallback: true } {
+function handleValidatedWebAuthnCreate(data: WebAuthnBridgeRequest, sender: WebAuthnMessageSender): Promise<unknown> {
   return withTrustedWebAuthnSender(
     sender,
-    (ctx) => validateWebAuthnRequest('create', data, ctx.origin, ctx.host),
+    (ctx) => isValidWebAuthnRequest('create', data, ctx),
     (ctx) => handleWebAuthnCreate({ ...data, origin: ctx.origin }),
     { fallback: true }
   );
@@ -123,10 +181,10 @@ function handleValidatedWebAuthnCreate(data: WebAuthnBridgeRequest, sender: WebA
  * Validate a WebAuthn get request against the sender's trusted origin, then forward it to the
  * passkey get flow. Falls back when the sender is untrusted or validation fails.
  */
-function handleValidatedWebAuthnGet(data: WebAuthnBridgeRequest, sender: WebAuthnMessageSender): Promise<unknown> | { fallback: true } {
+function handleValidatedWebAuthnGet(data: WebAuthnBridgeRequest, sender: WebAuthnMessageSender): Promise<unknown> {
   return withTrustedWebAuthnSender(
     sender,
-    (ctx) => validateWebAuthnRequest('get', data, ctx.origin, ctx.host),
+    (ctx) => isValidWebAuthnRequest('get', data, ctx),
     (ctx) => handleWebAuthnGet({ ...data, origin: ctx.origin }),
     { fallback: true }
   );
@@ -140,10 +198,10 @@ function handleValidatedWebAuthnGet(data: WebAuthnBridgeRequest, sender: WebAuth
 function handleValidatedGetMatchingPasskeys(
   data: { rpId: string; allowCredentialIds?: string[] },
   sender: WebAuthnMessageSender
-): Promise<MatchingPasskeysResponse> | MatchingPasskeysResponse {
+): Promise<MatchingPasskeysResponse> {
   return withTrustedWebAuthnSender(
     sender,
-    (ctx) => typeof data?.rpId === 'string' && isRpIdAllowedForHost(data.rpId, ctx.host),
+    async (ctx) => typeof data?.rpId === 'string' && await isRpIdAllowedForCaller(data.rpId, ctx.origin, ctx.host),
     () => handleGetMatchingPasskeys(data),
     { success: false, locked: false, passkeys: [] }
   );
@@ -154,12 +212,12 @@ function handleValidatedGetMatchingPasskeys(
  * The trusted origin is embedded in the signed client data.
  */
 function handleValidatedWebAuthnGetAssertion(
-  data: { passkeyId: string; origin: string; publicKey: WebAuthnPublicKeyGetPayload },
+  data: { passkeyId: string; manifestId: string; origin: string; publicKey: WebAuthnPublicKeyGetPayload },
   sender: WebAuthnMessageSender
-): Promise<WebAuthnAssertionResponse> | WebAuthnAssertionResponse {
+): Promise<WebAuthnAssertionResponse> {
   return withTrustedWebAuthnSender(
     sender,
-    (ctx) => typeof data?.passkeyId === 'string' && validateWebAuthnRequest('get', data, ctx.origin, ctx.host),
+    async (ctx) => typeof data?.passkeyId === 'string' && typeof data?.manifestId === 'string' && await isValidWebAuthnRequest('get', data, ctx),
     (ctx) => handleWebAuthnGetAssertion({ ...data, origin: ctx.origin }),
     { success: false, error: 'Invalid request' }
   );
@@ -174,44 +232,6 @@ function handleValidatedWebAuthnGetAssertion(
  */
 browser.alarms.onAlarm.addListener(handleAutoLockAlarm);
 
-/*
- * Keepalive port listener (top-level scope, same reason as the alarm listener above).
- *
- * While any content script holds an open port to this worker, Chrome will not terminate it.
- * The content scripts open the port while the vault is unlocked (see ServiceWorkerKeepalive),
- * so the autofill popup never has to wake a cold worker and the loading spinner never shows.
- * The listener itself only needs to accept the connection.
- */
-try {
-  browser.runtime.onConnect.addListener((port) => {
-    if (port.name !== 'av-keepalive') {
-      return;
-    }
-    /*
-     * Answer the content script's periodic pings. Recent Chrome releases only count active
-     * messaging as keep-alive activity, so the ping/pong round trip is what keeps this worker
-     * warm while any vault is unlocked.
-     */
-    port.onMessage.addListener((message: unknown) => {
-      if (message && (message as { type?: string }).type === 'ping') {
-        try {
-          port.postMessage({ type: 'pong' });
-        } catch {
-          // Port already gone; onDisconnect below cleans up.
-        }
-      }
-    });
-    port.onDisconnect.addListener(() => {
-      /* Nothing to clean up: the port object goes out of scope. */
-    });
-  });
-} catch {
-  /*
-   * fake-browser (wxt build/test environment) does not implement runtime.onConnect.
-   * In the real extension this always succeeds; keepalive only matters there anyway.
-   */
-}
-
 export default defineBackground({
   /**
    * This is the main entry point for the background script.
@@ -223,6 +243,9 @@ export default defineBackground({
    * run as a fire-and-forget IIFE so this function returns synchronously.
    */
   main() {
+    // Keep content scripts (and so a compromised page renderer) out of storage.local where the browser supports it.
+    void restrictContentScriptStorage();
+
     /*
      * Register any synchronous event listeners first, before any await, 
      * so they're attached synchronously on service-worker wake-up.
@@ -246,32 +269,24 @@ export default defineBackground({
           sendMessage('OPEN_AUTOFILL_POPUP', { elementIdentifier }, tab.id);
         }
       } catch (error) {
-        console.error('Error handling show-autofill-popup command:', error);
+        logFailure('Error handling show-autofill-popup command', error);
       }
     });
 
     /*
      * Listen for messages via @webext-core/messaging.
      */
-    onMessage('PING', () => true);
-    onMessage('CHECK_AUTH_STATUS', (data) => handleCheckAuthStatus(data ?? {}));
+    onMessage('CHECK_AUTH_STATUS', () => handleCheckAuthStatus());
 
-    onMessage('GET_ENCRYPTION_KEY', () => handleGetEncryptionKey());
-    onMessage('GET_ENCRYPTION_KEY_DERIVATION_PARAMS', () => handleGetEncryptionKeyDerivationParams());
-    onMessage('GET_VAULT', () => handleGetVault());
-    onMessage('GET_FILTERED_ITEMS', ({ data }) => handleGetFilteredItems(data));
+    onExtensionPageMessage('GET_ENCRYPTION_KEY', () => handleGetEncryptionKey());
+    onExtensionPageMessage('GET_UNLOCK_KEY_DERIVATION_PARAMS', () => handleGetUnlockKeyDerivationParams());
+    onMessage('GET_FILTERED_ITEMS', ({ data, sender }) => handleGetFilteredItems(data, getAutofillSender(sender)));
     onMessage('GET_SEARCH_ITEMS', ({ data }) => handleGetSearchItems(data));
 
-    onMessage('GET_DEFAULT_EMAIL_DOMAIN', () => handleGetDefaultEmailDomain());
-    onMessage('GET_DEFAULT_IDENTITY_SETTINGS', () => handleGetDefaultIdentitySettings());
-    onMessage('GET_PASSWORD_SETTINGS', () => handleGetPasswordSettings());
-    onMessage('GENERATE_PASSWORD', ({ data }) => handleGeneratePassword(data.settings));
-
-    onMessage('STORE_VAULT_METADATA', ({ data }) => handleStoreVaultMetadata(data));
-    onMessage('STORE_ENCRYPTION_KEY', async ({ data }) => {
-      const result = await handleStoreEncryptionKey(data);
+    onExtensionPageMessage('STORE_ACCOUNT_KEY', async ({ data }) => {
+      const result = await handleStoreAccountKey(data);
       /*
-       * Storing the encryption key means the vault just became unlocked; let content scripts
+       * Storing the Account Key means the vault just became unlocked; let content scripts
        * re-query any conditional passkey requests they parked while the vault was locked.
        */
       if (result.success) {
@@ -279,79 +294,91 @@ export default defineBackground({
       }
       return result;
     });
-    onMessage('STORE_ENCRYPTION_KEY_DERIVATION_PARAMS', ({ data }) => handleStoreEncryptionKeyDerivationParams(data));
+    onExtensionPageMessage('STORE_UNLOCK_KEY_DERIVATION_PARAMS', ({ data }) => handleStoreUnlockKeyDerivationParams(data));
 
-    onMessage('GET_ENCRYPTED_VAULT', () => handleGetEncryptedVault());
-    onMessage('STORE_ENCRYPTED_VAULT', ({ data }) => handleStoreEncryptedVault(data));
-    onMessage('GET_SYNC_STATE', () => handleGetSyncState());
-    onMessage('MARK_VAULT_CLEAN', ({ data }) => handleMarkVaultClean(data));
-    onMessage('GET_SERVER_REVISION', () => handleGetServerRevision());
+    // Login and unlock run in the background so they complete when the popup closes mid-flow.
+    onExtensionPageMessage('AUTH_LOGIN', ({ data }) => handleLoginWithPassword(data));
+    onExtensionPageMessage('AUTH_LOGIN_TWO_FACTOR', ({ data }) => handleLoginWithTwoFactor(data));
+    onExtensionPageMessage('AUTH_UNLOCK_PASSWORD', ({ data }) => handleUnlockWithPassword(data));
+    onExtensionPageMessage('AUTH_UNLOCK_PIN', ({ data }) => handleUnlockWithPin(data));
+    onExtensionPageMessage('AUTH_AWAIT_PENDING', () => handleAwaitPendingAuth());
 
-    onMessage('UPLOAD_VAULT', () => handleUploadVault());
-    onMessage('SYNC_VAULT', () => handleSyncVault());
-    onMessage('CHECK_SYNC_STATUS', () => handleCheckSyncStatus());
-    onMessage('FULL_VAULT_SYNC', () => handleFullVaultSync());
-    onMessage('LOCK_VAULT', () => handleLockVault());
-    onMessage('CLEAR_SESSION', () => handleClearSession());
-    onMessage('CLEAR_VAULT_DATA', () => handleClearVaultData());
+    onExtensionPageMessage('STORE_ENCRYPTED_VAULT', ({ data }) => handleStoreEncryptedVaultChunk(data));
+    onExtensionPageMessage('GET_SYNC_STATE', () => handleGetSyncState());
+
+    onExtensionPageMessage('FULL_VAULT_SYNC', ({ data }) => handleFullVaultSync(data));
+    onExtensionPageMessage('START_VAULT_SYNC', () => {
+      void handleFullVaultSync().catch(error => logFailure('Background vault sync failed', error));
+      return { success: true };
+    });
+    onExtensionPageMessage('GET_VAULT_MIGRATION_STATUS', () => handleGetVaultMigrationStatus());
+    onExtensionPageMessage('MIGRATE_VAULT_MANIFEST', () => handleMigrateVaultManifest());
+    onExtensionPageMessage('GROUP_CREATE_VAULT', ({ data }) => handleGroupCreateVault(data));
+    onExtensionPageMessage('GROUP_UPDATE_VAULT', ({ data }) => handleGroupUpdateVault(data));
+    onExtensionPageMessage('GROUP_INVITE_MEMBER', ({ data }) => handleGroupInviteMember(data));
+    onExtensionPageMessage('GROUP_REVOKE_ACCESS', ({ data }) => handleGroupRevokeAccess(data));
+    onExtensionPageMessage('LOCK_VAULT', () => handleLockVault());
+    onExtensionPageMessage('CLEAR_SESSION', () => handleClearSession());
+    onExtensionPageMessage('CLEAR_VAULT_DATA', () => handleClearVaultData());
 
     onMessage('OPEN_POPUP', () => handleOpenPopup());
     onMessage('OPEN_POPUP_WITH_ITEM', ({ data }) => handlePopupWithItem(data));
     onMessage('OPEN_POPUP_CREATE_CREDENTIAL', ({ data, sender }) => handleOpenPopupCreateCredential(data, sender));
-    onMessage('TOGGLE_CONTEXT_MENU', ({ data }) => handleToggleContextMenu(data));
+    onExtensionPageMessage('TOGGLE_CONTEXT_MENU', ({ data }) => handleToggleContextMenu(data));
 
-    onMessage('PERSIST_FORM_VALUES', ({ data }) => handlePersistFormValues(data));
-    onMessage('GET_PERSISTED_FORM_VALUES', () => handleGetPersistedFormValues());
-    onMessage('CLEAR_PERSISTED_FORM_VALUES', () => handleClearPersistedFormValues());
+    onExtensionPageMessage('PERSIST_FORM_VALUES', ({ data }) => handlePersistFormValues(data));
+    onExtensionPageMessage('GET_PERSISTED_FORM_VALUES', () => handleGetPersistedFormValues());
+    onExtensionPageMessage('CLEAR_PERSISTED_FORM_VALUES', () => handleClearPersistedFormValues());
 
     // Remember login save messages
-    onMessage('CHECK_LOGIN_DUPLICATE', ({ data }) => handleCheckLoginDuplicate(data));
-    onMessage('SAVE_LOGIN_CREDENTIAL', ({ data }) => handleSaveLoginCredential(data));
-    onMessage('ADD_URL_TO_CREDENTIAL', ({ data }) => handleAddUrlToCredential(data));
-    onMessage('IS_URL_LINKED_TO_CREDENTIAL', ({ data }) => handleIsUrlLinkedToCredential(data));
+    onMessage('CHECK_LOGIN_DUPLICATE', ({ data, sender }) => handleCheckLoginDuplicate(data, getAutofillSender(sender)));
+    onMessage('SAVE_LOGIN_CREDENTIAL', ({ data, sender }) => handleSaveLoginCredential(data, getAutofillSender(sender)));
+    onMessage('ADD_URL_TO_CREDENTIAL', ({ data, sender }) => handleAddUrlToCredential(data, getAutofillSender(sender)));
+    onMessage('IS_URL_LINKED_TO_CREDENTIAL', ({ data, sender }) => handleIsUrlLinkedToCredential(data, getAutofillSender(sender)));
     onMessage('GET_LOGIN_SAVE_SETTINGS', () => handleGetLoginSaveSettings());
-    onMessage('SET_LOGIN_SAVE_ENABLED', ({ data }) => handleSetLoginSaveEnabled(data));
+    onMessage('IS_LOGIN_SAVE_BLOCKED', ({ data }) => handleIsLoginSaveBlocked(data.domain));
+    onMessage('BLOCK_LOGIN_SAVE_FOR_DOMAIN', ({ data }) => handleBlockLoginSaveForDomain(data.domain));
+
+    // Local preferences for content scripts, which cannot read storage.local themselves
+    onMessage('GET_CONTENT_SETTINGS', ({ sender }) => handleGetContentSettings(getSenderHostname(sender)));
+    onMessage('DISABLE_AUTOFILL_FOR_SITE', ({ data, sender }) => handleDisableAutofillForSite(getSenderHostname(sender), data.temporary));
+    onMessage('DISMISS_VAULT_LOCKED_POPUP', () => handleDismissVaultLockedPopup());
+    onMessage('GET_LANGUAGE', () => handleGetLanguage());
 
     // TOTP autofill messages
-    onMessage('GET_ITEMS_WITH_TOTP', ({ data }) => handleGetItemsWithTotp(data));
+    onMessage('GET_ITEMS_WITH_TOTP', ({ data, sender }) => handleGetItemsWithTotp(data, getAutofillSender(sender)));
     onMessage('SEARCH_ITEMS_WITH_TOTP', ({ data }) => handleSearchItemsWithTotp(data));
-    onMessage('GET_TOTP_SECRETS', ({ data }) => handleGetTotpSecrets(data));
-    onMessage('GENERATE_TOTP_CODE', ({ data }) => handleGenerateTotpCode(data));
+    onMessage('GET_TOTP_CODES', ({ data }) => handleGetTotpCodes(data));
+    onMessage('GENERATE_TOTP_CODE', ({ data, sender }) => handleGenerateTotpCode(data, getAutofillSender(sender)));
 
-    // Track recently selected items for autofill prioritization
-    onMessage('SET_RECENTLY_SELECTED', ({ data }) => handleSetRecentlySelected(data));
-    onMessage('GET_RECENTLY_SELECTED', ({ data }) => handleGetRecentlySelected(data));
+    // Fill data for the one item picked in the in-page popup; records the pick (recently selected, last autofilled, usage)
+    onMessage('GET_AUTOFILL_CREDENTIAL', ({ data, sender }) => handleGetAutofillCredential(data, getAutofillSender(sender)));
+
+    // Record item usage (last used + counts) into the Stats data bucket; autofill from content scripts is recorded by the background
+    onExtensionPageMessage('RECORD_ITEM_USAGE', ({ data }) => handleRecordItemUsage(data));
 
     // Remember login save state (for surviving page navigation)
     onMessage('STORE_SAVE_PROMPT_STATE', ({ data, sender }) => handleStoreSavePromptState({ tabId: sender.tab!.id!, state: data }));
-    onMessage('GET_SAVE_PROMPT_STATE', ({ sender }) => handleGetSavePromptState({ tabId: sender.tab!.id! }));
+    onMessage('GET_SAVE_PROMPT_STATE', ({ data, sender }) => handleGetSavePromptState({ tabId: sender.tab!.id!, ...data }));
     onMessage('CLEAR_SAVE_PROMPT_STATE', ({ sender }) => handleClearSavePromptState({ tabId: sender.tab!.id! }));
-    onMessage('EXTRACT_ROOT_DOMAIN', ({ data }) => handleExtractRootDomain(data));
 
     // Track last autofilled credential (for "Add URL to existing credential" prompt)
-    onMessage('STORE_LAST_AUTOFILLED', ({ data, sender }) => handleStoreLastAutofilled({ tabId: sender.tab!.id!, credential: data }));
     onMessage('GET_LAST_AUTOFILLED', ({ data, sender }) => handleGetLastAutofilled({ tabId: sender.tab!.id!, ...data }));
     onMessage('CLEAR_LAST_AUTOFILLED', ({ sender }) => handleClearLastAutofilled({ tabId: sender.tab!.id! }));
 
     // Two-factor authentication state persistence
-    onMessage('STORE_TWO_FACTOR_STATE', ({ data }) => handleStoreTwoFactorState(data));
-    onMessage('GET_TWO_FACTOR_STATE', () => handleGetTwoFactorState());
-    onMessage('CLEAR_TWO_FACTOR_STATE', () => handleClearTwoFactorState());
+    onExtensionPageMessage('GET_TWO_FACTOR_STATE', () => handleGetTwoFactorPrompt());
+    onExtensionPageMessage('CLEAR_TWO_FACTOR_STATE', () => handleClearTwoFactorState());
 
     // Clipboard management messages
     onMessage('CLIPBOARD_COPIED', () => handleClipboardCopied());
-    onMessage('CANCEL_CLIPBOARD_CLEAR', () => handleCancelClipboardClear());
-    onMessage('GET_CLIPBOARD_CLEAR_TIMEOUT', () => handleGetClipboardClearTimeout());
-    onMessage('SET_CLIPBOARD_CLEAR_TIMEOUT', ({ data }) => handleSetClipboardClearTimeout(data));
-    onMessage('GET_CLIPBOARD_COUNTDOWN_STATE', () => handleGetClipboardCountdownState());
+    onExtensionPageMessage('SET_CLIPBOARD_CLEAR_TIMEOUT', ({ data }) => handleSetClipboardClearTimeout(data));
+    onExtensionPageMessage('GET_CLIPBOARD_COUNTDOWN_STATE', () => handleGetClipboardCountdownState());
 
     // Auto-lock management messages
     onMessage('RESET_AUTO_LOCK_TIMER', () => handleResetAutoLockTimer());
-    onMessage('SET_AUTO_LOCK_TIMEOUT', ({ data }) => handleSetAutoLockTimeout(data));
-    onMessage('POPUP_HEARTBEAT', () => handlePopupHeartbeat());
-
-    // Handle clipboard copied from context menu
-    onMessage('CLIPBOARD_COPIED_FROM_CONTEXT', () => handleClipboardCopied());
+    onExtensionPageMessage('SET_AUTO_LOCK_TIMEOUT', ({ data }) => handleSetAutoLockTimeout(data));
+    onExtensionPageMessage('POPUP_HEARTBEAT', () => handlePopupHeartbeat());
 
     // Passkey/WebAuthn settings
     onMessage('GET_WEBAUTHN_SETTINGS', ({ data }) => handleGetWebAuthnSettings(data));
@@ -365,8 +392,8 @@ export default defineBackground({
     onMessage('GET_MATCHING_PASSKEYS', ({ data, sender }) => handleValidatedGetMatchingPasskeys(data, sender));
 
     // Passkey popup request/response flow
-    onMessage('GET_REQUEST_DATA', ({ data }) => handleGetRequestData(data));
-    onMessage('PASSKEY_POPUP_RESPONSE', ({ data }) => handlePasskeyPopupResponse(data));
+    onExtensionPageMessage('GET_REQUEST_DATA', ({ data }) => handleGetRequestData(data));
+    onExtensionPageMessage('PASSKEY_POPUP_RESPONSE', ({ data }) => handlePasskeyPopupResponse(data));
 
     /*
      * Async setup (context menus, alarm restoration) runs in a fire-and-forget
@@ -380,29 +407,7 @@ export default defineBackground({
          */
         await runStartupMigrations();
       } catch (error) {
-        console.error('Error running startup migrations:', error);
-      }
-
-      try {
-        /*
-         * Pre-warm the Rust core WASM module. URL matching for the autofill popup runs through
-         * it; without this the first popup after a worker wake pays the ~1MB wasm load.
-         * Fire-and-forget: initRustCore is idempotent and failures fall back to lazy init.
-         */
-        void initRustCore().catch(error => {
-          console.error('Error pre-warming Rust core:', error);
-        });
-
-        /*
-         * Pre-decrypt the vault and warm the sqlite cache so the first autofill popup after a
-         * service worker wake (Chrome kills MV3 workers after ~30s idle) does not pay the
-         * decrypt + sqlite init cost while the user stares at the loading spinner. Must run
-         * after the migrations above: the cached database has to be in the latest schema.
-         * No-op when the vault is locked.
-         */
-        await prewarmVaultCache();
-      } catch (error) {
-        console.error('Error pre-warming vault cache:', error);
+        logFailure('Error running startup migrations', error);
       }
 
       try {
@@ -411,7 +416,7 @@ export default defineBackground({
           await setupContextMenus();
         }
       } catch (error) {
-        console.error('Error setting up context menus:', error);
+        logFailure('Error setting up context menus', error);
       }
 
       try {
@@ -422,7 +427,7 @@ export default defineBackground({
          */
         await initializeAutoLockAlarm();
       } catch (error) {
-        console.error('Error initializing auto-lock alarm:', error);
+        logFailure('Error initializing auto-lock alarm', error);
       }
     })();
   }

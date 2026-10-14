@@ -42,13 +42,11 @@ Builds:
       - apps/mobile-app/node_modules/react-native-screens/android/build.gradle
       - apps/mobile-app/node_modules/react-native-edge-to-edge/android/build.gradle
       - apps/mobile-app/node_modules/react-native-webview/android/build.gradle
-      - apps/mobile-app/node_modules/react-native-aes-gcm-crypto/android/build.gradle
       - apps/mobile-app/node_modules/react-native-context-menu-view/android/build.gradle
       - apps/mobile-app/node_modules/react-native-get-random-values/android/build.gradle
       - apps/mobile-app/node_modules/react-native-svg/android/build.gradle
     scandelete:
       - apps/mobile-app/node_modules/
-      - apps/server/Tests/AliasVault.UnitTests/TestData/Exports/
     build:
       - cd ../..
       - $$rustup$$/rustup-init.sh -y --default-toolchain stable -t aarch64-linux-android

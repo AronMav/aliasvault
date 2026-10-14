@@ -8,10 +8,9 @@
 namespace AliasVault.Admin.Main.Pages;
 
 using AliasServerDb;
+using AliasVault.Admin.Main.Models;
 using AliasVault.Admin.Services;
 using AliasVault.Auth;
-using AliasVault.RazorComponents.Models;
-using AliasVault.RazorComponents.Services;
 using ApexCharts;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Components;
@@ -109,8 +108,19 @@ public abstract class MainBase : OwningComponentBase
 
         if (firstRender)
         {
-            // Update default ApexCharts chart color based on the dark mode setting.
-            await SetDefaultApexChartOptionsAsync();
+            // Update default ApexCharts chart color based on the dark mode setting. Cosmetic, so a failure must not end the circuit.
+            try
+            {
+                await SetDefaultApexChartOptionsAsync();
+            }
+            catch (JSDisconnectedException)
+            {
+                // The browser disconnected before the first render finished, nothing left to style.
+            }
+            catch (InvalidOperationException)
+            {
+                // The page script did not load in time, charts keep their default colors.
+            }
         }
     }
 

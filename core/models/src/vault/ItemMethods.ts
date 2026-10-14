@@ -1,5 +1,5 @@
-import type { Item, ItemField, FieldType } from './Item';
-import { FieldTypes } from './Item';
+import type { Item, ItemField, ItemType, FieldType } from './Item';
+import { FieldTypes, ItemTypes } from './Item';
 import type { Credential } from './Credential';
 import { FieldKey } from './FieldKey';
 import { FieldCategories, getSystemField } from './SystemFieldRegistry';
@@ -7,6 +7,13 @@ import { FieldCategories, getSystemField } from './SystemFieldRegistry';
 /**
  * Helper functions for working with Item model
  */
+
+/**
+ * Whether a value, such as a route param, names a known item type
+ */
+export function isItemType(value: string | null | undefined): value is ItemType {
+  return typeof value === 'string' && (Object.values(ItemTypes) as string[]).includes(value);
+}
 
 /**
  * Get a single field value by FieldKey
@@ -88,6 +95,32 @@ export function groupFieldsByCategory(item: Item): Record<string, ItemField[]> {
   }
 
   return groups;
+}
+
+/**
+ * A run of custom fields under one section field; Section is null for the fields before the first section.
+ */
+export type CustomFieldSection = {
+  Section: ItemField | null;
+  Fields: ItemField[];
+};
+
+/**
+ * Group an item's custom fields, in display order, under the section field that precedes them.
+ */
+export function groupCustomFieldsBySection(item: Item): CustomFieldSection[] {
+  const customFields = item.Fields.filter(field => field.IsCustomField).sort((a, b) => (a.DisplayOrder ?? 0) - (b.DisplayOrder ?? 0));
+  const sections: CustomFieldSection[] = [{ Section: null, Fields: [] }];
+
+  for (const field of customFields) {
+    if (field.FieldType === FieldTypes.Section) {
+      sections.push({ Section: field, Fields: [] });
+    } else {
+      sections[sections.length - 1].Fields.push(field);
+    }
+  }
+
+  return sections[0].Fields.length === 0 ? sections.slice(1) : sections;
 }
 
 /**

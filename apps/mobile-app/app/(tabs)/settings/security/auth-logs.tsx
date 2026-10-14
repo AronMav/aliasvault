@@ -1,10 +1,9 @@
+import { authEventTypeName } from '@aliasvault/models/webapi';
 import { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { StyleSheet, View, RefreshControl } from 'react-native';
 import Toast from 'react-native-toast-message';
 
-import type { AuthLogModel } from '@/utils/dist/core/models/webapi';
-import { AuthEventType } from '@/utils/dist/core/models/webapi';
 import { HapticsUtility } from '@/utils/HapticsUtility';
 
 import { useColors } from '@/hooks/useColorScheme';
@@ -15,6 +14,8 @@ import { ThemedScrollView } from '@/components/themed/ThemedScrollView';
 import { ThemedText } from '@/components/themed/ThemedText';
 import { SkeletonLoader } from '@/components/ui/SkeletonLoader';
 import { useWebApi } from '@/context/WebApiContext';
+
+import type { AuthLogModel } from '@aliasvault/models/webapi';
 
 /**
  * Auth logs screen.
@@ -151,11 +152,11 @@ export default function AuthLogsScreen() : React.ReactNode {
       );
     }
 
-    return logs.map((item) => {
-      const eventType = AuthEventType[item.eventType];
+    return logs.map((item, index) => {
+      const eventType = authEventTypeName(item.eventType);
 
       return (
-        <View key={item.id} style={styles.logItem}>
+        <View key={index} style={styles.logItem}>
           <View style={styles.logHeader}>
             <ThemedText style={styles.eventType}>{eventType}</ThemedText>
             <ThemedText style={[

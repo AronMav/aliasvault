@@ -1,0 +1,33 @@
+﻿@inherits ComponentBase
+
+@if (ChildContent != null)
+{
+        <div class="bg-orange-100 border-l-4 border-orange-500 text-orange-700 p-4 mb-6" role="alert">
+        <div class="flex">
+            <div class="py-1">
+                <UiIcon Icon="UiIcons.InformationCircle" class="h-6 w-6 text-orange-500 mr-4" />
+            </div>
+            <div>
+                @if (!string.IsNullOrEmpty(Title))
+                {
+                    <p class="font-bold">@Title</p>
+                }
+                <div class="text-sm">@ChildContent</div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    /// <summary>
+    /// Gets or sets the title to display.
+    /// </summary>
+    [Parameter]
+    public string? Title { get; set; }
+
+    /// <summary>
+    /// Gets or sets the child content to display.
+    /// </summary>
+    [Parameter]
+    public RenderFragment? ChildContent { get; set; }
+}

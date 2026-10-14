@@ -1,10 +1,10 @@
+import { FieldTypes } from '@aliasvault/models/vault';
 import React, { useCallback, useLayoutEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import ModalWrapper from '@/entrypoints/popup/components/Dialogs/ModalWrapper';
 
-import type { FieldType } from '@/utils/dist/core/models/vault';
-import { FieldTypes } from '@/utils/dist/core/models/vault';
+import type { FieldType } from '@aliasvault/models/vault';
 
 type CustomFieldModalProps = {
   isOpen: boolean;
@@ -112,7 +112,7 @@ const CustomFieldModal: React.FC<CustomFieldModalProps> = ({
           >
             <option value={FieldTypes.Text}>{t('itemTypes.fieldTypes.text')}</option>
             <option value={FieldTypes.Password}>{t('itemTypes.fieldTypes.password')}</option>
-            <option value={FieldTypes.Hidden}>{t('itemTypes.fieldTypes.hidden')}</option>
+            <option value={FieldTypes.Hidden}>{t('itemTypes.fieldTypes.hiddenMasked')}</option>
             <option value={FieldTypes.TextArea}>{t('itemTypes.fieldTypes.textArea')}</option>
             <option value={FieldTypes.URL}>{t('itemTypes.fieldTypes.url')}</option>
             <option value={FieldTypes.Email}>{t('itemTypes.fieldTypes.email')}</option>

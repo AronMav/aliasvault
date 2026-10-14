@@ -70,18 +70,10 @@ export const ClipboardCountdownBar: React.FC = () => {
       stopAnimation();
     });
 
-    // Listen for countdown cancelled message
-    const unsubscribeCancel = onMessage('CLIPBOARD_COUNTDOWN_CANCELLED', () => {
-      setIsVisible(false);
-      currentCountdownIdRef.current = 0;
-      stopAnimation();
-    });
-
     return (): void => {
       // Clean up listeners
       unsubscribe();
       unsubscribeClear();
-      unsubscribeCancel();
     };
   }, []);
 
@@ -89,7 +81,7 @@ export const ClipboardCountdownBar: React.FC = () => {
     <CountdownBar
       ref={countdownBarRef}
       isVisible={isVisible}
-      colorClass="bg-orange-500"
+      colorClass="bg-primary-500"
     />
   );
 };

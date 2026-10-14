@@ -1,3 +1,10 @@
+import { scopedKey } from '@aliasvault/client/database/ItemRef';
+import { manifestForItemIn } from '@aliasvault/client/database/ItemRef';
+import { FaviconService } from '@aliasvault/client/items/FaviconService';
+import { usesWebsiteLogo } from '@aliasvault/client/items/ItemLogoView';
+import { switchItemTypeFieldValues, type FormFieldValue } from '@aliasvault/client/items/ItemTypeSwitch';
+import * as RustCore from '@aliasvault/client/rust/RustCore';
+import { FieldCategories, FieldTypes, ItemTypes, isItemType, getSystemFieldsForItemType, getOptionalFieldsForItemType, isFieldShownByDefault, getSystemField, fieldAppliesToType } from '@aliasvault/models/vault';
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { flushSync } from 'react-dom';
 import { useTranslation } from 'react-i18next';
@@ -6,7 +13,7 @@ import { useLocation, useNavigate, useParams, useSearchParams } from 'react-rout
 import Modal from '@/entrypoints/popup/components/Dialogs/Modal';
 import AddFieldMenu, { type OptionalSection } from '@/entrypoints/popup/components/Forms/AddFieldMenu';
 import DraggableCustomFieldsList, { type CustomFieldDefinition } from '@/entrypoints/popup/components/Forms/DraggableCustomFieldsList';
-import EmailDomainField from '@/entrypoints/popup/components/Forms/EmailDomainField';
+import EmailDomainField, { detectEmailMode, EMPTY_EMAIL_DOMAINS, type EmailDomains } from '@/entrypoints/popup/components/Forms/EmailDomainField';
 import { FormInput } from '@/entrypoints/popup/components/Forms/FormInput';
 import FormSection from '@/entrypoints/popup/components/Forms/FormSection';
 import HiddenField from '@/entrypoints/popup/components/Forms/HiddenField';
@@ -14,9 +21,11 @@ import PasswordField from '@/entrypoints/popup/components/Forms/PasswordField';
 import UsernameField from '@/entrypoints/popup/components/Forms/UsernameField';
 import HeaderButton from '@/entrypoints/popup/components/HeaderButton';
 import { HeaderIconType } from '@/entrypoints/popup/components/Icons/HeaderIcons';
+import Icon from '@/entrypoints/popup/components/Icons/Icon';
 import AttachmentUploader from '@/entrypoints/popup/components/Items/Details/AttachmentUploader';
 import PasskeyEditor from '@/entrypoints/popup/components/Items/Details/PasskeyEditor';
-import TotpEditor from '@/entrypoints/popup/components/Items/Details/TotpEditor';
+import TotpEditor, { type TotpEditorState } from '@/entrypoints/popup/components/Items/Details/TotpEditor';
+import ItemLogoPicker from '@/entrypoints/popup/components/Items/ItemLogoPicker';
 import ItemNameInput from '@/entrypoints/popup/components/Items/ItemNameInput';
 import ItemTypeSelector from '@/entrypoints/popup/components/Items/ItemTypeSelector';
 import LoadingSpinner from '@/entrypoints/popup/components/LoadingSpinner';
@@ -26,21 +35,20 @@ import { useLoading } from '@/entrypoints/popup/context/LoadingContext';
 import { useWebApi } from '@/entrypoints/popup/context/WebApiContext';
 import useAliasGenerator from '@/entrypoints/popup/hooks/useAliasGenerator';
 import useFormPersistence from '@/entrypoints/popup/hooks/useFormPersistence';
+import useItemLogo from '@/entrypoints/popup/hooks/useItemLogo';
 import useServiceDetection from '@/entrypoints/popup/hooks/useServiceDetection';
 import { useVaultMutate } from '@/entrypoints/popup/hooks/useVaultMutate';
 
-import type { Item, ItemField, ItemType, FieldType, Attachment, TotpCode, PasswordSettings } from '@/utils/dist/core/models/vault';
-import { FieldCategories, FieldTypes, ItemTypes, getSystemFieldsForItemType, getOptionalFieldsForItemType, isFieldShownByDefault, getSystemField, fieldAppliesToType } from '@/utils/dist/core/models/vault';
-import { FaviconService } from '@/utils/FaviconService';
+import { logExpected, logFailure } from '@/utils/Diagnostics';
+import { itemRoute } from '@/utils/ItemRoute';
 import { LocalPreferencesService } from '@/utils/LocalPreferencesService';
 import { sendMessage } from '@/utils/messaging/ExtensionMessaging';
 import { NavigationStateService } from '@/utils/NavigationStateService';
-import * as RustCore from '@/utils/RustCore';
+
+import type { Folder } from '@aliasvault/client/database/repositories/FolderRepository';
+import type { Item, ItemField, ItemType, FieldType, Attachment, TotpCode, PasswordSettings } from '@aliasvault/models/vault';
 
 import { browser } from '#imports';
-
-// Valid item types from the shared model
-const VALID_ITEM_TYPES: ItemType[] = [ItemTypes.Login, ItemTypes.Alias, ItemTypes.CreditCard, ItemTypes.Note];
 
 // Default item type for new items
 const DEFAULT_ITEM_TYPE: ItemType = ItemTypes.Login;
@@ -52,14 +60,9 @@ const DEFAULT_ITEM_TYPE: ItemType = ItemTypes.Login;
 type PersistedFormData = {
   item: Item | null;
   fieldValues: Record<string, string | string[]>;
+  typeSwitchStash?: Record<string, FormFieldValue>;
   customFields: CustomFieldDefinition[];
-  totpEditorState?: {
-    isAddFormVisible: boolean;
-    formData: {
-      name: string;
-      secretKey: string;
-    };
-  };
+  totpEditorState?: TotpEditorState;
   show2FA: boolean;
   showAttachments: boolean;
   manuallyAddedFields: string[];
@@ -79,17 +82,18 @@ const isMaskedFieldType = (fieldType: FieldType): boolean =>
  */
 const ItemAddEdit: React.FC = () => {
   const { t } = useTranslation();
-  const { id } = useParams();
+  const { id, manifestId } = useParams();
   const [searchParams] = useSearchParams();
   const location = useLocation();
   const navigate = useNavigate();
   const dbContext = useDb();
-  const isEditMode = id !== undefined && id.length > 0;
+  const isEditMode = id !== undefined && id.length > 0 && manifestId !== undefined && manifestId.length > 0;
 
   // Get item type, title, and folder from URL parameters (for create mode)
-  const itemTypeParam = searchParams.get('type') as ItemType | null;
+  const itemTypeParam = searchParams.get('type');
   const itemTitleParam = searchParams.get('itemTitle');
-  const folderIdParam = searchParams.get('folderId');
+  const folderManifestIdParam = searchParams.get('folderManifestId');
+  const folderIdParam = folderManifestIdParam ? searchParams.get('folderId') : null;
 
   const sourceTabIdParam = searchParams.get('sourceTabId');
   const fillBackElementIdentifier = searchParams.get('elementIdentifier');
@@ -101,70 +105,38 @@ const ItemAddEdit: React.FC = () => {
   const { detectService } = useServiceDetection();
   const webApi = useWebApi();
 
-  // Component state
   const [localLoading, setLocalLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [item, setItem] = useState<Item | null>(null);
-
-  // Form state for dynamic fields
   const [fieldValues, setFieldValues] = useState<Record<string, string | string[]>>({});
-
-  // Custom field definitions (temporary until saved)
+  const [typeSwitchStash, setTypeSwitchStash] = useState<Record<string, FormFieldValue>>({});
   const [customFields, setCustomFields] = useState<CustomFieldDefinition[]>([]);
-
-  // Folder selection state
-  const [folders, setFolders] = useState<Array<{ Id: string; Name: string }>>([]);
-
-  // Alternative service-name suggestions (create mode) derived from the page title/domain.
+  const [folders, setFolders] = useState<Folder[]>([]);
   const [suggestedNames, setSuggestedNames] = useState<string[]>([]);
-
-  // UI visibility state
   const [showTypeDropdown, setShowTypeDropdown] = useState(false);
   const [show2FA, setShow2FA] = useState(false);
   const [showAttachments, setShowAttachments] = useState(false);
-
-  // Track if alias was already auto-generated (to avoid re-generating on re-renders)
   const aliasGeneratedRef = useRef(false);
-
-  // Ref for the item name input field (for auto-focus)
+  const aliasRequestedByTypeChangeRef = useRef(false);
   const nameInputRef = useRef<HTMLInputElement>(null);
-
-  // Track password field visibility (for showing generated passwords)
   const [showPassword, setShowPassword] = useState(false);
-
-  // Track manually added optional fields (fields that are not shown by default but user added)
   const [manuallyAddedFields, setManuallyAddedFields] = useState<Set<string>>(new Set());
-
-  // Track fields that had values initially (edit mode) - these stay visible even if value is cleared
   const [initiallyVisibleFields, setInitiallyVisibleFields] = useState<Set<string>>(new Set());
-
-  // TOTP codes state
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [originalAttachmentIds, setOriginalAttachmentIds] = useState<string[]>([]);
+  const [passkeyIdsMarkedForDeletion, setPasskeyIdsMarkedForDeletion] = useState<string[]>([]);
+  const [isLoginEmailInEmailMode, setIsLoginEmailInEmailMode] = useState(true);
+  const [emailDomains, setEmailDomains] = useState<EmailDomains>(EMPTY_EMAIL_DOMAINS);
+  const { getVaultMetadata } = dbContext;
+  const [passwordSettings, setPasswordSettings] = useState<PasswordSettings | undefined>(undefined);
+  const [skipFormRestore] = useState(false);
   const [totpCodes, setTotpCodes] = useState<TotpCode[]>([]);
   const [originalTotpCodeIds, setOriginalTotpCodeIds] = useState<string[]>([]);
-  const [totpEditorState, setTotpEditorState] = useState<{
-    isAddFormVisible: boolean;
-    formData: { name: string; secretKey: string };
-  }>({
+  const [totpEditorState, setTotpEditorState] = useState<TotpEditorState>({
     isAddFormVisible: false,
     formData: { name: '', secretKey: '' }
   });
-
-  // Attachments state
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const [originalAttachmentIds, setOriginalAttachmentIds] = useState<string[]>([]);
-
-  // Passkeys state (only IDs marked for deletion - passkeys cannot be created/edited manually)
-  const [passkeyIdsMarkedForDeletion, setPasskeyIdsMarkedForDeletion] = useState<string[]>([]);
-
-  // Track email field mode for Login type (true = free text "Email", false = domain chooser "Alias")
-  const [isLoginEmailInEmailMode, setIsLoginEmailInEmailMode] = useState(true);
-
-  // Track password settings for persistence (so slider position and options are remembered)
-  const [passwordSettings, setPasswordSettings] = useState<PasswordSettings | undefined>(undefined);
-
-  // Track whether to skip form restoration (set during initialization)
-  const [skipFormRestore] = useState(false);
 
   /**
    * Memoized restore callback for form persistence.
@@ -176,6 +148,9 @@ const ItemAddEdit: React.FC = () => {
     }
     if (data.fieldValues) {
       setFieldValues(data.fieldValues);
+    }
+    if (data.typeSwitchStash) {
+      setTypeSwitchStash(data.typeSwitchStash);
     }
     if (data.customFields) {
       setCustomFields(data.customFields);
@@ -205,11 +180,12 @@ const ItemAddEdit: React.FC = () => {
    * The hook auto-persists on state changes and clears on unmount.
    */
   const { loadPersistedValues, clearPersistedValues } = useFormPersistence<PersistedFormData>({
-    formId: id || null,
+    formId: id && manifestId ? scopedKey(manifestId, id) : null,
     isLoading: localLoading,
     formData: {
       item,
       fieldValues,
+      typeSwitchStash,
       customFields,
       totpEditorState,
       show2FA,
@@ -339,11 +315,9 @@ const ItemAddEdit: React.FC = () => {
    * Load item data if in edit mode, or initialize for create mode with service detection.
    */
   useEffect(() => {
-    if (!dbContext?.sqliteClient || !id || !isEditMode) {
+    if (!dbContext?.sqliteClient || !id || !manifestId || !isEditMode) {
       // Create mode - initialize with defaults
-      const effectiveType: ItemType = (itemTypeParam && VALID_ITEM_TYPES.includes(itemTypeParam))
-        ? itemTypeParam
-        : DEFAULT_ITEM_TYPE;
+      const effectiveType: ItemType = isItemType(itemTypeParam) ? itemTypeParam : DEFAULT_ITEM_TYPE;
 
       /**
        * Initialize create mode with service detection from URL params or active tab.
@@ -352,13 +326,18 @@ const ItemAddEdit: React.FC = () => {
         // Use the service detection hook to get name, URL and alternative name suggestions
         const { serviceName, serviceUrl, suggestedNames: detectedSuggestedNames } = await detectService(itemTitleParam);
         setSuggestedNames(detectedSuggestedNames);
+        setEmailDomains(await getVaultMetadata() ?? EMPTY_EMAIL_DOMAINS);
+
+        // A new item belongs in the manifest of the folder it starts in, or the personal one outside any folder.
+        const startManifestId = manifestForItemIn(folderIdParam ? { ManifestId: folderManifestIdParam! } : null, dbContext?.sqliteClient?.getPersonalManifestId());
 
         // Create the new item with detected values
         const newItem: Item = {
-          Id: crypto.randomUUID().toUpperCase(),
+          Id: crypto.randomUUID(),
           Name: serviceName,
           ItemType: effectiveType,
           FolderId: folderIdParam || null,
+          ManifestId: startManifestId,
           Fields: [],
           CreatedAt: new Date().toISOString(),
           UpdatedAt: new Date().toISOString()
@@ -398,7 +377,8 @@ const ItemAddEdit: React.FC = () => {
           // Also override the FolderId with the current URL param (if any).
           setItem(prev => prev ? {
             ...prev,
-            FolderId: folderIdParam || null
+            FolderId: folderIdParam || null,
+            ManifestId: startManifestId
           } : prev);
         }
 
@@ -421,9 +401,9 @@ const ItemAddEdit: React.FC = () => {
       }
 
       try {
-        const result = sqliteClient.items.getById(id);
+        const result = sqliteClient.items.getById({ Id: id, ManifestId: manifestId });
         if (!result) {
-          console.error('Item not found');
+          logExpected('[Item] The item to edit no longer exists');
           navigate('/items');
           return;
         }
@@ -457,13 +437,19 @@ const ItemAddEdit: React.FC = () => {
         });
 
         setFieldValues(initialValues);
+
+        // Decide the email field mode before the form shows, so it does not switch after the first render.
+        const domains = await getVaultMetadata() ?? EMPTY_EMAIL_DOMAINS;
+        setEmailDomains(domains);
+        setIsLoginEmailInEmailMode(detectEmailMode((initialValues['login.email'] as string) ?? '', domains) ?? result.ItemType === ItemTypes.Login);
+
         // Sort custom fields by displayOrder when loading
         existingCustomFields.sort((a, b) => a.displayOrder - b.displayOrder);
         setCustomFields(existingCustomFields);
         setInitiallyVisibleFields(fieldsWithValues);
 
         // Load TOTP codes for this item
-        const itemTotpCodes = sqliteClient.settings.getTotpCodesForItem(id);
+        const itemTotpCodes = sqliteClient.items.getTotpCodesForItem(result);
         setTotpCodes(itemTotpCodes);
         setOriginalTotpCodeIds(itemTotpCodes.map((tc) => tc.Id));
         if (itemTotpCodes.length > 0) {
@@ -471,7 +457,7 @@ const ItemAddEdit: React.FC = () => {
         }
 
         // Load attachments for this item
-        const itemAttachments = sqliteClient.settings.getAttachmentsForItem(id);
+        const itemAttachments = sqliteClient.items.getAttachmentsForItem(result);
         setAttachments(itemAttachments);
         setOriginalAttachmentIds(itemAttachments.map((a) => a.Id));
         if (itemAttachments.length > 0) {
@@ -490,14 +476,14 @@ const ItemAddEdit: React.FC = () => {
         setLocalLoading(false);
         setIsInitialLoading(false);
       } catch (err) {
-        console.error('Error loading item:', err);
+        logFailure('Error loading item', err);
         setLocalLoading(false);
         setIsInitialLoading(false);
       }
     };
 
     void initializeEditMode();
-  }, [dbContext?.sqliteClient, id, isEditMode, itemTypeParam, itemTitleParam, folderIdParam, navigate, setIsInitialLoading, detectService, loadPersistedValues]);
+  }, [dbContext?.sqliteClient, getVaultMetadata, id, manifestId, isEditMode, itemTypeParam, itemTitleParam, folderIdParam, folderManifestIdParam, navigate, setIsInitialLoading, detectService, loadPersistedValues]);
 
   /**
    * Handle generating alias and populating fields.
@@ -638,10 +624,11 @@ const ItemAddEdit: React.FC = () => {
   }, [applicableSystemFields]);
 
   /**
-   * Auto-generate alias when alias fields are shown by default in create mode.
+   * Auto-generate alias when alias fields are shown by default in create mode, or after an existing item was switched to the alias type.
    */
   useEffect(() => {
-    if (!isEditMode && aliasFieldsShownByDefault && !localLoading && dbContext?.sqliteClient && !aliasGeneratedRef.current) {
+    if ((!isEditMode || aliasRequestedByTypeChangeRef.current) && aliasFieldsShownByDefault && !localLoading && dbContext?.sqliteClient && !aliasGeneratedRef.current) {
+      aliasRequestedByTypeChangeRef.current = false;
       aliasGeneratedRef.current = true;
       void handleGenerateAlias();
     }
@@ -667,6 +654,24 @@ const ItemAddEdit: React.FC = () => {
   }, []);
 
   /**
+   * Put icon bytes on the item so the editor previews exactly what saving will store.
+   */
+  const handleLogoBytesChange = useCallback((data?: Uint8Array) => {
+    setItem(prev => (!prev || prev.Logo === data) ? prev : { ...prev, Logo: data });
+  }, []);
+
+  /*
+   * The item's favicon: a pick from the built-in catalog, or the website's own favicon extracted from the URL.
+   */
+  const { logoSelection, isFetchingLogo, resolvedFaviconSource, websiteSource, selectLogo, fetchLogoFromWebsite } = useItemLogo({
+    url: fieldValues['login.url'],
+    currentLogoKind: item?.LogoInfo?.Kind,
+    isReady: !localLoading && item !== null,
+    isExistingItem: isEditMode,
+    onLogoBytesChange: handleLogoBytesChange
+  });
+
+  /**
    * After creating a credential from a page's "create new item" flow, autofill the freshly
    * created item back into the originating tab and close this popup window. Returns true when the
    * fill-back path handled the post-save behaviour (so the caller should skip normal navigation).
@@ -689,7 +694,7 @@ const ItemAddEdit: React.FC = () => {
         elementIdentifier: fillBackElementIdentifier ?? undefined
       }, tabId);
     } catch (err) {
-      console.error('Error autofilling created item into page:', err);
+      logFailure('Error autofilling created item into page', err);
     }
 
     /*
@@ -699,7 +704,7 @@ const ItemAddEdit: React.FC = () => {
     try {
       await NavigationStateService.clearNavigationState();
     } catch (err) {
-      console.error('Error clearing persisted navigation state:', err);
+      logFailure('Error clearing persisted navigation state', err);
     }
 
     // Close this popup window (it was opened as a standalone window from the content script).
@@ -784,23 +789,21 @@ const ItemAddEdit: React.FC = () => {
          * For create mode, always generate a fresh ID to prevent UNIQUE constraint
          * violations if form persistence restored a previously saved item's ID.
          */
-        Id: isEditMode ? item.Id : crypto.randomUUID().toUpperCase(),
+        Id: isEditMode ? item.Id : crypto.randomUUID(),
         Fields: fields,
         UpdatedAt: new Date().toISOString()
       };
 
       /*
        * Fetch and attach favicon from URL if needed (handles deduplication internally).
-       * Only call if we have a URL value to avoid unnecessary processing.
+       * Only call if we have a URL value to avoid unnecessary processing, and not when the editor
+       * already resolved this URL's icon: if a preview fetched the icon and stored it in memory, we don't need to fetch it again.
        */
       const urlValue = fieldValues['login.url'];
-      if (dbContext?.sqliteClient && urlValue) {
-        updatedItem = await FaviconService.fetchAndAttachFavicon(
-          updatedItem,
-          urlValue,
-          dbContext.sqliteClient,
-          webApi
-        );
+      const usesAutomaticLogo = usesWebsiteLogo(logoSelection);
+      const isLogoResolved = usesAutomaticLogo && resolvedFaviconSource === (await FaviconService.resolveTarget(urlValue))?.source;
+      if (dbContext?.sqliteClient && urlValue && usesAutomaticLogo && !isLogoResolved) {
+        updatedItem = await FaviconService.fetchAndAttachFavicon(updatedItem, urlValue, dbContext.sqliteClient.logos, webApi);
       } else if (!urlValue) {
         // Explicitly clear logo if no URL (Note items, etc.)
         updatedItem.Logo = undefined;
@@ -815,24 +818,21 @@ const ItemAddEdit: React.FC = () => {
        * Use async mutation - saves locally and navigates immediately.
        * Sync happens in background, status shown via header indicator.
        */
+      let savedItem: Item = updatedItem;
       await executeVaultMutationAsync(async () => {
-        if (isEditMode) {
-          await dbContext.sqliteClient!.items.update(
-            updatedItem,
-            originalAttachmentIds,
-            attachments,
-            originalTotpCodeIds,
-            totpCodes
-          );
+        if (isEditMode && manifestId) {
+          const saved = await dbContext.sqliteClient!.items.update({ Id: item.Id, ManifestId: manifestId }, updatedItem, originalAttachmentIds, attachments, originalTotpCodeIds, totpCodes, logoSelection);
+          if (saved) {
+            savedItem = { ...updatedItem, ManifestId: saved.ManifestId };
+          }
 
-          // Delete passkeys marked for deletion
-          if (passkeyIdsMarkedForDeletion.length > 0) {
-            for (const passkeyId of passkeyIdsMarkedForDeletion) {
-              await dbContext.sqliteClient!.passkeys.deleteById(passkeyId);
-            }
+          // Delete passkeys marked for deletion, in the manifest the item is in after the save
+          for (const passkeyId of passkeyIdsMarkedForDeletion) {
+            await dbContext.sqliteClient!.passkeys.deleteById(passkeyId, saved?.ManifestId ?? manifestId);
           }
         } else {
-          await dbContext.sqliteClient!.items.create(updatedItem, attachments, totpCodes);
+          const created = await dbContext.sqliteClient!.items.create(updatedItem, attachments, totpCodes, logoSelection);
+          savedItem = { ...updatedItem, Id: created.Id, ManifestId: created.ManifestId };
         }
       });
 
@@ -843,47 +843,47 @@ const ItemAddEdit: React.FC = () => {
        * If this create was launched from a page's "create new item" flow, autofill the new
        * credential back into the originating tab and close this window instead of navigating.
        */
-      if (await fillBackAndCloseWindow(updatedItem)) {
+      if (await fillBackAndCloseWindow(savedItem)) {
         return;
       }
 
       /*
        * Navigate after save:
        * - Edit mode and came from details: navigate(-1) so back from details goes to list (no duplicate details).
-       * - Edit mode and did not come from details: go to details with replace so we still land on details.
+       * - Edit mode and did not come from details, or the save moved the item to another manifest: go to details with replace.
        * - Create mode: go to new item details with replace.
        */
-      if (isEditMode && (location.state as { fromDetails?: boolean } | null)?.fromDetails) {
+      if (isEditMode && savedItem.ManifestId === manifestId && (location.state as { fromDetails?: boolean } | null)?.fromDetails) {
         navigate(-1);
       } else {
-        navigate(`/items/${updatedItem.Id}`, { replace: true });
+        navigate(itemRoute(savedItem), { replace: true });
       }
     } catch (err) {
-      console.error('Error saving item:', err);
+      logFailure('Error saving item', err);
       setIsSaving(false);
     }
-  }, [item, isSaving, fieldValues, applicableSystemFields, customFields, dbContext, isEditMode, executeVaultMutationAsync, navigate, location.state, originalAttachmentIds, attachments, originalTotpCodeIds, totpCodes, passkeyIdsMarkedForDeletion, webApi, clearPersistedValues, fillBackAndCloseWindow]);
+  }, [item, manifestId, isSaving, fieldValues, applicableSystemFields, customFields, dbContext, isEditMode, executeVaultMutationAsync, navigate, location.state, originalAttachmentIds, attachments, originalTotpCodeIds, totpCodes, passkeyIdsMarkedForDeletion, logoSelection, resolvedFaviconSource, webApi, clearPersistedValues, fillBackAndCloseWindow]);
 
   /**
    * Handle delete action.
    */
   const handleDelete = useCallback(async () => {
-    if (!item || !isEditMode || !dbContext?.sqliteClient) {
+    if (!item || !isEditMode || !manifestId || !dbContext?.sqliteClient) {
       return;
     }
 
     try {
       await executeVaultMutationAsync(async () => {
-        await dbContext.sqliteClient!.items.trash(item.Id);
+        await dbContext.sqliteClient!.items.trash({ Id: item.Id, ManifestId: manifestId });
       });
 
       navigate('/items');
     } catch (err) {
-      console.error('Error deleting item:', err);
+      logFailure('Error deleting item', err);
     } finally {
       setShowDeleteModal(false);
     }
-  }, [item, isEditMode, dbContext, executeVaultMutationAsync, navigate]);
+  }, [item, manifestId, isEditMode, dbContext, executeVaultMutationAsync, navigate]);
 
   /**
    * Add custom field handler.
@@ -934,8 +934,7 @@ const ItemAddEdit: React.FC = () => {
   }, []);
 
   /**
-   * Handle item type change from dropdown.
-   * Clears field values that don't apply to the new item type.
+   * Handle item type change from dropdown. Fields the new type does not have are stashed, so switching back restores them.
    */
   const handleTypeChange = useCallback((newType: ItemType) => {
     if (!item) {
@@ -943,54 +942,29 @@ const ItemAddEdit: React.FC = () => {
     }
 
     const oldType = item.ItemType;
+    let nextValues = fieldValues;
 
-    // Clear field values that don't apply to the new type
-    if (!isEditMode && oldType !== newType) {
-      setFieldValues(prev => {
-        const newValues: Record<string, string | string[]> = {};
-        Object.entries(prev).forEach(([key, value]) => {
-          // Check if this field applies to the new type
-          const systemField = getSystemField(key);
-          if (systemField) {
-            // Keep the field only if it applies to the new type
-            if (fieldAppliesToType(systemField, newType)) {
-              newValues[key] = value;
-            }
-          } else {
-            // Custom fields are always kept
-            newValues[key] = value;
-          }
-        });
-        return newValues;
-      });
+    if (oldType !== newType) {
+      const switched = switchItemTypeFieldValues(fieldValues, typeSwitchStash, newType);
+      nextValues = switched.values;
+      setFieldValues(switched.values);
+      setTypeSwitchStash(switched.stash);
 
-      // Clear manually added fields that don't apply to new type
-      setManuallyAddedFields(prev => {
-        const newSet = new Set<string>();
-        prev.forEach(fieldKey => {
-          const systemField = getSystemField(fieldKey);
-          if (!systemField || fieldAppliesToType(systemField, newType)) {
-            newSet.add(fieldKey);
-          }
-        });
-        return newSet;
-      });
-
-      // Clear initially visible fields that don't apply to new type
-      setInitiallyVisibleFields(prev => {
-        const newSet = new Set<string>();
-        prev.forEach(fieldKey => {
-          const systemField = getSystemField(fieldKey);
-          if (!systemField || fieldAppliesToType(systemField, newType)) {
-            newSet.add(fieldKey);
-          }
-        });
-        return newSet;
-      });
+      /**
+       * Whether a field key applies to the new type.
+       */
+      const applies = (fieldKey: string): boolean => {
+        const systemField = getSystemField(fieldKey);
+        return !systemField || fieldAppliesToType(systemField, newType);
+      };
+      setManuallyAddedFields(prev => new Set([...[...prev].filter(applies), ...switched.restored]));
+      setInitiallyVisibleFields(prev => new Set([...prev].filter(applies)));
     }
 
-    // Reset alias generated flag, so alias fields will be filled (again) if they are shown by the new type
-    aliasGeneratedRef.current = false;
+    // Reset alias generated flag, so empty alias fields will be filled (again) if they are shown by the new type
+    const aliasFieldsEmpty = ['alias.first_name', 'alias.last_name', 'alias.gender', 'alias.birthdate'].every(key => !((nextValues[key] as string) ?? '').trim());
+    aliasGeneratedRef.current = !aliasFieldsEmpty;
+    aliasRequestedByTypeChangeRef.current = isEditMode && oldType !== newType && newType === ItemTypes.Alias && aliasFieldsEmpty;
 
     /*
      * Update email field mode based on new item type
@@ -1005,7 +979,7 @@ const ItemAddEdit: React.FC = () => {
     });
 
     setShowTypeDropdown(false);
-  }, [item, isEditMode]);
+  }, [item, isEditMode, fieldValues, typeSwitchStash]);
 
   /**
    * Remove notes section - clears value and removes from manually added fields.
@@ -1097,7 +1071,7 @@ const ItemAddEdit: React.FC = () => {
         {isEditMode && (
           <HeaderButton
             onClick={() => setShowDeleteModal(true)}
-            title={t('items.deleteItemTitle')}
+            title={t('items.deleteItem')}
             iconType={HeaderIconType.DELETE}
             variant="danger"
             disabled={isSaving}
@@ -1128,7 +1102,7 @@ const ItemAddEdit: React.FC = () => {
     } else if (folderIdParam && dbContext?.sqliteClient) {
       // Create mode with folder: back button goes to folder
       const allFolders = dbContext.sqliteClient.folders.getAll();
-      const folder = allFolders.find(f => f.Id === folderIdParam);
+      const folder = allFolders.find(f => f.Id === folderIdParam && f.ManifestId === folderManifestIdParam);
       if (folder) {
         setBackButtonTitle(folder.Name);
       } else {
@@ -1140,7 +1114,7 @@ const ItemAddEdit: React.FC = () => {
     }
 
     return (): void => setBackButtonTitle(null);
-  }, [setBackButtonTitle, isEditMode, folderIdParam, dbContext?.sqliteClient, t]);
+  }, [setBackButtonTitle, isEditMode, folderIdParam, folderManifestIdParam, dbContext?.sqliteClient, t]);
 
   /**
    * Render a field input based on field type.
@@ -1182,9 +1156,7 @@ const ItemAddEdit: React.FC = () => {
                   onClick={() => handleFieldChange(fieldKey, [...values, ''])}
                   className="absolute right-2 top-1/2 -translate-y-1/2 w-6 h-6 flex items-center justify-center text-gray-400 hover:text-primary-500 dark:hover:text-primary-400 transition-colors"
                 >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-                  </svg>
+                  <Icon name="plus-sm" className="w-5 h-5" />
                 </button>
               )}
             </div>
@@ -1215,10 +1187,7 @@ const ItemAddEdit: React.FC = () => {
             className={`absolute right-2 ${hasLabel ? 'top-[38px]' : 'top-1/2'} -translate-y-1/2 w-6 h-6 flex items-center justify-center text-gray-300 hover:text-red-400 dark:text-gray-500 dark:hover:text-red-400 transition-colors`}
             title={t('common.delete')}
           >
-            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="18" y1="6" x2="6" y2="18"/>
-              <line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
+            <Icon name="x" className="w-4 h-4" />
           </button>
         </div>
       );
@@ -1277,6 +1246,7 @@ const ItemAddEdit: React.FC = () => {
             id={fieldKey}
             value={stringValue}
             onChange={(value) => handleFieldChange(fieldKey, value)}
+            domains={emailDomains}
             onRemove={onRemove}
             onGenerateAlias={aliasFieldsShownByDefault ? handleGenerateAliasEmail : handleGenerateRandomEmail}
             isEmailMode={isLoginEmailInEmailMode}
@@ -1313,7 +1283,7 @@ const ItemAddEdit: React.FC = () => {
         );
     }
 
-  }, [fieldValues, handleFieldChange, showPassword, t, handleGenerateAliasEmail, handleGenerateRandomEmail, aliasFieldsShownByDefault, generateRandomUsername, isLoginEmailInEmailMode, passwordSettings]);
+  }, [fieldValues, handleFieldChange, showPassword, t, handleGenerateAliasEmail, handleGenerateRandomEmail, aliasFieldsShownByDefault, generateRandomUsername, isLoginEmailInEmailMode, emailDomains, passwordSettings]);
 
   /**
    * Handle form submission via Enter key.
@@ -1354,10 +1324,7 @@ const ItemAddEdit: React.FC = () => {
             className="p-1.5 text-gray-400 hover:text-primary-500 focus:outline-none"
             title={t('common.generate')}
           >
-            <svg className='w-4 h-4' viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M23 4v6h-6"/>
-              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-            </svg>
+            <Icon name="refresh" className='w-4 h-4' />
           </button>
         </>
       );
@@ -1390,8 +1357,19 @@ const ItemAddEdit: React.FC = () => {
           value={item.Name || ''}
           onChange={(name) => setItem({ ...item, Name: name })}
           folders={folders}
-          selectedFolderId={item.FolderId}
-          onFolderChange={(folderId) => setItem({ ...item, FolderId: folderId })}
+          selectedFolder={item.FolderId ? { Id: item.FolderId, ManifestId: item.ManifestId } : null}
+          onFolderChange={(folder) => setItem({ ...item, FolderId: folder?.Id ?? null, ManifestId: manifestForItemIn(folder, dbContext?.sqliteClient?.getPersonalManifestId()) })}
+          logoSlot={
+            <ItemLogoPicker
+              item={item}
+              pendingSelection={logoSelection}
+              faviconSource={resolvedFaviconSource}
+              websiteSource={websiteSource}
+              isFetching={isFetchingLogo}
+              onSelect={selectLogo}
+              onFetchFromWebsite={() => void fetchLogoFromWebsite()}
+            />
+          }
           suggestions={isEditMode ? [] : suggestedNames.filter(name => name && name !== item.Name).slice(0, 3)}
         />
         {/* Primary fields (like URL) shown below name */}
@@ -1412,6 +1390,7 @@ const ItemAddEdit: React.FC = () => {
       {isEditMode && item.HasPasskey && (
         <PasskeyEditor
           itemId={item.Id}
+          manifestId={manifestId!}
           passkeyIdsMarkedForDeletion={passkeyIdsMarkedForDeletion}
           onPasskeyMarkedForDeletion={setPasskeyIdsMarkedForDeletion}
         />
@@ -1458,10 +1437,7 @@ const ItemAddEdit: React.FC = () => {
                     onClick={() => handleAddOptionalField('login.email')}
                     className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full transition-colors focus:outline-none text-gray-500 dark:text-gray-400 hover:text-primary-600 dark:hover:text-primary-400 border border-dashed border-gray-300 dark:border-gray-600 hover:border-primary-400 dark:hover:border-primary-500"
                   >
-                    <svg className="w-2.5 h-2.5 -ml-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                      <line x1="12" y1="5" x2="12" y2="19" />
-                      <line x1="5" y1="12" x2="19" y2="12" />
-                    </svg>
+                    <Icon name="plus" className="w-2.5 h-2.5 -ml-0.5" strokeWidth={2.5} />
                     <span>{t('common.email')}</span>
                   </button>
                 )}
@@ -1502,10 +1478,7 @@ const ItemAddEdit: React.FC = () => {
                 className="p-1.5 text-gray-400 hover:text-red-500 focus:outline-none"
                 title={t('common.delete')}
               >
-                <svg className='w-4 h-4' viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="18" y1="6" x2="6" y2="18"/>
-                  <line x1="6" y1="6" x2="18" y2="18"/>
-                </svg>
+                <Icon name="x" className='w-4 h-4' />
               </button>
             ) : undefined
           }
@@ -1554,6 +1527,7 @@ const ItemAddEdit: React.FC = () => {
           attachments={attachments}
           onAttachmentsChange={setAttachments}
           itemId={isEditMode ? id : undefined}
+          manifestId={isEditMode ? manifestId : undefined}
         />
       )}
 
@@ -1573,8 +1547,8 @@ const ItemAddEdit: React.FC = () => {
         <Modal
           isOpen={showDeleteModal}
           onClose={() => setShowDeleteModal(false)}
-          title={t('items.deleteItemTitle')}
-          message={t('items.deleteItemConfirm')}
+          title={t('items.deleteItem')}
+          message={t('common.deleteItemConfirmDescription')}
           confirmText={t('common.delete')}
           cancelText={t('common.cancel')}
           onConfirm={handleDelete}

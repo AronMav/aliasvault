@@ -1,0 +1,51 @@
+﻿@inherits ComponentBase
+<nav class="flex mb-4">
+    <ol class="inline-flex items-center space-x-1 text-sm font-medium md:space-x-2">
+        @for (var i = 0; i < BreadcrumbItems.Count; i++)
+        {
+            var item = BreadcrumbItems[i];
+            var isFirst = i == 0;
+
+            @if (item.Url is not null)
+            {
+                <li class="inline-flex items-center">
+                    @if (!isFirst)
+                    {
+                        <UiIcon Icon="UiIcons.ChevronRight" class="w-6 h-6 text-gray-400 dark:text-gray-400" />
+                    }
+                    <a href="@item.Url" class="inline-flex items-center text-gray-700 hover:text-primary-600 dark:text-gray-300 dark:hover:text-primary-500">
+                        @if (isFirst && item.ShowHomeIcon)
+                        {
+                            <UiIcon Icon="UiIcons.Home" class="w-5 h-5 mr-2.5" />
+                        }
+                        @item.DisplayName
+                    </a>
+                </li>
+            }
+            else
+            {
+                <li class="inline-flex items-center">
+                    @if (!isFirst)
+                    {
+                        <UiIcon Icon="UiIcons.ChevronRight" class="w-6 h-6 text-gray-400 dark:text-gray-400" />
+                    }
+                    <span class="text-gray-400 dark:text-gray-400">
+                        @if (isFirst && item.ShowHomeIcon)
+                        {
+                            <UiIcon Icon="UiIcons.Home" class="w-5 h-5 mr-2.5 inline" />
+                        }
+                        @item.DisplayName
+                    </span>
+                </li>
+            }
+        }
+    </ol>
+</nav>
+
+@code {
+    /// <summary>
+    /// Gets or sets the list of breadcrumb items.
+    /// </summary>
+    [Parameter]
+    public List<BreadcrumbItem> BreadcrumbItems { get; set; } = new();
+}

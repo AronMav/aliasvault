@@ -1,70 +1,69 @@
 /**
  * In-memory 2FA state handler for persisting login state during popup close/reopen.
- *
- * This handler stores 2FA login state ONLY in memory, and the state automatically
- * expires after a short timeout.
- *
- * This allows users to enter username/password and get to 2FA prompt, close popup
- * to switch to authenticator app, and reopen popup and continue from 2FA prompt
- * without re-entering credentials.
  */
 
-import type { LoginResponse } from '@/utils/dist/core/models/webapi';
+import type { LoginProof } from '@aliasvault/client/auth/SrpLoginService';
+import type { UnlockKeyDerivationParams } from '@aliasvault/models/metadata';
 
 /**
- * The 2FA state that is persisted in memory.
+ * The 2FA state that is kept in memory.
  */
 export type TwoFactorState = {
   username: string;
-  loginResponse: LoginResponse;
-  passwordHashString: string;
-  passwordHashBase64: string;
   rememberMe: boolean;
-  timestamp: number;
+  loginSessionId: string;
+  proof: LoginProof;
+  unlockKeyBase64: string;
+  derivationParams: UnlockKeyDerivationParams;
 };
 
 /**
- * Timeout for automatic state expiration (60 seconds).
+ * What the popup gets to restore the 2FA step: no key material.
  */
-const STATE_EXPIRY_MS = 60 * 1000;
+export type TwoFactorPrompt = Pick<TwoFactorState, 'username' | 'rememberMe'>;
+
+/**
+ * Timeout after which the state is cleared.
+ */
+const STATE_EXPIRY_MS = 5 * 60 * 1000;
 
 /**
  * In-memory storage for 2FA state.
  * Intentionally NOT persisted to any storage - lives only in service worker memory.
  */
 let twoFactorState: TwoFactorState | null = null;
+let expiryTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
- * Store 2FA state in memory with current timestamp.
+ * Store 2FA state in memory until the 2FA step completes, it is cleared, or the timeout passes.
  */
-export function handleStoreTwoFactorState(state: Omit<TwoFactorState, 'timestamp'>): void {
-  twoFactorState = {
-    ...state,
-    timestamp: Date.now(),
-  };
+export function handleStoreTwoFactorState(state: TwoFactorState): void {
+  handleClearTwoFactorState();
+  twoFactorState = state;
+  expiryTimer = setTimeout(handleClearTwoFactorState, STATE_EXPIRY_MS);
 }
 
 /**
- * Retrieve 2FA state from memory.
- * Returns null if no state exists or if the state has expired.
+ * Retrieve the 2FA state for the background login flow, or null when there is none.
  */
 export function handleGetTwoFactorState(): TwoFactorState | null {
-  if (!twoFactorState) {
-    return null;
-  }
-
-  // Check if state has expired
-  if (Date.now() - twoFactorState.timestamp > STATE_EXPIRY_MS) {
-    twoFactorState = null;
-    return null;
-  }
-
   return twoFactorState;
+}
+
+/**
+ * Whether a 2FA step is pending and for whom, for the popup to restore it.
+ */
+export function handleGetTwoFactorPrompt(): TwoFactorPrompt | null {
+  return twoFactorState ? { username: twoFactorState.username, rememberMe: twoFactorState.rememberMe } : null;
 }
 
 /**
  * Clear 2FA state from memory.
  */
 export function handleClearTwoFactorState(): void {
+  if (expiryTimer) {
+    clearTimeout(expiryTimer);
+    expiryTimer = null;
+  }
   twoFactorState = null;
 }

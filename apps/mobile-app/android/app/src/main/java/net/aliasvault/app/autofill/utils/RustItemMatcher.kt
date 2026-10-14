@@ -3,7 +3,6 @@ package net.aliasvault.app.autofill.utils
 import android.util.Log
 import net.aliasvault.app.rustcore.JnaInitializer
 import net.aliasvault.app.vaultstore.models.Item
-import net.aliasvault.app.vaultstore.repositories.ItemWithCredentialInfo
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -23,10 +22,10 @@ object RustItemMatcher {
         DEFAULT("default"),
 
         /** Exact URL matching only - no subdomain matching. */
-        URL_EXACT("url_exact"),
+        URL_EXACT("urlExact"),
 
         /** Subdomain matching - matches subdomains and root domains. */
-        URL_SUBDOMAIN("url_subdomain"),
+        URL_SUBDOMAIN("urlSubdomain"),
     }
 
     init {
@@ -56,14 +55,14 @@ object RustItemMatcher {
             val itemMap = mutableMapOf<String, Item>()
 
             for (item in items) {
-                val idString = item.id.toString()
+                val idString = "${item.manifestId}${item.id}"
                 val urlsArray = JSONArray()
                 item.urls.forEach { urlsArray.put(it) }
                 val credJson = JSONObject().apply {
-                    put("Id", idString)
-                    put("ItemName", item.name ?: JSONObject.NULL)
-                    put("ItemUrls", urlsArray)
-                    put("Username", item.username ?: JSONObject.NULL)
+                    put("id", idString)
+                    put("itemName", item.name ?: JSONObject.NULL)
+                    put("itemUrls", urlsArray)
+                    put("username", item.username ?: JSONObject.NULL)
                 }
                 rustCredentials.put(credJson)
                 itemMap[idString] = item
@@ -72,11 +71,11 @@ object RustItemMatcher {
             // Prepare input JSON for Rust
             val input = JSONObject().apply {
                 put("credentials", rustCredentials)
-                put("current_url", searchText)
-                put("page_title", "")
-                put("matching_mode", "default")
-                // Note: ignore_port=true because Android's Autofill API does not provide port numbers
-                put("ignore_port", true)
+                put("currentUrl", searchText)
+                put("pageTitle", "")
+                put("matchingMode", "default")
+                // Note: ignorePort=true because Android's Autofill API does not provide port numbers
+                put("ignorePort", true)
             }
 
             // Call Rust via UniFFI
@@ -84,7 +83,7 @@ object RustItemMatcher {
 
             // Parse output
             val output = JSONObject(outputJson)
-            val matchedIds = output.getJSONArray("matched_ids")
+            val matchedIds = output.getJSONArray("matchedIds")
 
             // If no matches found, return empty list
             if (matchedIds.length() == 0) {
@@ -101,88 +100,6 @@ object RustItemMatcher {
             return filtered
         } catch (e: Exception) {
             Log.e(TAG, "Error filtering items with Rust matcher: ${e.message}", e)
-            // Fail closed: offering credentials from unrelated entries in whatever app asked
-            // for autofill turns a matcher outage into a credential-disclosure surface.
-            // An empty list shows the "open AliasVault" fallback instead of the whole vault.
-            return emptyList()
-        }
-    }
-
-    /**
-     * Filter ItemWithCredentialInfo items based on rpId using the Rust core credential matcher.
-     * Used during passkey registration to find existing credentials that can have a passkey merged into them.
-     *
-     * @param items List of items to filter (without passkeys).
-     * @param rpId The relying party identifier (domain) to match against.
-     * @param rpName The relying party name (used for title matching fallback).
-     * @param matchingMode The matching mode to use (default: URL_SUBDOMAIN).
-     * @return List of items that match the rpId, in priority order.
-     */
-    fun filterItemsForPasskeyMerge(
-        items: List<ItemWithCredentialInfo>,
-        rpId: String,
-        rpName: String? = null,
-        matchingMode: MatchingMode = MatchingMode.URL_SUBDOMAIN,
-    ): List<ItemWithCredentialInfo> {
-        // Early return for empty rpId or items
-        if (rpId.isEmpty() || items.isEmpty()) {
-            return emptyList()
-        }
-
-        try {
-            // Convert items to JSON format expected by Rust
-            val rustCredentials = JSONArray()
-            val itemMap = mutableMapOf<String, ItemWithCredentialInfo>()
-
-            for (item in items) {
-                val idString = item.itemId.toString()
-                val urlsArray = JSONArray()
-                item.urls.forEach { urlsArray.put(it) }
-
-                val credJson = JSONObject().apply {
-                    put("Id", idString)
-                    put("ItemName", item.serviceName ?: JSONObject.NULL)
-                    put("ItemUrls", urlsArray)
-                    put("Username", item.username ?: JSONObject.NULL)
-                }
-                rustCredentials.put(credJson)
-                itemMap[idString] = item
-            }
-
-            // Prepare input JSON for Rust
-            // Use https:// prefix for the rpId to match URL format
-            val input = JSONObject().apply {
-                put("credentials", rustCredentials)
-                put("current_url", "https://$rpId")
-                put("page_title", rpName ?: "")
-                put("matching_mode", matchingMode.value)
-            }
-
-            // Call Rust via UniFFI
-            val outputJson = uniffi.aliasvault_core.filterCredentialsJson(input.toString())
-
-            // Parse output
-            val output = JSONObject(outputJson)
-            val matchedIds = output.getJSONArray("matched_ids")
-
-            // If no matches found, return empty list
-            if (matchedIds.length() == 0) {
-                return emptyList()
-            }
-
-            // Convert matched IDs back to items, maintaining Rust's priority order
-            val result = mutableListOf<ItemWithCredentialInfo>()
-            for (i in 0 until matchedIds.length()) {
-                val id = matchedIds.getString(i)
-                itemMap[id]?.let {
-                    result.add(it)
-                }
-            }
-
-            return result
-        } catch (e: Exception) {
-            Log.e(TAG, "Error filtering items for passkey merge: ${e.message}", e)
-            // Return empty list on error
             return emptyList()
         }
     }

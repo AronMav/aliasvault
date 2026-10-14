@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Strings of the Android app, autofill service and passkey provider. Generated from core/i18n/locales by core/i18n/scripts/export-native.mjs. Do not edit, change core/i18n instead. -->
 <resources>
   <string name="app_name">AliasVault</string>
-  <string name="autofill_service_description" translatable="true">AliasVault Autofill</string>
+  <string name="autofill_service_description">AliasVault Autofill</string>
   <string name="aliasvault_icon">Deilbhín AliasVault</string>
   <string name="common_close">Dún</string>
   <string name="common_next">Ar Aghaidh</string>
@@ -11,7 +12,7 @@
   <string name="common_hide_details">Folaigh sonraí</string>
   <string name="common_copy">Cóipeáil</string>
   <string name="common_copied_to_clipboard">Cóipeáilte chuig an ghearrthaisce</string>
-  <string name="unknown_error">Tharla earráid anaithnid</string>
+  <string name="unknown_error">Tharla earráid anaithnid.</string>
   <string name="autofill_failed_to_retrieve">Theip ar aisghabháil, oscail an aip</string>
   <string name="autofill_no_match_found">Níor aimsíodh aon mheaitseáil</string>
   <string name="autofill_open_app">Oscail aip</string>
@@ -29,9 +30,9 @@
   <string name="passkey_website_label">Suíomh Gréasáin</string>
   <string name="passkey_username_label">Ainm úsáideora</string>
   <string name="passkey_create_button">Cruthaigh Eochair phas</string>
-  <string name="passkey_creating">Pas eochair á cruthú…</string>
-  <string name="passkey_saving">Ag sábháil go cruinneachán…</string>
-  <string name="passkey_syncing">Ag sioncronú le freastalaí…</string>
+  <string name="passkey_creating">Pas eochair á cruthú...</string>
+  <string name="passkey_saving">Ag sábháil go cruinneachán...</string>
+  <string name="passkey_syncing">Ag sioncronú le freastalaí...</string>
   <string name="passkey_error_title">Earráid</string>
   <string name="passkey_error_empty_name">Cuir isteach ainm don eochair pas</string>
   <string name="passkey_creation_failed">Theip ar an eochair pas a chruthú</string>
@@ -43,13 +44,13 @@
   <string name="passkey_add_to_existing">Nó, cuir pasfhocal le mír atá ann cheana féin:</string>
   <string name="passkey_replace_explanation">Cuirfidh sé seo ceann nua in ionad an eochair phas atá ann cheana. Tabhair faoi deara, le do thoil, go ndéanfar do shean-eochair phas a athscríobh agus nach mbeidh rochtain uirthi a thuilleadh. Más mian leat eochair phas ar leith a chruthú ina ionad sin, téigh ar ais go dtí an scáileán roimhe seo.</string>
   <string name="passkey_merge_explanation">Cuirfidh sé seo eochair phasfhocail le do mhír atá ann cheana féin. Coinneofar do phasfhocal agus sonraí eile.</string>
-  <string name="passkey_replacing">Pas eochair á chur in ionad…</string>
+  <string name="passkey_replacing">Pas eochair á chur in ionad...</string>
   <string name="add_passkey">Cuir Eochair phas leis</string>
   <string name="add_passkey_subtitle">Ag cur pasfhocal leis an mír reatha</string>
-  <string name="passkey_checking_connection">Ceangal á sheiceáil…</string>
-  <string name="passkey_retrieving">Pas eochair á fháil…</string>
-  <string name="passkey_verifying">Ag fíorú…</string>
-  <string name="passkey_authenticating">Ag fíordheimhniú…</string>
+  <string name="passkey_checking_connection">Ceangal á sheiceáil...</string>
+  <string name="passkey_retrieving">Pas eochair á fháil...</string>
+  <string name="passkey_verifying">Ag fíorú...</string>
+  <string name="passkey_authenticating">Ag fíordheimhniú...</string>
   <string name="connection_error_title">Earráid Ceangail</string>
   <string name="connection_error_message">Ní féidir aon nasc a dhéanamh leis an bhfreastalaí. Seiceáil do nasc idirlín agus bain triail as an eochair pas a chruthú arís.</string>
   <string name="session_expired_title">Seisiún in éag</string>
@@ -57,13 +58,13 @@
   <string name="password_changed_title">Athraíodh an Pasfhocal</string>
   <string name="password_changed_message">Athraíodh do phasfhocal. Sínigh isteach arís le do thoil.</string>
   <string name="version_not_supported_title">Nuashonrú ag Teastáil</string>
-  <string name="version_not_supported_message">Ní thacaítear le do leagan aip a thuilleadh. Nuashonraigh go dtí an leagan is déanaí le do thoil.</string>
+  <string name="version_not_supported_message">Ní thacaíonn an freastalaí leis an leagan seo de AliasVault a thuilleadh. Déan nuashonrú go dtí an leagan is déanaí, le do thoil.</string>
   <string name="server_unavailable_title">Níl an freastalaí ar fáil</string>
   <string name="server_unavailable_message">Níl an freastalaí ar fáil faoi láthair. Bain triail eile as ar ball.</string>
   <string name="network_error_title">Earráid Líonra</string>
   <string name="network_error_message">Tharla earráid líonra. Seiceáil do cheangal agus bain triail eile as.</string>
   <string name="server_version_not_supported_title">Nuashonrú Freastalaí ag Teastáil</string>
-  <string name="server_version_not_supported_message">Tá leagan an fhreastalaí as dáta. Déan teagmháil le do riarthóir chun an freastalaí a nuashonrú.</string>
+  <string name="server_version_not_supported_message">Caithfear freastalaí AliasVault a nuashonrú chun oibriú leis an leagan seo de AliasVault. Déan iarracht arís níos déanaí, le do thoil. Má úsáideann tú freastalaí féin-óstáilte, déan teagmháil le riarthóir do fhreastalaí, le do thoil.</string>
   <string name="error_unlock_method_required">Cumasaigh fíordheimhniú bithmhéadrach nó PIN sa phríomhaip AliasVault chun leanúint ar aghaidh</string>
   <string name="error_unlock_vault_first">Díghlasáil cruinneachán san aip AliasVault ar dtús</string>
   <string name="error_vault_decrypt_failed">Theip ar dhíchriptiú cruinneachán</string>

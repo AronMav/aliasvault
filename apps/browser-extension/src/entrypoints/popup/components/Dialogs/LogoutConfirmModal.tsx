@@ -1,9 +1,11 @@
+import { hasUnsyncedUserChanges } from '@aliasvault/client/sync/VaultDirtyState';
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import ModalWrapper from '@/entrypoints/popup/components/Dialogs/ModalWrapper';
+import Icon from '@/entrypoints/popup/components/Icons/Icon';
 
-import { storage } from '#imports';
+import { logFailure } from '@/utils/Diagnostics';
 
 interface ILogoutConfirmModalProps {
   isOpen: boolean;
@@ -21,35 +23,37 @@ const LogoutConfirmModal: React.FC<ILogoutConfirmModalProps> = ({
   onConfirm
 }) => {
   const { t } = useTranslation();
-  const [isDirty, setIsDirty] = useState<boolean | null>(null);
+  const [hasPendingChanges, setHasPendingChanges] = useState<boolean | null>(null);
 
   /**
-   * Check sync state every time the modal opens. The dirty flag lives in
+   * Check sync state every time the modal opens. The dirty flags live in
    * local storage, so a direct read is equivalent to (and faster than) a
    * round-trip through the background script. The cancellation flag prevents
    * a stale response from overwriting state if the modal is closed and
-   * reopened before this read resolves.
+   * reopened before this read resolves. Silent scopes (e.g. item usage
+   * statistics) are excluded: warning about losing a last-used timestamp only
+   * makes the user doubt a logout that costs them nothing.
    */
   useEffect(() => {
     if (!isOpen) {
-      setIsDirty(null);
+      setHasPendingChanges(null);
       return;
     }
 
     let cancelled = false;
-    setIsDirty(null);
+    setHasPendingChanges(null);
 
     (async () : Promise<void> => {
       try {
-        const dirty = await storage.getItem('local:isDirty') as boolean | null;
+        const pending = await hasUnsyncedUserChanges();
         if (!cancelled) {
-          setIsDirty(dirty ?? false);
+          setHasPendingChanges(pending);
         }
       } catch (error) {
-        console.error('Failed to check sync state:', error);
+        logFailure('Failed to check sync state', error);
         if (!cancelled) {
           // Default to showing the simple logout confirmation on error
-          setIsDirty(false);
+          setHasPendingChanges(false);
         }
       }
     })();
@@ -60,12 +64,12 @@ const LogoutConfirmModal: React.FC<ILogoutConfirmModalProps> = ({
   }, [isOpen]);
 
   // Don't render anything if not open or still loading
-  if (!isOpen || isDirty === null) {
+  if (!isOpen || hasPendingChanges === null) {
     return null;
   }
 
   // Render dirty logout warning modal
-  if (isDirty) {
+  if (hasPendingChanges) {
     return (
       <ModalWrapper
         isOpen={isOpen}
@@ -77,9 +81,7 @@ const LogoutConfirmModal: React.FC<ILogoutConfirmModalProps> = ({
       >
         <div className="flex items-start mb-4">
           <div className="flex-shrink-0">
-            <svg className="h-6 w-6 text-amber-500" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
-            </svg>
+            <Icon name="exclamation" className="h-6 w-6 text-amber-500" />
           </div>
           <div className="ml-3">
             <h3 className="text-lg font-semibold text-gray-900 dark:text-white">

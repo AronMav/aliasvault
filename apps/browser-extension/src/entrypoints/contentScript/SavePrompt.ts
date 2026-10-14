@@ -3,11 +3,16 @@
  * Displays a non-intrusive banner at the top of the page when credentials are detected.
  */
 
+import { uiIconSvg } from '@aliasvault/models/icons';
+
 import { getLogoMarkSvg } from '@/utils/constants/logo';
+import { logExpected, logFailure } from '@/utils/Diagnostics';
 import type { CapturedLogin, SavePromptOptions, SavePromptPersistedState, AddUrlPromptOptions, LastAutofilledCredential } from '@/utils/loginDetector';
 import { sendMessage } from '@/utils/messaging/ExtensionMessaging';
 
 import { t } from '@/i18n/StandaloneI18n';
+
+import type { ItemRef } from '@aliasvault/client/database/ItemRef';
 
 /** Reference to the current save prompt element */
 let currentPrompt: HTMLElement | null = null;
@@ -400,7 +405,7 @@ export async function restoreSavePromptFromState(
 export async function restoreAddUrlPromptFromState(
   container: HTMLElement,
   state: SavePromptPersistedState,
-  onAddUrl: (itemId: string, url: string) => void,
+  onAddUrl: (item: ItemRef, url: string) => void,
   onDismiss: () => void
 ): Promise<void> {
   // Clear the persisted state now that we're restoring
@@ -412,7 +417,7 @@ export async function restoreAddUrlPromptFromState(
   const { login, remainingTimeMs: restoredRemainingTime, initialAutoDismissMs: restoredInitialMs, existingCredential } = state;
 
   if (!existingCredential) {
-    console.error('[AliasVault] Cannot restore Add URL prompt without existing credential');
+    logExpected('[AliasVault] Cannot restore the Add URL prompt, its credential is gone');
     return;
   }
 
@@ -559,9 +564,7 @@ async function createPromptFromTemplate(config: IPromptTemplateConfig): Promise<
   const dismissText = await t('common.dismiss');
   const dismissButton = `
     <button class="av-save-prompt__btn av-save-prompt__btn--dismiss" aria-label="${dismissText}">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M18 6L6 18M6 6l12 12"/>
-      </svg>
+      ${uiIconSvg('x', { width: '16', height: '16' })}
     </button>
   `;
 
@@ -682,19 +685,9 @@ function setupEventListeners(
 
 /**
  * Escape HTML special characters to prevent XSS.
- *
- * Escapes quotes as well as the tag characters, because these values are interpolated
- * into quoted HTML attributes. Serializing a text node (textContent -> innerHTML) is not
- * sufficient here: it leaves quotes untouched, which lets page-controlled input close the
- * attribute and inject one of its own.
  */
 function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 /**
@@ -744,7 +737,7 @@ async function persistSavePromptState(): Promise<void> {
   try {
     await sendMessage('STORE_SAVE_PROMPT_STATE', state);
   } catch (error) {
-    console.error('[AliasVault] Error persisting save prompt state:', error);
+    logFailure('[AliasVault] Error persisting save prompt state', error);
   }
 }
 
@@ -763,30 +756,13 @@ function handleBeforeUnload(): void {
  */
 export async function getPersistedSavePromptState(): Promise<SavePromptPersistedState | null> {
   try {
-    const response = await sendMessage('GET_SAVE_PROMPT_STATE');
+    const response = await sendMessage('GET_SAVE_PROMPT_STATE', { currentDomain: window.location.hostname });
 
     if (!response.success || !response.state) {
       return null;
     }
 
     const state = response.state;
-
-    // Validate the state is still relevant
-    const currentDomain = window.location.hostname;
-
-    // Check if we're on the same domain (or a related domain after redirect)
-    if (state.domain !== currentDomain) {
-      // Allow if we're on a subdomain or parent domain
-      const isRelatedDomain = currentDomain.endsWith(`.${state.domain}`) ||
-                              state.domain.endsWith(`.${currentDomain}`) ||
-                              // Also allow if they share the same base domain (e.g., login.example.com -> app.example.com)
-                              await getBaseDomain(currentDomain) === await getBaseDomain(state.domain);
-
-      if (!isRelatedDomain) {
-        await clearPersistedSavePromptState();
-        return null;
-      }
-    }
 
     // The background script already adjusts the remaining time, but check if expired
     if (state.remainingTimeMs <= 0) {
@@ -796,7 +772,7 @@ export async function getPersistedSavePromptState(): Promise<SavePromptPersisted
 
     return state;
   } catch (error) {
-    console.error('[AliasVault] Error reading persisted save prompt state:', error);
+    logFailure('[AliasVault] Error reading persisted save prompt state', error);
     return null;
   }
 }
@@ -808,25 +784,7 @@ export async function clearPersistedSavePromptState(): Promise<void> {
   try {
     await sendMessage('CLEAR_SAVE_PROMPT_STATE');
   } catch (error) {
-    console.error('[AliasVault] Error clearing persisted save prompt state:', error);
-  }
-}
-
-/**
- * Extract the base domain from a hostname (e.g., "login.example.com" -> "example.com").
- *
- * Resolved by the background script, which holds the Public Suffix List. Taking the last two
- * labels here would treat every tenant of a shared hosting suffix as one site, so a prompt
- * captured on one `github.io` page would be restorable on anyone else's.
- */
-async function getBaseDomain(hostname: string): Promise<string> {
-  try {
-    const response = await sendMessage('EXTRACT_ROOT_DOMAIN', { hostname });
-    return response.rootDomain;
-  } catch (error) {
-    console.error('[AliasVault] Error extracting root domain:', error);
-    // Fall back to the hostname itself, which only ever compares equal to itself.
-    return hostname;
+    logFailure('[AliasVault] Error clearing persisted save prompt state', error);
   }
 }
 
@@ -921,9 +879,7 @@ async function createAddUrlPromptHTML(login: CapturedLogin, existingCredential: 
   const content = `
     <div class="av-save-prompt__add-url-info">
       <span class="av-save-prompt__url-pill">
-        <svg class="av-save-prompt__plus-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-          <path d="M12 5v14M5 12h14"/>
-        </svg>
+        ${uiIconSvg('plus', { class: 'av-save-prompt__plus-icon', width: '12', height: '12', 'stroke-width': '2.5' })}
         ${escapedUrl}
       </span>
       <span class="av-save-prompt__url-arrow">→</span>
@@ -946,8 +902,8 @@ async function createAddUrlPromptHTML(login: CapturedLogin, existingCredential: 
 function setupAddUrlEventListeners(
   prompt: HTMLElement,
   login: CapturedLogin,
-  existingCredential: { itemId: string; itemName: string },
-  onAddUrl: (itemId: string, url: string) => void,
+  existingCredential: { itemId: string; manifestId: string; itemName: string },
+  onAddUrl: (item: ItemRef, url: string) => void,
   onDismiss: () => void
 ): void {
   const addUrlBtn = prompt.querySelector('.av-save-prompt__btn--add-url');
@@ -956,7 +912,7 @@ function setupAddUrlEventListeners(
   addUrlBtn?.addEventListener('click', () => {
     const loginToUse = currentLogin || login;
     removeSavePrompt();
-    onAddUrl(existingCredential.itemId, loginToUse.url);
+    onAddUrl({ Id: existingCredential.itemId, ManifestId: existingCredential.manifestId }, loginToUse.url);
   });
 
   dismissBtn?.addEventListener('click', () => {

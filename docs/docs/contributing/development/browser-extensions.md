@@ -79,7 +79,7 @@ npm run build:edge
 npm run build:safari
 ```
 
-2. Open the Xcode project in the `safari-xcode/AliasVault.xcodeproj` folder and build / run the app.
+2. Open the Xcode project in the `build-assets/safari-xcode/AliasVault.xcodeproj` folder and build / run the app.
 
 3. The extension will be installed automatically in Safari. Follow the on-screen MacOS app instructions to complete the installation.
 
@@ -107,13 +107,10 @@ The E2E tests live in `tests/e2e/` and use [Playwright](https://playwright.dev/)
 2. Run the E2E suite. This builds the Chrome extension into `dist/chrome-mv3` and runs Playwright against it:
 
 ```bash
-npm run test:e2e:build
-```
-
-If you've already built the extension and just want to re-run the specs (or a single one), call Playwright directly:
-
-```bash
-npm run test:e2e -- <spec-name>
+npm run test:e2e         # all tests
+npm run test:e2e 20.3    # select by number: 2x (files 20 to 29), 20 (file), 20.3, 20.1,20.3 or 20.1-20.3
+npm run test:e2e:h 20.3  # same, in a visible browser, one test at a time
+npm run test:e2e:p 20.3  # same, and stops at each client.pause() in the Playwright Inspector
 ```
 
 ## Manual tests

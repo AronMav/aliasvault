@@ -1,0 +1,222 @@
+import { lengthToSlider, SLIDER_MAX, SLIDER_MIN, sliderToLength } from '@aliasvault/client/utilities/PasswordLengthSlider';
+import { getLanguageInfo, resolveDefaultLanguage } from '@aliasvault/i18n/languages';
+import { MAX_WORD_COUNT, MIN_WORD_COUNT } from '@aliasvault/models/defaults';
+import React, { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+
+import CopyPasteFormRow from '@/components/forms/CopyPasteFormRow';
+import Icon from '@/components/shared/Icon';
+import Modal from '@/components/shared/Modal';
+import TabButton from '@/components/shared/TabButton';
+import ToggleChip from '@/components/shared/ToggleChip';
+import { useDb } from '@/context/DbContext';
+import { useLoading } from '@/context/LoadingContext';
+import { useNotifications } from '@/context/NotificationContext';
+import { usePasswordConfig } from '@/hooks/usePasswordConfig';
+import { useVaultMutate } from '@/hooks/useVaultMutate';
+
+import type { PasswordSettings } from '@aliasvault/models/vault';
+
+type PasswordSettingsPopupProps = {
+  passwordSettings: PasswordSettings;
+  /** Offer "use just once" next to the global save. */
+  isTemporary: boolean;
+  onSaveSettings: (settings: PasswordSettings, generatedPassword: string) => void;
+  onClose: () => void;
+};
+
+const DEFAULT_CAPITALIZATION = 'Lowercase';
+const DEFAULT_SEPARATOR = 'Dash';
+const DEFAULT_SALT = 'None';
+const CAPITALIZATION_OPTIONS = ['Lowercase', 'TitleCase', 'Uppercase'];
+const SEPARATOR_OPTIONS = ['Dash', 'Space', 'Underscore', 'Dot', 'None'];
+const SALT_OPTIONS = ['None', 'Prefix', 'Sprinkle', 'Suffix'];
+
+/**
+ * The next option in a cycle.
+ */
+const cycle = (options: string[], current: string | undefined): string => options[(options.indexOf(current ?? '') + 1) % options.length];
+
+/**
+ * Glyph of a capitalization option.
+ */
+const capitalizationGlyph = (value: string | undefined): string => value === 'Uppercase' ? 'ABC' : value === 'TitleCase' ? 'Abc' : 'abc';
+
+/**
+ * Glyph of a separator option.
+ */
+const separatorGlyph = (value: string | undefined): string => ({ Dash: '-', Space: '␣', Underscore: '_', Dot: '.' } as Record<string, string>)[value ?? ''] ?? '∅';
+
+/**
+ * Glyph of a salt option.
+ */
+const saltGlyph = (value: string | undefined): string => ({ Prefix: '#ab', Sprinkle: 'a#b', Suffix: 'ab#' } as Record<string, string>)[value ?? ''] ?? 'ab';
+
+/**
+ * Popup to change the password generator settings, with a live preview.
+ */
+const PasswordSettingsPopup: React.FC<PasswordSettingsPopupProps> = ({ passwordSettings, isTemporary, onSaveSettings, onClose }) => {
+  const { t, i18n } = useTranslation();
+  const dbContext = useDb();
+  const { showLoading, hideLoading } = useLoading();
+  const notifications = useNotifications();
+  const { executeVaultMutationAsync } = useVaultMutate();
+  const { settings, previewPassword, dicewareLanguages, handleSettingChange, handleRefreshPreview } = usePasswordConfig({ ...passwordSettings });
+  const [sliderValue, setSliderValue] = useState(lengthToSlider(passwordSettings.Length));
+  const isDiceware = settings.Type === 'diceware';
+
+  /**
+   * The label of a passphrase option value, e.g. dicewareSeparatorOption.Dash; "None" is shared.
+   */
+  const optionLabel = (group: 'Capitalization' | 'Separator' | 'Salt', value: string): string => (value === 'None' ? t('common.none') : t(`items.diceware${group}Option.${value}`));
+
+  // The "auto" language shown when the user has not picked one explicitly, resolved like the Rust core does.
+  const effectiveLanguage = useMemo(() => resolveDefaultLanguage(i18n.language, dicewareLanguages), [dicewareLanguages, i18n.language]);
+  const selectedLanguage = settings.Language && settings.Language.length > 0 ? settings.Language : effectiveLanguage;
+
+  /**
+   * Save the settings to the vault and hand the preview password back.
+   */
+  const onSaveGlobal = async (): Promise<void> => {
+    showLoading();
+    try {
+      await executeVaultMutationAsync(async () => {
+        dbContext.sqliteClient?.settings.setPasswordSettings(settings);
+      });
+    } catch (error) {
+      // Failed push (e.g. server not reachable).
+      console.error('Failed to save the password settings:', error);
+      return;
+    } finally {
+      hideLoading();
+    }
+    notifications.addSuccessMessage(t('items.passwordSettingsPopup.settingsUpdatedMessage'), true);
+    onSaveSettings(settings, previewPassword);
+    onClose();
+  };
+
+  /**
+   * Hand the settings and the preview password back without saving.
+   */
+  const onSaveTemporary = (): void => {
+    onSaveSettings(settings, previewPassword);
+    onClose();
+  };
+
+  useEffect(() => {
+    /**
+     * Enter saves, Escape closes.
+     */
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        onClose();
+      } else if (event.key === 'Enter') {
+        if (isTemporary) {
+          onSaveTemporary();
+        } else {
+          void onSaveGlobal();
+        }
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return (): void => document.removeEventListener('keydown', onKeyDown);
+  });
+
+  const activeType = settings.Type && settings.Type.length > 0 ? settings.Type : 'basic';
+
+  return (
+    <Modal id="passwordSettingsModal" onBackdropClick={onClose} panelClassName="p-5 pt-0 w-96 max-w-full">
+      <div className="m-2">
+        <div className="flex border-b border-gray-200 dark:border-gray-700" role="tablist">
+          <TabButton active={activeType === 'basic'} onClick={() => handleSettingChange('Type', 'basic')}>{t('common.password')}</TabButton>
+          <TabButton active={activeType === 'diceware'} onClick={() => handleSettingChange('Type', 'diceware')}>{t('items.passwordTypeDiceware')}</TabButton>
+        </div>
+
+        <div className="mt-4 space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">{t('items.passwordSettingsPopup.previewLabel')}</label>
+            <div className="mt-1 flex">
+              <div className="flex-grow"><CopyPasteFormRow id="preview-password" value={previewPassword} /></div>
+              <button type="button" className="ml-2 px-3 py-2 text-sm text-gray-500 dark:text-white bg-gray-200 hover:bg-gray-300 focus:ring-4 focus:outline-none focus:ring-gray-300 font-medium rounded-md dark:bg-gray-600 dark:hover:bg-gray-700 dark:focus:ring-gray-800" onClick={handleRefreshPreview}>
+                <Icon name="refresh" className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+
+          {!isDiceware ? (
+            <>
+              <div>
+                <label htmlFor="password-length" className="block text-sm font-medium text-gray-700 dark:text-gray-300">{t('items.passwordSettingsPopup.passwordLengthLabel', { length: settings.Length })}</label>
+                <input type="range" id="password-length" min={SLIDER_MIN} max={SLIDER_MAX} step="0.1" className="mt-1 w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer dark:bg-gray-700 av-range-slider" value={sliderValue} onChange={(e) => {
+                  const value = Number.parseFloat(e.target.value);
+                  setSliderValue(value);
+                  handleSettingChange('Length', sliderToLength(value));
+                }} />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <ToggleChip selected={settings.UseLowercase} title={t('items.passwordSettingsPopup.includeLowercaseLabel')} onClick={() => handleSettingChange('UseLowercase', !settings.UseLowercase)}><span className="font-mono text-base">a-z</span></ToggleChip>
+                <ToggleChip selected={settings.UseUppercase} title={t('items.passwordSettingsPopup.includeUppercaseLabel')} onClick={() => handleSettingChange('UseUppercase', !settings.UseUppercase)}><span className="font-mono text-base">A-Z</span></ToggleChip>
+                <ToggleChip selected={settings.UseNumbers} title={t('items.passwordSettingsPopup.includeNumbersLabel')} onClick={() => handleSettingChange('UseNumbers', !settings.UseNumbers)}><span className="font-mono text-base">0-9</span></ToggleChip>
+                <ToggleChip selected={settings.UseSpecialChars} title={t('items.passwordSettingsPopup.includeSpecialCharsLabel')} onClick={() => handleSettingChange('UseSpecialChars', !settings.UseSpecialChars)}><span className="font-mono text-base">!@#</span></ToggleChip>
+              </div>
+
+              <div className="flex items-center">
+                <input id="use-non-ambiguous" type="checkbox" className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded dark:bg-gray-700 dark:border-gray-600" checked={settings.UseNonAmbiguousChars} onChange={e => handleSettingChange('UseNonAmbiguousChars', e.target.checked)} />
+                <label htmlFor="use-non-ambiguous" className="ml-2 block text-sm text-gray-700 dark:text-gray-300">{t('items.passwordSettingsPopup.avoidAmbiguousCharsLabel')}</label>
+              </div>
+
+              <div>
+                <label htmlFor="excluded-chars" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">{t('items.excludedCharsLabel')}</label>
+                <input id="excluded-chars" type="text" autoComplete="off" spellCheck={false} className="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md text-gray-900 dark:text-white font-mono focus:ring-primary-500 focus:border-primary-500" value={settings.ExcludedChars ?? ''} onChange={e => handleSettingChange('ExcludedChars', e.target.value)} />
+                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{t('items.excludedCharsDescription')}</p>
+              </div>
+            </>
+          ) : (
+            <>
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <label htmlFor="diceware-word-count" className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('items.wordCount')}</label>
+                  <span className="text-sm text-gray-600 dark:text-gray-400 font-mono">{settings.WordCount}</span>
+                </div>
+                <input type="range" id="diceware-word-count" min={MIN_WORD_COUNT} max={MAX_WORD_COUNT} step="1" className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer dark:bg-gray-700 av-range-slider" value={settings.WordCount} onChange={e => handleSettingChange('WordCount', Number.parseInt(e.target.value, 10))} />
+              </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                <ToggleChip selected={settings.Capitalization !== DEFAULT_CAPITALIZATION} title={optionLabel('Capitalization', settings.Capitalization ?? DEFAULT_CAPITALIZATION)} onClick={() => handleSettingChange('Capitalization', cycle(CAPITALIZATION_OPTIONS, settings.Capitalization))}>
+                  <span className="font-mono text-base">{capitalizationGlyph(settings.Capitalization)}</span>
+                </ToggleChip>
+                <ToggleChip selected={settings.Separator !== DEFAULT_SEPARATOR} title={`${t('items.separator')}: ${optionLabel('Separator', settings.Separator ?? DEFAULT_SEPARATOR)}`} onClick={() => handleSettingChange('Separator', cycle(SEPARATOR_OPTIONS, settings.Separator))}>
+                  <span className="font-mono text-base">{separatorGlyph(settings.Separator)}</span>
+                </ToggleChip>
+                <ToggleChip selected={settings.Salt !== DEFAULT_SALT} title={`${t('items.salt')}: ${optionLabel('Salt', settings.Salt ?? DEFAULT_SALT)}`} onClick={() => handleSettingChange('Salt', cycle(SALT_OPTIONS, settings.Salt))}>
+                  <span className="font-mono text-base">{saltGlyph(settings.Salt)}</span>
+                </ToggleChip>
+              </div>
+
+              <div>
+                <label htmlFor="diceware-language" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">{t('items.passphraseLanguage')}</label>
+                <select id="diceware-language" className="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md text-gray-900 dark:text-white focus:ring-primary-500 focus:border-primary-500" value={selectedLanguage} onChange={e => handleSettingChange('Language', e.target.value)}>
+                  {dicewareLanguages.map(language => <option key={language} value={language}>{getLanguageInfo(language).label}</option>)}
+                </select>
+              </div>
+            </>
+          )}
+
+          <div className="flex justify-end pt-4 gap-2">
+            {isTemporary && (
+              <button type="button" className="px-4 py-2 bg-gray-200 text-gray-800 dark:bg-gray-700 dark:text-white rounded-md hover:bg-gray-300 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-gray-500" onClick={onSaveTemporary}>
+                {t('items.passwordSettingsPopup.useJustOnceButton')}
+              </button>
+            )}
+            <button type="button" id="save-button" className="px-4 py-2 bg-primary-600 text-white rounded-md hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-primary-500 dark:bg-primary-700 dark:hover:bg-primary-600" onClick={() => void onSaveGlobal()}>
+              {t('items.passwordSettingsPopup.saveGloballyButton')}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Modal>
+  );
+};
+
+export default PasswordSettingsPopup;

@@ -1,0 +1,75 @@
+@inherits ComponentBase
+@using System.Timers
+
+<Button OnClick="HandleClick"
+        Display="flex"
+        Color="@Color"
+        AdditionalClasses="@AdditionalClasses">
+    <UiIcon Icon="UiIcons.Refresh" class="@GetIconClasses()" />
+    <span class="ml-2">@ButtonText</span>
+</Button>
+
+@code {
+    /// <summary>
+    /// The event to call in the parent when the button is clicked.
+    /// </summary>
+    [Parameter]
+    public EventCallback OnClick { get; set; }
+
+    /// <summary>
+    /// The text to display on the button.
+    /// </summary>
+    [Parameter]
+    public required string ButtonText { get; set; }
+
+    /// <summary>
+    /// The color theme of the button.
+    /// </summary>
+    [Parameter]
+    public string Color { get; set; } = "light";
+
+    /// <summary>
+    /// Additional CSS classes to apply to the button.
+    /// </summary>
+    [Parameter]
+    public string AdditionalClasses { get; set; } = "";
+
+    /// <summary>
+    /// Indicates whether the button is currently in a refreshing state.
+    /// </summary>
+    private bool IsRefreshing;
+
+    /// <summary>
+    /// Timer used to control the refreshing state duration.
+    /// </summary>
+    private Timer Timer = new();
+
+    /// <summary>
+    /// Handles the button click event.
+    /// </summary>
+    private async Task HandleClick()
+    {
+        if (IsRefreshing) return;
+
+        IsRefreshing = true;
+        await OnClick.InvokeAsync();
+
+        Timer = new Timer(500);
+        Timer.Elapsed += (sender, args) =>
+        {
+            IsRefreshing = false;
+            Timer.Dispose();
+            InvokeAsync(StateHasChanged);
+        };
+        Timer.Start();
+    }
+
+    /// <summary>
+    /// Gets the CSS classes for the refresh icon based on the refreshing state.
+    /// </summary>
+    /// <returns>A string containing the CSS classes for the icon.</returns>
+    private string GetIconClasses()
+    {
+        return $"w-4 h-4 {(IsRefreshing ? "animate-spin" : "")}";
+    }
+}

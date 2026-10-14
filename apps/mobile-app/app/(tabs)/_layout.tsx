@@ -6,6 +6,7 @@ import { Platform, StyleSheet, View } from 'react-native';
 import emitter from '@/utils/EventEmitter';
 
 import { useColors } from '@/hooks/useColorScheme';
+import { useForegroundSync } from '@/hooks/useForegroundSync';
 
 import { ServerSyncIndicator } from '@/components/ServerSyncIndicator';
 import { ThemedText } from '@/components/themed/ThemedText';
@@ -23,6 +24,8 @@ export default function TabLayout() : React.ReactNode {
   const authContext = useApp();
   const dbContext = useDb();
   const { t } = useTranslation();
+
+  useForegroundSync();
 
   // Check if user is authenticated and database is available
   const isFullyInitialized = authContext.isInitialized && dbContext.dbInitialized;
@@ -114,7 +117,7 @@ export default function TabLayout() : React.ReactNode {
         <Tabs.Screen
           name="emails"
           options={{
-            title: t('navigation.emails'),
+            title: t('emails.title'),
             tabBarTestID: 'tab-emails',
             /**
              * Icon for the emails tab.
@@ -125,7 +128,7 @@ export default function TabLayout() : React.ReactNode {
         <Tabs.Screen
           name="settings"
           options={{
-            title: t('navigation.settings'),
+            title: t('common.settings'),
             tabBarTestID: 'tab-settings',
             /**
              * Icon for the settings tab.

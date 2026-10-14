@@ -1,3 +1,4 @@
+import { decryptEmailList } from '@aliasvault/client/email/EmailDecryption';
 import { useNavigation } from 'expo-router';
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -5,13 +6,13 @@ import { StyleSheet, Platform, View, ScrollView, RefreshControl, Animated, Touch
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Toast from 'react-native-toast-message';
 
-import type { MailboxBulkRequest, MailboxBulkResponse, MailboxEmail } from '@/utils/dist/core/models/webapi';
-import EncryptionUtility from '@/utils/EncryptionUtility';
 import emitter from '@/utils/EventEmitter';
 import { HapticsUtility } from '@/utils/HapticsUtility';
+import { isServerUnreachable } from '@/utils/ServerReachability';
 
 import { useColors } from '@/hooks/useColorScheme';
 import { useMinDurationLoading } from '@/hooks/useMinDurationLoading';
+import { useVaultSync } from '@/hooks/useVaultSync';
 
 import { EmailCard } from '@/components/EmailCard';
 import { ThemedContainer } from '@/components/themed/ThemedContainer';
@@ -22,6 +23,8 @@ import { TitleContainer } from '@/components/ui/TitleContainer';
 import { useDb } from '@/context/DbContext';
 import { useWebApi } from '@/context/WebApiContext';
 
+import type { InboxResponse, MailboxEmail } from '@aliasvault/models/webapi';
+
 /**
  * Emails screen.
  */
@@ -31,6 +34,7 @@ export default function EmailsScreen() : React.ReactNode {
   const webApi = useWebApi();
   const colors = useColors();
   const navigation = useNavigation();
+  const { syncVault } = useVaultSync();
   const [scrollY] = useState(() => new Animated.Value(0));
   const scrollViewRef = useRef<ScrollView>(null);
   const [error, setError] = useState<string | null>(null);
@@ -62,21 +66,15 @@ export default function EmailsScreen() : React.ReactNode {
         return;
       }
 
-      // Get unique email addresses from all items
-      const emailAddresses = await dbContext.sqliteClient.items.getAllEmailAddresses();
-
       try {
-        const data = await webApi.post<MailboxBulkRequest, MailboxBulkResponse>('EmailBox/bulk', {
-          addresses: emailAddresses,
-          page: 1,
-          pageSize: PAGE_SIZE,
-        });
+        // The server resolves the mailbox from the caller's active alias claims.
+        const data = await webApi.get<InboxResponse>(`EmailBox?page=1&pageSize=${PAGE_SIZE}`);
 
         // Decrypt emails locally using private key associated with the email address
-        const encryptionKeys = await dbContext.sqliteClient.getAllEncryptionKeys();
+        const encryptionKeys = await dbContext.sqliteClient.encryptionKeys.getAll();
 
         // Decrypt emails locally using public/private key pairs
-        const decryptedEmails = await EncryptionUtility.decryptEmailList(data.mails, encryptionKeys);
+        const decryptedEmails = await decryptEmailList(data.mails, data.publicKeys, encryptionKeys);
 
         if (reset) {
           setEmails(decryptedEmails);
@@ -85,6 +83,12 @@ export default function EmailsScreen() : React.ReactNode {
         }
         setIsLoading(false);
       } catch {
+        // An unreachable server puts the app in offline mode, like a vault sync does.
+        if (await isServerUnreachable()) {
+          await dbContext.setIsOffline(true);
+          return;
+        }
+
         /*
          * Suppress errors while vault has unsynced changes or if we're offline
          * Network errors during sync can trigger false positives
@@ -121,24 +125,24 @@ export default function EmailsScreen() : React.ReactNode {
       setIsLoadingMore(true);
       setError(null);
 
-      const emailAddresses = await dbContext.sqliteClient.items.getAllEmailAddresses();
       const nextPage = currentPage + 1;
 
-      const data = await webApi.post<MailboxBulkRequest, MailboxBulkResponse>('EmailBox/bulk', {
-        addresses: emailAddresses,
-        page: nextPage,
-        pageSize: PAGE_SIZE,
-      });
+      const data = await webApi.get<InboxResponse>(`EmailBox?page=${nextPage}&pageSize=${PAGE_SIZE}`);
 
       // Decrypt emails locally
-      const encryptionKeys = await dbContext.sqliteClient.getAllEncryptionKeys();
-      const decryptedEmails = await EncryptionUtility.decryptEmailList(data.mails, encryptionKeys);
+      const encryptionKeys = await dbContext.sqliteClient.encryptionKeys.getAll();
+      const decryptedEmails = await decryptEmailList(data.mails, data.publicKeys, encryptionKeys);
 
       // Append to existing emails
       setEmails((prevEmails) => [...prevEmails, ...decryptedEmails]);
       setCurrentPage(data.currentPage);
       setTotalRecords(data.totalRecords);
     } catch (err) {
+      if (await isServerUnreachable()) {
+        await dbContext.setIsOffline(true);
+        return;
+      }
+
       setError(err instanceof Error ? err.message : t('common.error'));
       console.error('Failed to load more emails:', err);
 
@@ -151,7 +155,7 @@ export default function EmailsScreen() : React.ReactNode {
     } finally {
       setIsLoadingMore(false);
     }
-  }, [isLoadingMore, dbContext.sqliteClient, dbContext.isOffline, webApi, currentPage, PAGE_SIZE, t]);
+  }, [isLoadingMore, dbContext, webApi, currentPage, PAGE_SIZE, t]);
 
   useEffect(() => {
     const unsubscribeFocus = navigation.addListener('focus', () => {
@@ -202,10 +206,15 @@ export default function EmailsScreen() : React.ReactNode {
 
     setIsLoading(true);
     setIsRefreshing(true);
-    await loadEmails();
+    if (dbContext.isOffline) {
+      // Leaving offline mode reloads the emails through the mount effect.
+      await syncVault();
+    } else {
+      await loadEmails();
+    }
     setIsRefreshing(false);
     setIsLoading(false);
-  }, [loadEmails, setIsLoading, setIsRefreshing]);
+  }, [dbContext.isOffline, loadEmails, syncVault, setIsLoading, setIsRefreshing]);
 
   const styles = StyleSheet.create({
     centerContainer: {
@@ -214,6 +223,7 @@ export default function EmailsScreen() : React.ReactNode {
       justifyContent: 'center',
     },
     contentContainer: {
+      flexGrow: 1,
       paddingBottom: Platform.OS === 'ios' ? insets.bottom + 60 : 10,
       paddingTop: Platform.OS === 'ios' ? 42 : 16,
     },
@@ -221,6 +231,9 @@ export default function EmailsScreen() : React.ReactNode {
       color: colors.textMuted,
       opacity: 0.7,
       textAlign: 'center',
+    },
+    errorContainer: {
+      paddingVertical: 16,
     },
     errorText: {
       color: colors.errorText,
@@ -275,26 +288,31 @@ export default function EmailsScreen() : React.ReactNode {
       );
     }
 
-    if (error) {
-      return (
-        <View style={styles.centerContainer}>
-          <ThemedText style={styles.errorText}>{t('common.error')}: {error}</ThemedText>
-        </View>
-      );
-    }
+    // The error sits inside the scroll view so pull to refresh keeps working.
+    const errorView = error ? (
+      <View style={styles.errorContainer}>
+        <ThemedText style={styles.errorText}>{t('common.error')}: {error}</ThemedText>
+      </View>
+    ) : null;
 
     if (emails.length === 0) {
       return (
-        <View style={styles.centerContainer}>
-          <ThemedText style={styles.emptyText}>
-            {t('emails.emptyMessage')}
-          </ThemedText>
-        </View>
+        <>
+          {errorView}
+          {!error && (
+            <View style={styles.centerContainer}>
+              <ThemedText style={styles.emptyText}>
+                {t('emails.emptyMessage')}
+              </ThemedText>
+            </View>
+          )}
+        </>
       );
     }
 
     return (
       <>
+        {errorView}
         {emails.map((email) => (
           <EmailCard key={email.id} email={email} />
         ))}
@@ -343,6 +361,7 @@ export default function EmailsScreen() : React.ReactNode {
         scrollEventThrottle={16}
         contentContainerStyle={styles.contentContainer}
         scrollIndicatorInsets={{ bottom: 40 }}
+        alwaysBounceVertical={true}
         refreshControl={
           <RefreshControl
             refreshing={isRefreshing}

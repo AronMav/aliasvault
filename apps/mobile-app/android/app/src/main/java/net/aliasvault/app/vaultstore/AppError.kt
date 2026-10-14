@@ -5,7 +5,7 @@ package net.aliasvault.app.vaultstore
  * These error codes are language-independent and can be properly handled by the client.
  *
  * This is a Kotlin port of the iOS Swift implementation:
- * - Reference: apps/mobile-app/ios/VaultStoreKit/Enums/AppErrorCodes.swift
+ * - Reference: apps/mobile-app/ios/VaultStoreKit/Enums/AppError.swift
  *
  * IMPORTANT: Keep all implementations synchronized. Changes to the public interface must be
  * reflected in all ports. Error types and codes should remain consistent.
@@ -56,12 +56,12 @@ sealed class AppError(message: String, cause: Throwable? = null) : Exception(mes
     ) : AppError("Network error: ${underlyingError.message}", underlyingError)
 
     /**
-     * Error indicating request timeout.
+     * Error indicating the server answered a request with an unexpected HTTP failure.
      */
-    class Timeout(
-        message: String = "Request timeout",
+    class ServerError(
+        message: String,
         cause: Throwable? = null,
-    ) : AppError(message, cause)
+    ) : AppError("Server error: $message", cause)
 
     // Version/compatibility errors
     /**
@@ -88,6 +88,14 @@ sealed class AppError(message: String, cause: Throwable? = null) : Exception(mes
         cause: Throwable? = null,
     ) : AppError(message, cause)
 
+    /**
+     * Error indicating the server predates the API this app needs; shown as an error, not a logout.
+     */
+    class ServerUpdateRequired(
+        message: String = "Server update required",
+        cause: Throwable? = null,
+    ) : AppError(message, cause)
+
     // Vault status errors
     /**
      * Error indicating vault merge required.
@@ -105,14 +113,54 @@ sealed class AppError(message: String, cause: Throwable? = null) : Exception(mes
         cause: Throwable? = null,
     ) : AppError(message, cause)
 
+    /**
+     * Error indicating the server's vault snapshot could not be assembled into a vault.
+     */
+    class SyncVaultFetchFailed(
+        message: String,
+        cause: Throwable? = null,
+    ) : AppError("Server vault could not be assembled: $message", cause)
+
     // Decryption errors
     /**
-     * Error indicating failed to decrypt vault.
+     * Error indicating the locally stored vault does not decrypt with the Account Key.
      */
     class VaultDecryptFailed(
         message: String = "Failed to decrypt vault",
         cause: Throwable? = null,
     ) : AppError(message, cause)
+
+    /**
+     * Error indicating the unlock key does not open the account key (wrong password or PIN).
+     */
+    class UnlockKeyRejected(
+        message: String = "The unlock key does not open the account key",
+        cause: Throwable? = null,
+    ) : AppError(message, cause)
+
+    /**
+     * Error indicating the account key opened, the vault encryption key under it did not.
+     */
+    class KeyChainUnreadable(
+        message: String,
+        cause: Throwable? = null,
+    ) : AppError("The account key does not open the vault encryption key: $message", cause)
+
+    /**
+     * Error indicating the Account Key does not open the key chain the server holds; only a re-login recovers.
+     */
+    class KeyOutOfSync(
+        message: String = "Vault encryption key out of sync with the server; log in again",
+        cause: Throwable? = null,
+    ) : AppError(message, cause)
+
+    /**
+     * Error indicating a server manifest or bucket fails its hash check or does not decrypt.
+     */
+    class ServerVaultDecryptFailed(
+        message: String,
+        cause: Throwable? = null,
+    ) : AppError("Server vault could not be opened: $message", cause)
 
     /**
      * Error indicating base64 decode failed after decryption.
@@ -236,6 +284,38 @@ sealed class AppError(message: String, cause: Throwable? = null) : Exception(mes
     ) : AppError(message, cause)
 
     /**
+     * Error indicating a storage read (state, database, at-rest vault) failed.
+     */
+    class StorageReadFailed(
+        message: String,
+        cause: Throwable? = null,
+    ) : AppError("Storage read failed: $message", cause)
+
+    /**
+     * Error indicating a storage write (state, database, at-rest vault) failed.
+     */
+    class StorageWriteFailed(
+        message: String,
+        cause: Throwable? = null,
+    ) : AppError("Storage write failed: $message", cause)
+
+    /**
+     * Error indicating the staging database could not be opened.
+     */
+    class DatabaseInitFailed(
+        message: String,
+        cause: Throwable? = null,
+    ) : AppError("Database init failed: $message", cause)
+
+    /**
+     * Error indicating no manifest is recorded yet, so nothing can be written until the vault has synced once.
+     */
+    class ManifestNotRecorded(
+        message: String = "No personal manifest recorded yet; sync once before writing",
+        cause: Throwable? = null,
+    ) : AppError(message, cause)
+
+    /**
      * Error indicating failed to store vault.
      */
     class VaultStoreFailed(
@@ -279,12 +359,28 @@ sealed class AppError(message: String, cause: Throwable? = null) : Exception(mes
     ) : AppError(message, cause)
 
     /**
+     * Error indicating a vault transfer exceeded its request timeout (large vault or slow connection).
+     */
+    class VaultSyncTimeout(
+        message: String = "Vault sync timed out",
+        cause: Throwable? = null,
+    ) : AppError(message, cause)
+
+    /**
      * Error indicating max sync retries reached.
      */
     class MaxRetriesReached(
         message: String = "Max sync retries reached",
         cause: Throwable? = null,
     ) : AppError(message, cause)
+
+    /**
+     * Error indicating the vault migration check failed.
+     */
+    class MigrationCheckFailed(
+        message: String,
+        cause: Throwable? = null,
+    ) : AppError("Migration check failed: $message", cause)
 
     // Generic errors
     /**
@@ -303,58 +399,88 @@ sealed class AppError(message: String, cause: Throwable? = null) : Exception(mes
         cause: Throwable? = null,
     ) : AppError("Parse error: $message", cause)
 
+    // Sync engine failures that name their cause in the message
     /**
-     * Get the error code string for React Native bridge.
-     *
-     * Error codes use the E-XXX format for easy user reporting:
-     * - E-1xx: Authentication errors
-     * - E-2xx: Network/connectivity errors
-     * - E-3xx: Version/compatibility errors
-     * - E-4xx: Vault status errors
-     * - E-5xx: Decryption/Encryption errors
-     * - E-6xx: Database/Storage errors
-     * - E-7xx: Merge errors
-     * - E-8xx: Upload errors
-     * - E-9xx: Native module errors
-     * - E-0xx: Generic errors
+     * Error indicating a server response is not the JSON shape this client expects.
+     */
+    class SyncResponseInvalid(
+        message: String,
+        cause: Throwable? = null,
+    ) : AppError("Invalid server response: $message", cause)
+
+    /**
+     * Error indicating the core library (codec, merge or crypto) refused the vault data.
+     */
+    class SyncCodecFailed(
+        message: String,
+        cause: Throwable? = null,
+    ) : AppError("Vault codec failed: $message", cause)
+
+    /**
+     * Error indicating the sync engine hit a state it has no rule for.
+     */
+    class SyncEngineFailed(
+        message: String,
+        cause: Throwable? = null,
+    ) : AppError("Sync engine failed: $message", cause)
+
+    /**
+     * Get the error code string for React Native bridge, in the E-XXX format for easy user reporting.
+     * The codes are shared by every client: `AppErrorCode` in core/client/src/api/errors/AppErrorCodes.ts is the registry,
+     * so add a new code there first and never reuse a number.
      */
     val code: String
         get() = when (this) {
-            is AuthenticationFailed -> "E-101"
-            is SessionExpired -> "E-102"
-            is PasswordChanged -> "E-103"
-            is ServerUnavailable -> "E-201"
-            is NetworkError -> "E-202"
-            is Timeout -> "E-203"
-            is ClientVersionNotSupported -> "E-301"
-            is ServerVersionNotSupported -> "E-302"
-            is VaultVersionIncompatible -> "E-303"
-            is VaultMergeRequired -> "E-401"
-            is VaultOutdated -> "E-402"
-            is VaultDecryptFailed -> "E-501"
-            is EncryptionKeyNotFound -> "E-502"
-            is Base64DecodeFailed -> "E-503"
-            is DatabaseTempWriteFailed -> "E-504"
-            is DatabaseOpenFailed -> "E-505"
-            is DatabaseMemoryFailed -> "E-506"
-            is DatabaseBackupFailed -> "E-507"
-            is DatabasePragmaFailed -> "E-508"
-            is BiometricCancelled -> "E-509"
-            is BiometricFailed -> "E-510"
-            is KeystoreKeyNotFound -> "E-511"
-            is KeystoreAccessDenied -> "E-512"
-            is KeystoreItemNotFound -> "E-513"
-            is BiometricNotAvailable -> "E-514"
-            is BiometricNotEnrolled -> "E-515"
-            is BiometricLockout -> "E-516"
-            is VaultStoreFailed -> "E-604"
+            is AuthenticationFailed -> "E-104"
+            is SessionExpired -> "E-105"
+            is PasswordChanged -> "E-106"
+            is ServerUnavailable -> "E-505"
+            is NetworkError -> "E-003"
+            is ServerError -> "E-506"
+            is ClientVersionNotSupported -> "E-904"
+            is ServerVersionNotSupported -> "E-905"
+            is VaultVersionIncompatible -> "E-902"
+            is ServerUpdateRequired -> "E-903"
+            is VaultMergeRequired -> "E-907"
+            is VaultOutdated -> "E-906"
+            is SyncVaultFetchFailed -> "E-502"
+            is VaultDecryptFailed -> "E-203"
+            is EncryptionKeyNotFound -> "E-202"
+            is Base64DecodeFailed -> "E-606"
+            is DatabaseTempWriteFailed -> "E-607"
+            is DatabaseOpenFailed -> "E-608"
+            is DatabaseMemoryFailed -> "E-609"
+            is DatabaseBackupFailed -> "E-610"
+            is DatabasePragmaFailed -> "E-611"
+            is BiometricCancelled -> "E-209"
+            is BiometricFailed -> "E-210"
+            is KeystoreKeyNotFound -> "E-211"
+            is KeystoreAccessDenied -> "E-212"
+            is KeystoreItemNotFound -> "E-213"
+            is BiometricNotAvailable -> "E-214"
+            is BiometricNotEnrolled -> "E-215"
+            is BiometricLockout -> "E-216"
+            is UnlockKeyRejected -> "E-206"
+            is KeyChainUnreadable -> "E-207"
+            is KeyOutOfSync -> "E-208"
+            is ServerVaultDecryptFailed -> "E-503"
+            is StorageReadFailed -> "E-601"
+            is StorageWriteFailed -> "E-602"
+            is DatabaseInitFailed -> "E-603"
+            is VaultStoreFailed -> "E-504"
+            is ManifestNotRecorded -> "E-605"
             is VaultMergeFailed -> "E-701"
-            is MergeUploadFailed -> "E-705"
+            is MergeUploadFailed -> "E-703"
             is VaultUploadFailed -> "E-801"
             is VaultTooLarge -> "E-804"
-            is MaxRetriesReached -> "E-901"
+            is VaultSyncTimeout -> "E-805"
+            is MaxRetriesReached -> "E-702"
+            is MigrationCheckFailed -> "E-901"
             is UnknownError -> "E-001"
-            is ParseError -> "E-002"
+            is ParseError -> "E-004"
+            is SyncResponseInvalid -> "E-507"
+            is SyncCodecFailed -> "E-508"
+            is SyncEngineFailed -> "E-509"
         }
 
     /**
@@ -376,17 +502,11 @@ sealed class AppError(message: String, cause: Throwable? = null) : Exception(mes
         }
 
     /**
-     * Check if this is a network error (offline mode).
+     * Check if this is a network error (offline mode). A timeout is not: the sync engine reports it as a failed sync.
      */
     val isNetworkError: Boolean
         get() = when (this) {
-            is ServerUnavailable, is NetworkError, is Timeout -> true
+            is ServerUnavailable, is NetworkError -> true
             else -> false
         }
-
-    /**
-     * Get the translation key for this error (error code format for lookup in translation files).
-     */
-    val translationKey: String?
-        get() = code
 }

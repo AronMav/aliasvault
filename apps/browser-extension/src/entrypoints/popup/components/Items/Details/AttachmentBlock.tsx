@@ -1,18 +1,23 @@
+import { downloadBytes } from '@aliasvault/client/utilities/FileDownload';
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import Icon from '@/entrypoints/popup/components/Icons/Icon';
 import { useDb } from '@/entrypoints/popup/context/DbContext';
 
-import type { Attachment } from '@/utils/dist/core/models/vault';
+import { logFailure } from '@/utils/Diagnostics';
+
+import type { Attachment } from '@aliasvault/models/vault';
 
 type AttachmentBlockProps = {
   itemId: string;
+  manifestId: string;
 }
 
 /**
  * This component shows attachments for an item.
  */
-const AttachmentBlock: React.FC<AttachmentBlockProps> = ({ itemId }) => {
+const AttachmentBlock: React.FC<AttachmentBlockProps> = ({ itemId, manifestId }) => {
   const { t } = useTranslation();
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -23,27 +28,9 @@ const AttachmentBlock: React.FC<AttachmentBlockProps> = ({ itemId }) => {
    */
   const downloadAttachment = (attachment: Attachment): void => {
     try {
-      // Convert Uint8Array or number[] to Uint8Array
-      const byteArray = attachment.Blob instanceof Uint8Array
-        ? attachment.Blob
-        : new Uint8Array(attachment.Blob);
-
-      // Create blob and download
-      const blob = new Blob([byteArray as BlobPart]);
-      const url = URL.createObjectURL(blob);
-
-      // Create temporary download link
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = attachment.Filename;
-      document.body.appendChild(a);
-      a.click();
-
-      // Cleanup
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      downloadBytes(attachment.Filename, attachment.Blob ?? []);
     } catch (error) {
-      console.error('Error downloading attachment:', error);
+      logFailure('Error downloading attachment', error);
     }
   };
 
@@ -57,17 +44,17 @@ const AttachmentBlock: React.FC<AttachmentBlockProps> = ({ itemId }) => {
       }
 
       try {
-        const attachmentList = dbContext.sqliteClient.settings.getAttachmentsForItem(itemId);
+        const attachmentList = dbContext.sqliteClient.items.getAttachmentsForItem({ Id: itemId, ManifestId: manifestId });
         setAttachments(attachmentList);
       } catch (error) {
-        console.error('Error loading attachments:', error);
+        logFailure('Error loading attachments', error);
       } finally {
         setLoading(false);
       }
     };
 
     loadAttachments();
-  }, [itemId, dbContext?.sqliteClient]);
+  }, [itemId, manifestId, dbContext?.sqliteClient]);
 
   if (loading) {
     return (
@@ -104,9 +91,7 @@ const AttachmentBlock: React.FC<AttachmentBlockProps> = ({ itemId }) => {
                   </div>
                 </div>
                 <div className="flex items-center">
-                  <svg className="w-4 h-4 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5m0 0l5-5m-5 5V4" />
-                  </svg>
+                  <Icon name="download" className="w-4 h-4 text-gray-500 dark:text-gray-400" />
                 </div>
               </div>
             </button>

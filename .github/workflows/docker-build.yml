@@ -5,6 +5,8 @@ on:
     branches: [ "main" ]
     paths:
       - 'apps/server/**'
+      - 'apps/web/**'
+      - 'core/**'
       - 'dockerfiles/**'
       - 'docker-compose.yml'
       - 'install.sh'
@@ -13,6 +15,8 @@ on:
     branches: [ "main" ]
     paths:
       - 'apps/server/**'
+      - 'apps/web/**'
+      - 'core/**'
       - 'dockerfiles/**'
       - 'docker-compose.yml'
       - 'install.sh'
@@ -28,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Build all-in-one Docker image
         run: |
@@ -181,7 +185,7 @@ jobs:
         options: --privileged
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Check local docker-compose.yml for :latest tags
         run: |
@@ -214,7 +218,7 @@ jobs:
           command: |
             sleep 15
             declare -A endpoints=(
-              ["WASM"]="https://localhost:443"
+              ["Client"]="https://localhost:443"
               ["WebApi"]="https://localhost:443/api"
               ["Admin"]="https://localhost:443/admin/user/login"
             )

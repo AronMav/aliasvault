@@ -1,121 +1,129 @@
 import { Buffer } from 'buffer';
 
-import { useState } from 'react';
+import { useMemo } from 'react';
 import { Image, ImageStyle, StyleSheet, View } from 'react-native';
 import { SvgXml } from 'react-native-svg';
 
-import type { Item } from '@/utils/dist/core/models/vault';
 import {
   ItemTypes,
   FieldKey,
-} from '@/utils/dist/core/models/vault';
+  LogoKinds,
+} from '@aliasvault/models/vault';
 
+import type { DisplayItem } from '@/utils/DisplayItem';
+
+// Import centralized icon components (auto-generated from core/models/src/icons)
+import { builtinLogoComponents, type BuiltinLogoComponentKey } from './BuiltinLogoComponents';
 import {
-  detectMimeType,
-  detectMimeTypeFromBase64,
-  sanitizeSvg,
-  toUint8Array,
-} from '@/utils/logoFormat';
-
-import servicePlaceholder from '@/assets/images/service-placeholder.webp';
-
-// Import centralized icon components (auto-generated from core/models/src/icons/ItemTypeIcons.ts)
-import {
-  iconComponents,
+  itemTypeIconComponents,
   PlaceholderIcon,
   NoteIcon,
-  type IconKey,
+  type ItemTypeIconComponentKey,
 } from './ItemTypeIconComponents';
 
 /**
- * Item icon props - supports both legacy logo-only mode and new item-based mode.
+ * The start of an SVG logo's data URI.
+ */
+const SVG_DATA_URI_PREFIX = 'data:image/svg+xml;base64,';
+
+/**
+ * Corner radius of a logo.
+ */
+const LOGO_RADIUS_RATIO = 0.17;
+
+/**
+ * Item icon props.
  */
 type ItemIconProps = {
-  /** Legacy: Logo bytes for Login/Alias items */
-  logo?: Uint8Array | number[] | string | null;
-  /** New: Full item object for type-aware icon rendering */
-  item?: Item;
+  item: DisplayItem;
   style?: ImageStyle;
 };
 
 /**
  * Detect credit card brand from card number using BIN prefixes.
  */
-const detectCardBrand = (cardNumber: string | undefined): IconKey => {
-  if (!cardNumber) return 'CreditCard';
+const detectCardBrand = (cardNumber: string | undefined): ItemTypeIconComponentKey => {
+  if (!cardNumber) return 'credit-card';
 
   const cleaned = cardNumber.replace(/[\s-]/g, '');
-  if (!/^\d{4,}/.test(cleaned)) return 'CreditCard';
+  if (!/^\d{4,}/.test(cleaned)) return 'credit-card';
 
-  if (/^4/.test(cleaned)) return 'Visa';
-  if (/^5[1-5]/.test(cleaned) || /^2[2-7]/.test(cleaned)) return 'Mastercard';
-  if (/^3[47]/.test(cleaned)) return 'Amex';
-  if (/^6(?:011|22|4[4-9]|5)/.test(cleaned)) return 'Discover';
+  if (/^4/.test(cleaned)) return 'visa';
+  if (/^5[1-5]/.test(cleaned) || /^2[2-7]/.test(cleaned)) return 'mastercard';
+  if (/^3[47]/.test(cleaned)) return 'amex';
+  if (/^6(?:011|22|4[4-9]|5)/.test(cleaned)) return 'discover';
 
-  return 'CreditCard';
+  return 'credit-card';
+};
+
+/**
+ * The component for a built-in icon key, or null when the key is unknown to this client (a newer version may have added it).
+ */
+export const getBuiltinLogoComponent = (key: string): typeof builtinLogoComponents[BuiltinLogoComponentKey] | null => {
+  return Object.prototype.hasOwnProperty.call(builtinLogoComponents, key) ? builtinLogoComponents[key as BuiltinLogoComponentKey] : null;
 };
 
 /**
  * Get the appropriate icon component for a card number.
  */
 const getCardIconComponent = (cardNumber: string | undefined) => {
-  return iconComponents[detectCardBrand(cardNumber)];
+  return itemTypeIconComponents[detectCardBrand(cardNumber)];
 };
 
 /**
- * Item icon component - supports both item-based and legacy logo-based rendering.
+ * Item icon component: a logo the user picked wins, then a type icon for notes and cards, then the item's logo.
  */
-export function ItemIcon({ logo, item, style }: ItemIconProps) : React.ReactNode {
+export function ItemIcon({ item, style }: ItemIconProps) : React.ReactNode {
   const width = Number(style?.width ?? styles.logo.width);
   const height = Number(style?.height ?? styles.logo.height);
 
-  // New item-based rendering mode
-  if (item) {
-    // For Note type, always show note icon
-    if (item.ItemType === ItemTypes.Note) {
+  // A built-in icon carries no bytes: every platform draws it from the shared catalog.
+  if (item.LogoInfo?.Kind === LogoKinds.Builtin) {
+    const BuiltinIcon = getBuiltinLogoComponent(item.LogoInfo.Source);
+    if (BuiltinIcon) {
       return (
         <View style={[styles.iconContainer, style]}>
-          <NoteIcon width={width} height={height} />
+          <BuiltinIcon width={width} height={height} />
         </View>
       );
     }
+  }
 
-    // For CreditCard type, detect card brand and show appropriate icon
-    if (item.ItemType === ItemTypes.CreditCard) {
-      const cardNumberField = item.Fields?.find(f => f.FieldKey === FieldKey.CardNumber);
-      const cardNumber = cardNumberField?.Value
-        ? (Array.isArray(cardNumberField.Value) ? cardNumberField.Value[0] : cardNumberField.Value)
-        : undefined;
+  // An uploaded image is shown like any other logo; a custom row without bytes falls through to the placeholder.
+  if (item.LogoInfo?.Kind === LogoKinds.Custom && item.LogoDataUri) {
+    return <LogoImage dataUri={item.LogoDataUri} style={style} />;
+  }
 
-      const CardIcon = getCardIconComponent(cardNumber);
-
-      return (
-        <View style={[styles.iconContainer, style]}>
-          <CardIcon width={width} height={height} />
-        </View>
-      );
-    }
-
-    // For Login/Alias types, use Logo if available, otherwise placeholder
-    const logoData = item.Logo;
-    if (logoData && logoData.length > 0) {
-      return renderLogo(logoData, style);
-    }
-
-    // Default placeholder for Login/Alias without logo
+  // For Note type, always show note icon
+  if (item.ItemType === ItemTypes.Note) {
     return (
       <View style={[styles.iconContainer, style]}>
-        <PlaceholderIcon width={width} height={height} />
+        <NoteIcon width={width} height={height} />
       </View>
     );
   }
 
-  // Legacy logo-only rendering mode
-  if (logo && (typeof logo === 'string' || logo.length > 0)) {
-    return renderLogo(logo, style);
+  // For CreditCard type, detect card brand and show appropriate icon
+  if (item.ItemType === ItemTypes.CreditCard) {
+    const cardNumberField = item.Fields?.find(f => f.FieldKey === FieldKey.CardNumber);
+    const cardNumber = cardNumberField?.Value
+      ? (Array.isArray(cardNumberField.Value) ? cardNumberField.Value[0] : cardNumberField.Value)
+      : undefined;
+
+    const CardIcon = getCardIconComponent(cardNumber);
+
+    return (
+      <View style={[styles.iconContainer, style]}>
+        <CardIcon width={width} height={height} />
+      </View>
+    );
   }
 
-  // Fallback to placeholder
+  // For Login/Alias types, use the logo if available, otherwise placeholder
+  if (item.LogoDataUri) {
+    return <LogoImage dataUri={item.LogoDataUri} style={style} />;
+  }
+
   return (
     <View style={[styles.iconContainer, style]}>
       <PlaceholderIcon width={width} height={height} />
@@ -124,119 +132,57 @@ export function ItemIcon({ logo, item, style }: ItemIconProps) : React.ReactNode
 }
 
 /**
- * Image wrapper that actually swaps to the placeholder when the logo fails
- * to decode. The Image onError callback alone cannot swap the source, so we
- * track the failure in state and render the placeholder instead.
+ * Render a logo from its data URI.
  */
-function SafeLogoImage({ source, style }: { source: string | number; style?: ImageStyle }) {
-  const [failed, setFailed] = useState(false);
+function LogoImage({ dataUri, style }: { dataUri: string; style?: ImageStyle }): React.ReactNode {
+  const svgWidth = Number(style?.width ?? styles.logo.width);
+  const svgHeight = Number(style?.height ?? styles.logo.height);
+  const isSvg = dataUri.startsWith(SVG_DATA_URI_PREFIX);
+  const borderRadius = Math.round(svgWidth * LOGO_RADIUS_RATIO);
 
-  if (failed) {
-    return (
-      <Image
-        source={servicePlaceholder}
-        style={[styles.logo, style]}
-      />
-    );
+  // Decode and sanitize an SVG once per logo and size, not on every render.
+  const svgXml = useMemo(() => {
+    if (!isSvg) {
+      return null;
+    }
+    return sanitizeSvg(Buffer.from(dataUri.slice(SVG_DATA_URI_PREFIX.length), 'base64').toString('utf-8'), svgWidth, svgHeight);
+  }, [dataUri, isSvg, svgWidth, svgHeight]);
+
+  if (!isSvg) {
+    return <Image source={{ uri: dataUri }} style={[styles.logo, style, { borderRadius }]} />;
   }
 
-  return (
-    <Image
-      source={typeof source === 'string' ? { uri: source } : source}
-      style={[styles.logo, style]}
-      defaultSource={servicePlaceholder}
-      onError={(e) => {
-        console.warn('ItemIcon: Image failed to render logo, using placeholder', e.nativeEvent?.error);
-        setFailed(true);
-      }}
-    />
+  const fallback = (
+    <View style={[styles.iconContainer, style]}>
+      <PlaceholderIcon width={svgWidth} height={svgHeight} />
+    </View>
   );
-}
 
-/**
- * Render logo from binary data.
- */
-function renderLogo(
-  logoData: Uint8Array | number[] | string,
-  style?: ImageStyle
-): React.ReactNode {
-  /**
-   * Get the logo source. For SVGs, returns the raw XML string so SvgXml can
-   * render it safely with fallback/onError support. For other formats, returns
-   * a data URI for the Image component.
+  // If sanitization failed (returned null), fall back to the placeholder icon.
+  if (!svgXml) {
+    return fallback;
+  }
+
+  /*
+   * Use SvgXml instead of SvgUri to render SVG logos. SvgXml accepts raw XML
+   * and supports onError/fallback props, which lets us gracefully handle
+   * malformed SVGs that would otherwise crash the native renderer
+   * (e.g. zero-dimension SVGs triggering UIGraphicsBeginImageContext failures).
    */
-  const getLogoSource = (data: Uint8Array | number[] | string | null | undefined) : { type: 'image' | 'svg', source: string | number } => {
-    if (!data) {
-      return { type: 'image', source: servicePlaceholder };
-    }
-
-    try {
-      // If logo is already a base64 string (from iOS SQLite query result)
-      if (typeof data === 'string') {
-        const mimeType = detectMimeTypeFromBase64(data);
-        if (mimeType === 'image/svg+xml') {
-          // Decode base64 to raw SVG XML for SvgXml component
-          return { type: 'svg', source: Buffer.from(data, 'base64').toString('utf-8') };
-        }
-        // Unknown/unrecognized format -> use placeholder
-        if (mimeType === 'application/octet-stream') {
-          return { type: 'image', source: servicePlaceholder };
-        }
-        return { type: 'image', source: `data:${mimeType};base64,${data}` };
-      }
-
-      // Handle binary data (from Android or other sources)
-      const logoBytes = toUint8Array(data);
-      const mimeType = detectMimeType(logoBytes);
-      if (mimeType === 'image/svg+xml') {
-        // Decode bytes to raw SVG XML for SvgXml component
-        return { type: 'svg', source: new TextDecoder().decode(logoBytes) };
-      }
-      // Unknown/unrecognized format -> use placeholder instead of attempting
-      // to decode it (which can crash Fresco on Android with HEIC/AVIF/etc.)
-      if (mimeType === 'application/octet-stream') {
-        return { type: 'image', source: servicePlaceholder };
-      }
-      const base64Logo = Buffer.from(logoBytes).toString('base64');
-      return { type: 'image', source: `data:${mimeType};base64,${base64Logo}` };
-    } catch (error) {
-      console.error('Error converting logo:', error);
-      return { type: 'image', source: servicePlaceholder };
-    }
-  };
-
-  const logoSource = getLogoSource(logoData);
-
-  if (logoSource.type === 'svg') {
-    /*
-     * Use SvgXml instead of SvgUri to render SVG logos. SvgXml accepts raw XML
-     * and supports onError/fallback props, which lets us gracefully handle
-     * malformed SVGs that would otherwise crash the native renderer
-     * (e.g. zero-dimension SVGs triggering UIGraphicsBeginImageContext failures).
-     */
-    const svgWidth = Number(style?.width ?? styles.logo.width);
-    const svgHeight = Number(style?.height ?? styles.logo.height);
-
-    const svgXml = sanitizeSvg(logoSource.source as string, svgWidth, svgHeight);
-
-    // If sanitization failed (returned null), fall back to placeholder
-    if (!svgXml) {
-      return (
-        <Image
-          source={servicePlaceholder}
-          style={[styles.logo, style]}
-        />
-      );
-    }
-
-    const fallback = (
-      <Image
-        source={servicePlaceholder}
-        style={[styles.logo, style]}
-      />
-    );
-
-    return (
+  // react-native-svg does not clip to a border radius, so a wrapping view does the rounding.
+  return (
+    <View
+      style={{
+        borderRadius,
+        overflow: 'hidden',
+        width: svgWidth,
+        height: svgHeight,
+        marginLeft: Number(style?.marginLeft ?? 0),
+        marginRight: Number(style?.marginRight ?? 0),
+        marginTop: Number(style?.marginTop ?? 0),
+        marginBottom: Number(style?.marginBottom ?? 0),
+      }}
+    >
       <SvgXml
         xml={svgXml}
         width={svgWidth}
@@ -245,30 +191,114 @@ function renderLogo(
           console.warn('SvgXml failed to render SVG logo');
         }}
         fallback={fallback}
-        style={{
-          borderRadius: styles.logo.borderRadius,
-          width: svgWidth,
-          height: svgHeight,
-          marginLeft: Number(style?.marginLeft ?? 0),
-          marginRight: Number(style?.marginRight ?? 0),
-          marginTop: Number(style?.marginTop ?? 0),
-          marginBottom: Number(style?.marginBottom ?? 0),
-        }}
       />
-    );
-  }
-
-  return (
-    <SafeLogoImage
-      source={logoSource.source}
-      style={style}
-    />
+    </View>
   );
+}
+
+/**
+ * Sanitize SVG XML for react-native-svg compatibility.
+ *
+ * Addresses several crash vectors:
+ * 1. Zero/missing dimensions on the root <svg> tag cause iOS native renderer to crash
+ *    with: UIGraphicsBeginImageContext() failed to allocate CGBitmapContext: size={0, 0}.
+ * 2. Nested <svg> elements create nested Svg components with no layout dimensions,
+ *    triggering the same zero-size crash.
+ * 3. Namespaced elements (sodipodi:*, inkscape:*, metadata, rdf:*, cc:*, dc:*) are not
+ *    supported by react-native-svg and can cause parse/render failures.
+ *
+ * Returns null if the SVG is fundamentally broken and should not be rendered.
+ */
+function sanitizeSvg(xml: string, targetWidth: number, targetHeight: number): string | null {
+  try {
+    if (!xml || xml.trim().length === 0) {
+      return null;
+    }
+
+    let sanitized = xml;
+
+    // Remove unsupported namespaced elements and metadata that react-native-svg cannot handle.
+    // These include Inkscape/Sodipodi editor elements, RDF metadata, Creative Commons, etc.
+    // Use [\s\S] instead of . to match across newlines.
+    sanitized = sanitized.replace(/<sodipodi:[^>]*\/>/gi, '');
+    sanitized = sanitized.replace(/<sodipodi:[^>]*>[\s\S]*?<\/sodipodi:[^>]*>/gi, '');
+    sanitized = sanitized.replace(/<inkscape:[^>]*\/>/gi, '');
+    sanitized = sanitized.replace(/<inkscape:[^>]*>[\s\S]*?<\/inkscape:[^>]*>/gi, '');
+    sanitized = sanitized.replace(/<metadata[\s>][\s\S]*?<\/metadata>/gi, '');
+
+    // Replace nested <svg> elements (not the root) with <g> elements.
+    // Nested <svg> tags create nested Svg root components in react-native-svg
+    // that inherit no layout dimensions, causing the zero-size native crash.
+    // We preserve the first (root) <svg> and convert inner ones to <g>.
+    let isFirst = true;
+    sanitized = sanitized.replace(/<svg\b([^>]*)>/gi, (match, attrs) => {
+      if (isFirst) {
+        isFirst = false;
+        return match;
+      }
+      // Convert inner <svg> to <g>, preserving transform attribute if present
+      const transformMatch = (attrs as string).match(/\btransform\s*=\s*["'][^"']*["']/i);
+      const transform = transformMatch ? ` ${transformMatch[0]}` : '';
+      return `<g${transform}>`;
+    });
+    // Replace matching closing </svg> tags (all except the last one, which closes the root)
+    // Count remaining </svg> tags and replace all but the last with </g>
+    const closingTags: number[] = [];
+    const closingRegex = /<\/svg>/gi;
+    let closeMatch;
+    while ((closeMatch = closingRegex.exec(sanitized)) !== null) {
+      closingTags.push(closeMatch.index);
+    }
+    // Replace all closing </svg> except the last one (root) with </g>
+    if (closingTags.length > 1) {
+      for (let i = closingTags.length - 2; i >= 0; i--) {
+        const idx = closingTags[i];
+        sanitized = sanitized.substring(0, idx) + '</g>' + sanitized.substring(idx + 6);
+      }
+    }
+
+    // Ensure root <svg> has valid, non-zero dimensions
+    const svgTagMatch = sanitized.match(/<svg\b([^>]*)>/i);
+    if (!svgTagMatch) {
+      return null;
+    }
+
+    const attrs = svgTagMatch[1];
+    const widthMatch = attrs.match(/\bwidth\s*=\s*["']([^"']*)["']/i);
+    const heightMatch = attrs.match(/\bheight\s*=\s*["']([^"']*)["']/i);
+
+    const hasZeroWidth = widthMatch && (parseFloat(widthMatch[1]) === 0 || widthMatch[1].trim() === '');
+    const hasZeroHeight = heightMatch && (parseFloat(heightMatch[1]) === 0 || heightMatch[1].trim() === '');
+    const hasMissingWidth = !widthMatch;
+    const hasMissingHeight = !heightMatch;
+
+    if (hasZeroWidth || hasMissingWidth || hasZeroHeight || hasMissingHeight) {
+      let newAttrs = attrs;
+
+      if (hasZeroWidth && widthMatch) {
+        newAttrs = newAttrs.replace(widthMatch[0], `width="${targetWidth}"`);
+      } else if (hasMissingWidth) {
+        newAttrs = ` width="${targetWidth}"` + newAttrs;
+      }
+
+      if (hasZeroHeight && heightMatch) {
+        newAttrs = newAttrs.replace(heightMatch[0], `height="${targetHeight}"`);
+      } else if (hasMissingHeight) {
+        newAttrs = ` height="${targetHeight}"` + newAttrs;
+      }
+
+      sanitized = sanitized.replace(svgTagMatch[0], `<svg${newAttrs}>`);
+    }
+
+    return sanitized;
+  } catch (error) {
+    console.warn('Failed to sanitize SVG:', error);
+    return null;
+  }
 }
 
 const styles = StyleSheet.create({
   logo: {
-    borderRadius: 4,
     height: 32,
     width: 32,
   },

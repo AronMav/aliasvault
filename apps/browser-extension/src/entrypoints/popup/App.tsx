@@ -1,19 +1,21 @@
-import React, { useState, useEffect } from 'react';
+import { CapabilityKeys } from '@aliasvault/models/webapi';
+import React, { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { HashRouter as Router, Routes, Route, useLocation } from 'react-router-dom';
 
 import DefaultLayout from '@/entrypoints/popup/components/Layout/DefaultLayout';
 import Header from '@/entrypoints/popup/components/Layout/Header';
+import OverlayScrollbar from '@/entrypoints/popup/components/Layout/OverlayScrollbar';
 import PasskeyLayout from '@/entrypoints/popup/components/Layout/PasskeyLayout';
 import LoadingSpinner from '@/entrypoints/popup/components/LoadingSpinner';
 import { useApp } from '@/entrypoints/popup/context/AppContext';
+import { RequireCapability } from '@/entrypoints/popup/context/CapabilityContext';
 import { useHeaderButtons } from '@/entrypoints/popup/context/HeaderButtonsContext';
 import { useLoading } from '@/entrypoints/popup/context/LoadingContext';
 import { NavigationProvider } from '@/entrypoints/popup/context/NavigationContext';
 import AuthSettings from '@/entrypoints/popup/pages/auth/AuthSettings';
 import Login from '@/entrypoints/popup/pages/auth/Login';
 import Unlock from '@/entrypoints/popup/pages/auth/Unlock';
-import UnlockSuccess from '@/entrypoints/popup/pages/auth/UnlockSuccess';
 import Upgrade from '@/entrypoints/popup/pages/auth/Upgrade';
 import EmailDetails from '@/entrypoints/popup/pages/emails/EmailDetails';
 import EmailsList from '@/entrypoints/popup/pages/emails/EmailsList';
@@ -31,10 +33,16 @@ import AutofillSettings from '@/entrypoints/popup/pages/settings/AutofillSetting
 import AutoLockSettings from '@/entrypoints/popup/pages/settings/AutoLockSettings';
 import ClipboardSettings from '@/entrypoints/popup/pages/settings/ClipboardSettings';
 import ContextMenuSettings from '@/entrypoints/popup/pages/settings/ContextMenuSettings';
+import FamilySharingSettings from '@/entrypoints/popup/pages/settings/FamilySharingSettings';
 import IdentityGeneratorSettings from '@/entrypoints/popup/pages/settings/IdentityGeneratorSettings';
 import LanguageSettings from '@/entrypoints/popup/pages/settings/LanguageSettings';
 import PasskeySettings from '@/entrypoints/popup/pages/settings/PasskeySettings';
 import PasswordGeneratorSettings from '@/entrypoints/popup/pages/settings/PasswordGeneratorSettings';
+import ActiveSessionsSettings from '@/entrypoints/popup/pages/settings/security/ActiveSessionsSettings';
+import AuthLogsSettings from '@/entrypoints/popup/pages/settings/security/AuthLogsSettings';
+import ChangePasswordSettings from '@/entrypoints/popup/pages/settings/security/ChangePasswordSettings';
+import DeleteAccountSettings from '@/entrypoints/popup/pages/settings/security/DeleteAccountSettings';
+import SecuritySettings from '@/entrypoints/popup/pages/settings/security/SecuritySettings';
 import Settings from '@/entrypoints/popup/pages/settings/Settings';
 import VaultUnlockSettings from '@/entrypoints/popup/pages/settings/VaultUnlockSettings';
 
@@ -79,6 +87,7 @@ const AppContent: React.FC<{
   headerButtons: React.ReactNode;
 }> = ({ routes, isLoading, message, headerButtons }) => {
   const location = useLocation();
+  const authMainRef = useRef<HTMLElement>(null);
 
   // Find the current route configuration
   const currentRoute = routes.find(route => {
@@ -134,7 +143,8 @@ const AppContent: React.FC<{
             rightButtons={headerButtons}
           />
           <main
-            className="flex-1 overflow-y-auto bg-gray-100 dark:bg-gray-900"
+            ref={authMainRef}
+            className="flex-1 overflow-y-auto no-scrollbar bg-gray-100 dark:bg-gray-900"
             style={{
               paddingTop: '64px',
               height: '100%',
@@ -147,6 +157,7 @@ const AppContent: React.FC<{
             )}
             {routesComponent}
           </main>
+          <OverlayScrollbar targetRef={authMainRef} />
         </div>
       );
 
@@ -185,22 +196,26 @@ const App: React.FC = () => {
     { path: '/reinitialize', element: <Reinitialize />, showBackButton: false },
     { path: '/login', element: <Login />, showBackButton: false, layout: LayoutType.AUTH },
     { path: '/unlock', element: <Unlock />, showBackButton: false, layout: LayoutType.AUTH },
-    { path: '/unlock-success', element: <UnlockSuccess />, showBackButton: false },
     { path: '/upgrade', element: <Upgrade />, showBackButton: false },
     { path: '/auth-settings', element: <AuthSettings />, showBackButton: true, title: t('common.settings') },
     { path: '/items', element: <ItemsList />, showBackButton: false },
-    { path: '/items/folder/:folderId', element: <ItemsList />, showBackButton: true },
-    { path: '/items/select-type', element: <ItemTypeSelector />, showBackButton: true, title: t('itemTypes.selectType') },
+    { path: '/items/folder/:manifestId/:folderId', element: <ItemsList />, showBackButton: true },
+    { path: '/items/select-type', element: <ItemTypeSelector />, showBackButton: true, title: t('items.addNewItem') },
     { path: '/items/add', element: <ItemAddEdit />, showBackButton: true },
-    { path: '/items/deleted', element: <RecentlyDeleted />, showBackButton: true, title: t('recentlyDeleted.title') },
-    { path: '/items/:id/edit', element: <ItemAddEdit />, showBackButton: true },
-    { path: '/items/:id', element: <ItemDetails />, showBackButton: true },
+    { path: '/items/deleted', element: <RecentlyDeleted />, showBackButton: true, title: t('items.recentlyDeleted.title') },
+    { path: '/items/:manifestId/:id/edit', element: <ItemAddEdit />, showBackButton: true },
+    { path: '/items/:manifestId/:id', element: <ItemDetails />, showBackButton: true },
     { path: '/passkeys/create', element: <PasskeyCreate />, layout: LayoutType.PASSKEY },
     { path: '/passkeys/authenticate', element: <PasskeyAuthenticate />, layout: LayoutType.PASSKEY },
     { path: '/emails', element: <EmailsList />, showBackButton: false },
     { path: '/emails/:id', element: <EmailDetails />, showBackButton: true, title: t('emails.title') },
     { path: '/settings', element: <Settings />, showBackButton: false },
     { path: '/settings/unlock-method', element: <VaultUnlockSettings />, showBackButton: true, title: t('common.settings') },
+    { path: '/settings/security', element: <SecuritySettings />, showBackButton: true, title: t('common.settings') },
+    { path: '/settings/security/change-password', element: <ChangePasswordSettings />, showBackButton: true, title: t('common.settings') },
+    { path: '/settings/security/active-sessions', element: <ActiveSessionsSettings />, showBackButton: true, title: t('common.settings') },
+    { path: '/settings/security/auth-logs', element: <AuthLogsSettings />, showBackButton: true, title: t('common.settings') },
+    { path: '/settings/security/delete-account', element: <DeleteAccountSettings />, showBackButton: true, title: t('common.settings') },
     { path: '/settings/autofill', element: <AutofillSettings />, showBackButton: true, title: t('common.settings') },
     { path: '/settings/context-menu', element: <ContextMenuSettings />, showBackButton: true, title: t('common.settings') },
     { path: '/settings/clipboard', element: <ClipboardSettings />, showBackButton: true, title: t('common.settings') },
@@ -210,6 +225,7 @@ const App: React.FC = () => {
     { path: '/settings/identity-generator', element: <IdentityGeneratorSettings />, showBackButton: true, title: t('common.settings') },
     { path: '/settings/password-generator', element: <PasswordGeneratorSettings />, showBackButton: true, title: t('common.settings') },
     { path: '/settings/appearance', element: <AppearanceSettings />, showBackButton: true, title: t('common.settings') },
+    { path: '/settings/family-sharing', element: <RequireCapability capability={CapabilityKeys.VaultSharing}><FamilySharingSettings /></RequireCapability>, showBackButton: true, title: t('common.settings') },
   ], [t]);
 
   useEffect(() => {

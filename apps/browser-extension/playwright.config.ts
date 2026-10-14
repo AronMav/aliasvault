@@ -7,7 +7,7 @@ import { defineConfig, devices } from '@playwright/test';
  * The extension must be built first using `npm run build:chrome`.
  *
  * Test Organization:
- * - Tests are numbered (1.x, 2.x, etc.) and run in alphabetical order
+ * - Test files are numbered by area (1x account, 2x items, ..., see scripts/run-e2e.mjs) and run in alphabetical order
  * - fullyParallel is disabled to ensure tests run sequentially
  * - Each test gets a fresh browser context via fixtures
  */
@@ -31,7 +31,7 @@ export default defineConfig({
 
   // Amount of parallel tests to run
   // Reduce workers in CI to prevent resource exhaustion when multi-client tests
-  // spawn multiple browser contexts under xvfb
+  // spawn multiple browser contexts
   workers: process.env.CI ? 1 : 4,
 
   // Reporter configuration

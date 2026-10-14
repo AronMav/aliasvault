@@ -1,11 +1,12 @@
+import { AppInfo } from '@aliasvault/client/platform/AppInfo';
+import { familySharingText } from '@aliasvault/client/sharing/FamilySharingView';
+import { CapabilityKeys } from '@aliasvault/models/webapi';
 import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect, useNavigation } from 'expo-router';
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { StyleSheet, View, ScrollView, TouchableOpacity, Animated, Platform, Linking } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useApiUrl } from '@/utils/ApiUrlUtility';
-import { AppInfo } from '@/utils/AppInfo';
 import { AppUnlockUtility } from '@/utils/AppUnlockUtility';
 
 import { useColors } from '@/hooks/useColorScheme';
@@ -23,6 +24,7 @@ import { InlineSkeletonLoader } from '@/components/ui/InlineSkeletonLoader';
 import { TitleContainer } from '@/components/ui/TitleContainer';
 import { UsernameDisplay } from '@/components/ui/UsernameDisplay';
 import { useApp } from '@/context/AppContext';
+import { useCapabilities } from '@/context/CapabilityContext';
 import { useDialog } from '@/context/DialogContext';
 import { LocalPreferencesService } from '@/services/LocalPreferencesService';
 import NativeVaultManager from '@/specs/NativeVaultManager';
@@ -34,9 +36,9 @@ export default function SettingsScreen() : React.ReactNode {
   const colors = useColors();
   const { t } = useTranslation();
   const { showAlert, showConfirm } = useDialog();
-  const insets = useSafeAreaInsets();
   const { shouldShowAutofillReminder } = useApp();
   const { getAutoLockTimeout } = useApp();
+  const hasCapability = useCapabilities();
   const { logoutUserInitiated } = useLogout();
   const { loadApiUrl, getDisplayUrl } = useApiUrl();
   const navigate = useNavigationDebounce();
@@ -60,11 +62,11 @@ export default function SettingsScreen() : React.ReactNode {
         let display = t('common.never');
 
         if (autoLockTimeout === 5) {
-          display = t('settings.autoLockOptions.5seconds');
+          display = t('common.duration.5seconds');
         } else if (autoLockTimeout === 15) {
-          display = t('settings.autoLockOptions.15seconds');
+          display = t('common.duration.15seconds');
         } else if (autoLockTimeout === 30) {
-          display = t('settings.autoLockOptions.30seconds');
+          display = t('common.duration.30seconds');
         } else if (autoLockTimeout === 60) {
           display = t('settings.autoLockOptions.1minute');
         } else if (autoLockTimeout === 300) {
@@ -94,13 +96,13 @@ export default function SettingsScreen() : React.ReactNode {
         let display = t('common.never');
 
         if (clipboardTimeout === 5) {
-          display = t('settings.clipboardClearOptions.5seconds');
+          display = t('common.duration.5seconds');
         } else if (clipboardTimeout === 10) {
           display = t('settings.clipboardClearOptions.10seconds');
         } else if (clipboardTimeout === 15) {
-          display = t('settings.clipboardClearOptions.15seconds');
+          display = t('common.duration.15seconds');
         } else if (clipboardTimeout === 30) {
-          display = t('settings.clipboardClearOptions.30seconds');
+          display = t('common.duration.30seconds');
         }
 
         setClipboardClearDisplay(display);
@@ -150,7 +152,7 @@ export default function SettingsScreen() : React.ReactNode {
        * @returns {React.ReactNode} The header component
        */
       headerTitle: (): React.ReactNode => (
-        <AndroidHeader title={t('settings.title')} onLogoPress={registerTap} />
+        <AndroidHeader title={t('common.settings')} onLogoPress={registerTap} />
       ),
     });
   }, [navigation, registerTap, t]);
@@ -247,21 +249,37 @@ export default function SettingsScreen() : React.ReactNode {
   };
 
   const styles = StyleSheet.create({
-    fab: {
-      alignItems: 'center',
+    accountSection: {
+      backgroundColor: colors.accentBackground,
+      borderRadius: 10,
+      overflow: 'hidden',
+    },
+    betaBadge: {
       backgroundColor: colors.primary,
-      borderRadius: 28,
-      bottom: Platform.OS === 'ios' ? insets.bottom + 60 : 16,
-      elevation: 4,
-      height: 56,
-      justifyContent: 'center',
-      position: 'absolute',
-      right: 16,
-      shadowColor: '#000',
-      shadowOffset: { width: 0, height: 2 },
-      shadowOpacity: 0.25,
-      shadowRadius: 4,
-      width: 56,
+      borderRadius: 10,
+      paddingHorizontal: 6,
+      paddingVertical: 1,
+    },
+    betaBadgeText: {
+      color: colors.primarySurfaceText,
+      fontSize: 10,
+      fontWeight: '600',
+      lineHeight: 14,
+      textTransform: 'uppercase',
+    },
+    groupSection: {
+      backgroundColor: colors.accentBackground,
+      borderRadius: 10,
+      marginTop: 8,
+      overflow: 'hidden',
+    },
+    groupTitle: {
+      color: colors.textMuted,
+      fontSize: 13,
+      fontWeight: '600',
+      marginLeft: 16,
+      marginTop: 24,
+      textTransform: 'uppercase',
     },
     scrollContent: {
       paddingBottom: 80,
@@ -317,6 +335,16 @@ export default function SettingsScreen() : React.ReactNode {
       marginRight: 12,
       width: 24,
     },
+    settingItemLabel: {
+      alignItems: 'center',
+      flex: 1,
+      flexDirection: 'row',
+      gap: 8,
+    },
+    settingItemLabelText: {
+      color: colors.text,
+      fontSize: 16,
+    },
     settingItemText: {
       color: colors.text,
       flex: 1,
@@ -361,7 +389,7 @@ export default function SettingsScreen() : React.ReactNode {
   return (
     <ThemedContainer testID="settings-screen">
       <CollapsibleHeader
-        title={t('settings.title')}
+        title={t('common.settings')}
         scrollY={scrollY}
         showNavigationHeader={false}
       />
@@ -376,53 +404,91 @@ export default function SettingsScreen() : React.ReactNode {
         scrollIndicatorInsets={{ bottom: 40 }}
         style={styles.scrollView}
       >
-        <TitleContainer title={t('settings.title')} onLogoPress={registerTap} />
-        <UsernameDisplay />
-        <View style={styles.section}>
-          {Platform.OS === 'ios' && (
+        <TitleContainer title={t('common.settings')} onLogoPress={registerTap} />
+        <View style={styles.accountSection}>
+          <UsernameDisplay />
+          <View style={styles.separator} />
+          <TouchableOpacity
+            testID="qr-scanner-link"
+            style={styles.settingItem}
+            onPress={() => navigate(() => router.push('/(tabs)/settings/qr-scanner'))}
+          >
+            <View style={styles.settingItemIcon}>
+              <Ionicons name="qr-code-outline" size={20} color={colors.text} />
+            </View>
+            <View style={styles.settingItemContent}>
+              <ThemedText style={styles.settingItemText}>{t('settings.qrScanner.scanningMessage')}</ThemedText>
+              <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
+            </View>
+          </TouchableOpacity>
+          {hasCapability(CapabilityKeys.VaultSharing) && (
             <>
+              <View style={styles.separator} />
               <TouchableOpacity
                 style={styles.settingItem}
-                onPress={handleIosAutofillPress}
+                onPress={() => navigate(() => router.push('/(tabs)/settings/family-sharing'))}
               >
                 <View style={styles.settingItemIcon}>
-                  <Ionicons name="key-outline" size={20} color={colors.text} />
+                  <Ionicons name="people-outline" size={20} color={colors.text} />
                 </View>
                 <View style={styles.settingItemContent}>
-                  <ThemedText style={styles.settingItemText}>{t('settings.autofill')}</ThemedText>
-                  {shouldShowAutofillReminder && (
-                    <View style={styles.settingItemBadge}>
-                      <ThemedText style={styles.settingItemBadgeText}>1</ThemedText>
+                  <View style={styles.settingItemLabel}>
+                    <ThemedText style={styles.settingItemLabelText}>{familySharingText.title}</ThemedText>
+                    <View style={styles.betaBadge}>
+                      <ThemedText style={styles.betaBadgeText}>{familySharingText.beta}</ThemedText>
                     </View>
-                  )}
+                  </View>
                   <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
                 </View>
               </TouchableOpacity>
-              <View style={styles.separator} />
             </>
+          )}
+        </View>
+
+        <ThemedText style={styles.groupTitle}>{t('settings.groups.autofill')}</ThemedText>
+        <View style={styles.groupSection}>
+          {Platform.OS === 'ios' && (
+            <TouchableOpacity
+              style={styles.settingItem}
+              onPress={handleIosAutofillPress}
+            >
+              <View style={styles.settingItemIcon}>
+                <Ionicons name="key-outline" size={20} color={colors.text} />
+              </View>
+              <View style={styles.settingItemContent}>
+                <ThemedText style={styles.settingItemText}>{t('settings.autofill')}</ThemedText>
+                {shouldShowAutofillReminder && (
+                  <View style={styles.settingItemBadge}>
+                    <ThemedText style={styles.settingItemBadgeText}>1</ThemedText>
+                  </View>
+                )}
+                <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
+              </View>
+            </TouchableOpacity>
           )}
           {Platform.OS === 'android' && (
-            <>
-              <TouchableOpacity
-                style={styles.settingItem}
-                onPress={handleAndroidAutofillPress}
-              >
-                <View style={styles.settingItemIcon}>
-                  <Ionicons name="key-outline" size={20} color={colors.text} />
-                </View>
-                <View style={styles.settingItemContent}>
-                  <ThemedText style={styles.settingItemText}>{t('settings.autofill')}</ThemedText>
-                  {shouldShowAutofillReminder && (
-                    <View style={styles.settingItemBadge}>
-                      <ThemedText style={styles.settingItemBadgeText}>1</ThemedText>
-                    </View>
-                  )}
-                  <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
-                </View>
-              </TouchableOpacity>
-              <View style={styles.separator} />
-            </>
+            <TouchableOpacity
+              style={styles.settingItem}
+              onPress={handleAndroidAutofillPress}
+            >
+              <View style={styles.settingItemIcon}>
+                <Ionicons name="key-outline" size={20} color={colors.text} />
+              </View>
+              <View style={styles.settingItemContent}>
+                <ThemedText style={styles.settingItemText}>{t('settings.autofill')}</ThemedText>
+                {shouldShowAutofillReminder && (
+                  <View style={styles.settingItemBadge}>
+                    <ThemedText style={styles.settingItemBadgeText}>1</ThemedText>
+                  </View>
+                )}
+                <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
+              </View>
+            </TouchableOpacity>
           )}
+        </View>
+
+        <ThemedText style={styles.groupTitle}>{t('settings.security')}</ThemedText>
+        <View style={styles.groupSection}>
           <TouchableOpacity
             style={styles.settingItem}
             onPress={handleVaultUnlockPress}
@@ -478,20 +544,22 @@ export default function SettingsScreen() : React.ReactNode {
           </TouchableOpacity>
           <View style={styles.separator} />
           <TouchableOpacity
+            testID="security-settings-link"
             style={styles.settingItem}
-            onPress={handleLanguagePress}
+            onPress={() => router.push('/(tabs)/settings/security')}
           >
             <View style={styles.settingItemIcon}>
-              <Ionicons name="language" size={20} color={colors.text} />
+              <Ionicons name="shield-checkmark" size={20} color={colors.text} />
             </View>
             <View style={styles.settingItemContent}>
-              <ThemedText style={styles.settingItemText}>{t('settings.language')}</ThemedText>
+              <ThemedText style={styles.settingItemText}>{t('settings.accountSecurity')}</ThemedText>
               <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
             </View>
           </TouchableOpacity>
         </View>
 
-        <View style={styles.section}>
+        <ThemedText style={styles.groupTitle}>{t('settings.groups.generators')}</ThemedText>
+        <View style={styles.groupSection}>
           <TouchableOpacity
             style={styles.settingItem}
             onPress={handlePasswordGeneratorPress}
@@ -517,7 +585,10 @@ export default function SettingsScreen() : React.ReactNode {
               <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
             </View>
           </TouchableOpacity>
-          <View style={styles.separator} />
+        </View>
+
+        <ThemedText style={styles.groupTitle}>{t('navigation.vault')}</ThemedText>
+        <View style={styles.groupSection}>
           <TouchableOpacity
             style={styles.settingItem}
             onPress={() => router.push('/(tabs)/settings/import-export')}
@@ -530,18 +601,32 @@ export default function SettingsScreen() : React.ReactNode {
               <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
             </View>
           </TouchableOpacity>
-          <View style={styles.separator} />
+        </View>
+
+        <ThemedText style={styles.groupTitle}>{t('settings.groups.general')}</ThemedText>
+        <View style={styles.groupSection}>
           <TouchableOpacity
-            testID="security-settings-link"
             style={styles.settingItem}
-            onPress={() => router.push('/(tabs)/settings/security')}
+            onPress={handleLanguagePress}
           >
             <View style={styles.settingItemIcon}>
-              <Ionicons name="shield-checkmark" size={20} color={colors.text} />
+              <Ionicons name="language" size={20} color={colors.text} />
             </View>
             <View style={styles.settingItemContent}>
-              <ThemedText style={styles.settingItemText}>{t('settings.security')}</ThemedText>
+              <ThemedText style={styles.settingItemText}>{t('settings.language')}</ThemedText>
               <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
+            </View>
+          </TouchableOpacity>
+          <View style={styles.separator} />
+          <TouchableOpacity
+            style={styles.settingItem}
+            onPress={logoutUserInitiated}
+          >
+            <View style={styles.settingItemIcon}>
+              <Ionicons name="log-out" size={20} color={colors.primary} />
+            </View>
+            <View style={styles.settingItemContent}>
+              <ThemedText style={[styles.settingItemText, { color: colors.primary }]}>{t('common.logout')}</ThemedText>
             </View>
           </TouchableOpacity>
         </View>
@@ -564,20 +649,6 @@ export default function SettingsScreen() : React.ReactNode {
           </View>
         )}
 
-        <View style={styles.section}>
-          <TouchableOpacity
-            style={styles.settingItem}
-            onPress={logoutUserInitiated}
-          >
-            <View style={styles.settingItemIcon}>
-              <Ionicons name="log-out" size={20} color={colors.primary} />
-            </View>
-            <View style={styles.settingItemContent}>
-              <ThemedText style={[styles.settingItemText, { color: colors.primary }]}>{t('auth.logout')}</ThemedText>
-            </View>
-          </TouchableOpacity>
-        </View>
-
         <TouchableOpacity style={styles.versionContainer} onPress={registerTap} activeOpacity={1}>
           <ThemedText style={styles.versionText}>
             <ThemedText style={styles.versionLabel}>{t('settings.appVersion')}:</ThemedText> {AppInfo.VERSION}
@@ -590,14 +661,6 @@ export default function SettingsScreen() : React.ReactNode {
         </TouchableOpacity>
       </Animated.ScrollView>
 
-      {/* Floating Action Button for QR Scanner - shown for testing both options */}
-      <TouchableOpacity
-        style={styles.fab}
-        onPress={() => router.push('/(tabs)/settings/qr-scanner')}
-        activeOpacity={0.8}
-      >
-        <Ionicons name="qr-code-outline" size={32} color={colors.primarySurfaceText} />
-      </TouchableOpacity>
     </ThemedContainer>
   );
 }

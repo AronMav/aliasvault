@@ -1,4 +1,4 @@
-﻿//-----------------------------------------------------------------------
+//-----------------------------------------------------------------------
 // <copyright file="ApiErrorCode.cs" company="aliasvault">
 // Copyright (c) aliasvault. All rights reserved.
 // Licensed under the AGPLv3 license. See LICENSE.md file in the project root for full license information.
@@ -9,8 +9,6 @@ namespace AliasVault.Shared.Models.Enums;
 
 /// <summary>
 /// Enumeration of error codes returned by the API.
-/// These codes are used by clients for localization and proper error handling.
-/// Using explicit string keys ensures backward compatibility when adding new error codes.
 /// </summary>
 public enum ApiErrorCode
 {
@@ -135,7 +133,7 @@ public enum ApiErrorCode
     VAULT_NOT_UP_TO_DATE,
 
     /// <summary>
-    /// Mobile login request not found or expired.
+    /// Mobile login request not found.
     /// </summary>
     MOBILE_LOGIN_REQUEST_NOT_FOUND,
 
@@ -155,12 +153,101 @@ public enum ApiErrorCode
     REGISTRATION_FAILED,
 
     /// <summary>
-    /// Too many authentication requests were made from this IP address.
+    /// A vault key already exists for this user/key type.
     /// </summary>
-    AUTH_RATE_LIMIT_EXCEEDED,
+    VAULT_KEY_ALREADY_EXISTS,
 
     /// <summary>
-    /// The public key supplied for a mobile login request is not a usable RSA public key.
+    /// The user has no vault key so the requested operation is unavailable; use the legacy v1 flow.
+    /// </summary>
+    VAULT_KEY_NOT_FOUND,
+
+    /// <summary>
+    /// The referenced shared manifest does not exist or is not owned by the caller.
+    /// </summary>
+    SHARED_MANIFEST_NOT_FOUND,
+
+    /// <summary>
+    /// The recipient has no usable public key to encrypt a shared manifest key for, or the referenced key is invalid.
+    /// </summary>
+    RECIPIENT_KEY_NOT_FOUND,
+
+    /// <summary>
+    /// The supplied algorithm is not valid for the requested operation.
+    /// </summary>
+    INVALID_ALGORITHM,
+
+    /// <summary>
+    /// The supplied manifest id is missing or malformed. Retrying the request unchanged cannot succeed.
+    /// </summary>
+    MANIFEST_ID_INVALID,
+
+    /// <summary>
+    /// The supplied manifest id is already in use by a different manifest. The client must generate a fresh id and retry.
+    /// </summary>
+    MANIFEST_ID_TAKEN,
+
+    /// <summary>
+    /// The referenced group does not exist, is not a shared group, or is not one the caller may administer.
+    /// </summary>
+    GROUP_NOT_FOUND,
+
+    /// <summary>
+    /// The group already holds as many shared manifests as it is entitled to, so no further one can be created.
+    /// </summary>
+    GROUP_MANIFEST_LIMIT_REACHED,
+
+    /// <summary>
+    /// The invitation does not exist, is not addressed to (or sent by) the caller, or was already answered.
+    /// </summary>
+    INVITATION_NOT_FOUND,
+
+    /// <summary>
+    /// There is already an open offer of access to this shared manifest for this member.
+    /// </summary>
+    INVITATION_ALREADY_EXISTS,
+
+    /// <summary>
+    /// The account access was offered to is not on the group's membership roster. Who belongs to a group is decided
+    /// outside the client, so this cannot be resolved by the caller.
+    /// </summary>
+    NOT_GROUP_MEMBER,
+
+    /// <summary>
+    /// The member already holds access to this shared manifest.
+    /// </summary>
+    ACCESS_ALREADY_GRANTED,
+
+    /// <summary>
+    /// An admin of the group cannot take away their own access to a shared manifest.
+    /// </summary>
+    CANNOT_REVOKE_OWN_ACCESS,
+
+    /// <summary>
+    /// The member is the last one who can open one of the group's shared manifests, so taking their access away would
+    /// leave that manifest unopenable. Somebody else has to be given access to it first.
+    /// </summary>
+    LAST_MANIFEST_GRANT_HOLDER,
+
+    /// <summary>
+    /// The account access was offered to has published no public key, so a shared manifest key cannot be encrypted for
+    /// it. That account has to finish upgrading its vault before it can be given access to anything.
+    /// </summary>
+    INVITE_RECIPIENT_NOT_READY,
+
+    /// <summary>
+    /// The shared manifest's key was rotated after the offer of access was made, so the key encrypted into the offer no
+    /// longer decrypts the manifest. The offer is closed and the inviter has to make a fresh one.
+    /// </summary>
+    INVITATION_KEY_OUTDATED,
+
+    /// <summary>
+    /// The client action does not exist, or is not addressed to the caller.
+    /// </summary>
+    CLIENT_ACTION_NOT_FOUND,
+
+    /// <summary>
+    /// Mobile login request contains an invalid client public key.
     /// </summary>
     MOBILE_LOGIN_INVALID_PUBLIC_KEY,
 
@@ -170,8 +257,97 @@ public enum ApiErrorCode
     MOBILE_LOGIN_RATE_LIMIT_EXCEEDED,
 
     /// <summary>
-    /// The key derivation parameters supplied with a password change are not ones the server
-    /// is willing to record against a vault.
+    /// The capability the request needs is not enabled for this account on this server.
     /// </summary>
-    UNSUPPORTED_ENCRYPTION_SETTINGS,
+    CAPABILITY_NOT_AVAILABLE,
+
+    /// <summary>
+    /// The supplied KEK derivation parameters are not within expected bounds.
+    /// </summary>
+    INVALID_ENCRYPTION_PARAMETERS,
+
+    /// <summary>
+    /// The registration invite code is unknown, expired or used up.
+    /// </summary>
+    INVITE_CODE_INVALID,
+
+    /// <summary>
+    /// The email claim does not exist, or its owning manifest is not accessible to the caller.
+    /// </summary>
+    EMAIL_CLAIM_NOT_FOUND,
+
+    /// <summary>
+    /// The target manifest's group already holds as many aliases as it is allowed to.
+    /// </summary>
+    ALIAS_LIMIT_REACHED,
+
+    /// <summary>
+    /// The email alias is owned by a vault the caller cannot open, of someone the caller shares a group with.
+    /// </summary>
+    CLAIM_OWNED_BY_OTHER_VAULT,
+
+    /// <summary>
+    /// The email address is already in use by another account.
+    /// </summary>
+    CLAIM_TAKEN,
+
+    /// <summary>
+    /// A required signature is missing or does not verify under the caller's signing key.
+    /// </summary>
+    SIGNATURE_INVALID,
+
+    /// <summary>
+    /// The request is malformed or fails validation; retrying it unchanged cannot succeed.
+    /// </summary>
+    INVALID_REQUEST,
+
+    /// <summary>
+    /// The request carries no valid session, or the account behind it no longer exists.
+    /// </summary>
+    NOT_AUTHENTICATED,
+
+    /// <summary>
+    /// Too many requests of this kind were made in a short period.
+    /// </summary>
+    RATE_LIMIT_EXCEEDED,
+
+    /// <summary>
+    /// The mobile login request existed but can no longer be approved or retrieved.
+    /// </summary>
+    MOBILE_LOGIN_REQUEST_EXPIRED,
+
+    /// <summary>
+    /// The mobile login request was declined on the mobile device.
+    /// </summary>
+    MOBILE_LOGIN_REQUEST_DECLINED,
+
+    /// <summary>
+    /// The email alias moved to another manifest while the request was being handled.
+    /// </summary>
+    EMAIL_CLAIM_MOVED,
+
+    /// <summary>
+    /// No claim exists for the requested email address.
+    /// </summary>
+    CLAIM_DOES_NOT_EXIST,
+
+    /// <summary>
+    /// The email does not exist or is not readable by the caller.
+    /// </summary>
+    EMAIL_NOT_FOUND,
+
+    /// <summary>
+    /// The session does not exist or does not belong to the caller.
+    /// </summary>
+    SESSION_NOT_FOUND,
+
+    /// <summary>
+    /// Two-factor authentication is already enabled for this account.
+    /// </summary>
+    TWO_FACTOR_ALREADY_ENABLED,
+
+    /// <summary>
+    /// Two-factor authentication is not enabled for this account.
+    /// </summary>
+    TWO_FACTOR_NOT_ENABLED,
 }

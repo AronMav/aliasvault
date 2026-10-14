@@ -3,27 +3,33 @@
  */
 
 import '@/entrypoints/contentScript/style.css';
+import { setPlatform } from '@aliasvault/client/platform';
+
 import { CONDITIONAL_PASSKEYS_UPDATED_EVENT, hasPendingConditionalRequest, refreshConditionalPasskeyOptions } from '@/entrypoints/contentScript/ConditionalPasskey';
-import { fillItem, injectIcon, popupDebounceTimeHasPassed, validateInputField } from '@/entrypoints/contentScript/Form';
-import { getLastAutofillInput, openAutofillPopup, openTotpPopup, removeExistingPopup, createUpgradeRequiredPopup } from '@/entrypoints/contentScript/Popup';
+import { fillCreatedItem, injectIcon, popupDebounceTimeHasPassed, validateInputField } from '@/entrypoints/contentScript/Form';
+import { consumeUnlockResume, getLastAutofillInput, openAutofillPopup, openTotpPopup, removeExistingPopup, createUpgradeRequiredPopup } from '@/entrypoints/contentScript/Popup';
 import { showSavePrompt, showAddUrlPrompt, isSavePromptVisible, updateSavePromptLogin, getPersistedSavePromptState, restoreSavePromptFromState, restoreAddUrlPromptFromState } from '@/entrypoints/contentScript/SavePrompt';
 import { initializeWebAuthnInterceptor } from '@/entrypoints/contentScript/WebAuthnInterceptor';
 
 import { isAvAutofillAllowed, isAvSuppressSave } from '@/utils/autofill/Autofill';
 import { DEFAULT_POPUP_TYPE, isPopupType, popupTypeForFieldType, POPUP_TYPES, type PopupType } from '@/utils/autofill/PopupTypes';
-import { devLog } from '@/utils/DevLogger';
-import type { Item } from '@/utils/dist/core/models/vault';
+import { devLog } from '@/utils/devLogger/DevLogger';
+import { logFailure } from '@/utils/Diagnostics';
 import { FormDetector } from '@/utils/formDetector/FormDetector';
-import { LocalPreferencesService } from '@/utils/LocalPreferencesService';
 import { LoginDetector } from '@/utils/loginDetector';
 import type { CapturedLogin } from '@/utils/loginDetector';
 import { onMessage, sendMessage } from '@/utils/messaging/ExtensionMessaging';
-import { startServiceWorkerKeepalive } from '@/utils/ServiceWorkerKeepalive';
 import { getDeepActiveElement, getDeepElementById, getDeepEventTarget } from '@/utils/ShadowDom';
 
 import { t } from '@/i18n/StandaloneI18n';
+import { extensionPlatform } from '@/platform/ExtensionPlatform';
 
-import { defineContentScript, createShadowRootUi, storage } from '#imports';
+import type { ItemRef } from '@aliasvault/client/database/ItemRef';
+import type { Item } from '@aliasvault/models/vault';
+
+import { defineContentScript, createShadowRootUi } from '#imports';
+
+setPlatform(extensionPlatform);
 
 /** Global login detector instance */
 let loginDetector: LoginDetector | null = null;
@@ -44,13 +50,13 @@ const POPUP_RUNTIME: Record<PopupType, {
   credentials: {
     open: openAutofillPopup,
     /** Resolves true when the user has the credential autofill popup enabled. */
-    enabled: () => LocalPreferencesService.getGlobalAutofillPopupEnabled(),
+    enabled: async () => (await sendMessage('GET_CONTENT_SETTINGS')).credentialPopupEnabled,
     matchMessage: 'GET_FILTERED_ITEMS',
   },
   totp: {
     open: openTotpPopup,
     /** Resolves true when the user has the TOTP autofill popup enabled. */
-    enabled: () => LocalPreferencesService.getTotpAutofillEnabled(),
+    enabled: async () => (await sendMessage('GET_CONTENT_SETTINGS')).totpPopupEnabled,
     matchMessage: 'GET_ITEMS_WITH_TOTP',
   },
 };
@@ -69,17 +75,16 @@ async function handleSaveLogin(login: CapturedLogin, serviceName: string): Promi
       password: login.password,
       url: login.url,
       domain: login.domain,
-      faviconUrl: login.faviconUrl,
     });
 
     if (!response.success) {
-      console.error('[AliasVault] Failed to save login:', response.error);
+      logFailure('[AliasVault] Failed to save login', response.error);
     }
 
     // Clear the last autofilled state after save
     await sendMessage('CLEAR_LAST_AUTOFILLED');
   } catch (error) {
-    console.error('[AliasVault] Error saving login:', error);
+    logFailure('[AliasVault] Error saving login', error);
   }
 }
 
@@ -88,15 +93,10 @@ async function handleSaveLogin(login: CapturedLogin, serviceName: string): Promi
  * @param domain - The domain to block from future save prompts.
  */
 async function handleNeverSaveForDomain(domain: string): Promise<void> {
-  // Store the blocked domain in local storage
   try {
-    const blockedDomains = await storage.getItem('local:loginSaveBlockedDomains') as string[] ?? [];
-    if (!blockedDomains.includes(domain)) {
-      blockedDomains.push(domain);
-      await storage.setItem('local:loginSaveBlockedDomains', blockedDomains);
-    }
+    await sendMessage('BLOCK_LOGIN_SAVE_FOR_DOMAIN', { domain });
   } catch (error) {
-    console.error('[AliasVault] Error saving blocked domain:', error);
+    logFailure('[AliasVault] Error saving blocked domain', error);
   }
 }
 
@@ -110,24 +110,25 @@ async function handleSavePromptDismiss(): Promise<void> {
 
 /**
  * Handle adding URL to an existing credential.
- * @param itemId - The ID of the credential to add the URL to.
+ * @param item - The credential to add the URL to, named by its manifest and id.
  * @param url - The URL to add.
  */
-async function handleAddUrlToCredential(itemId: string, url: string): Promise<void> {
+async function handleAddUrlToCredential(item: ItemRef, url: string): Promise<void> {
   try {
     const response = await sendMessage('ADD_URL_TO_CREDENTIAL', {
-      itemId,
+      itemId: item.Id,
+      manifestId: item.ManifestId,
       url,
     });
 
     if (!response.success) {
-      console.error('[AliasVault] Failed to add URL to credential:', response.error);
+      logFailure('[AliasVault] Failed to add URL to credential', response.error);
     }
 
     // Clear the last autofilled state after successful add
     await sendMessage('CLEAR_LAST_AUTOFILLED');
   } catch (error) {
-    console.error('[AliasVault] Error adding URL to credential:', error);
+    logFailure('[AliasVault] Error adding URL to credential', error);
   }
 }
 
@@ -151,12 +152,14 @@ async function isLoginSaveEnabled(): Promise<boolean> {
  */
 async function isDomainBlocked(domain: string): Promise<boolean> {
   try {
-    const blockedDomains = await storage.getItem('local:loginSaveBlockedDomains') as string[] ?? [];
-    return blockedDomains.includes(domain);
+    return await sendMessage('IS_LOGIN_SAVE_BLOCKED', { domain });
   } catch {
     return false;
   }
 }
+
+/** Shadow root mode for inline UIs: open only in E2E builds (WXT_E2E_BUILD) so the test harness can inspect them. */
+const SHADOW_ROOT_MODE = import.meta.env.WXT_E2E_BUILD === 'true' ? 'open' : 'closed';
 
 /**
  * Check if the login already exists in the vault.
@@ -210,8 +213,11 @@ async function checkAndRestoreSavePromptEarly(ctx: Parameters<typeof createShado
 
     // Check if vault is still unlocked
     try {
-      const authStatus = await sendMessage('CHECK_AUTH_STATUS', { skipMigrationCheck: true });
+      const authStatus = await sendMessage('CHECK_AUTH_STATUS');
       if (!authStatus.isLoggedIn || authStatus.isVaultLocked) {
+        return;
+      }
+      if (authStatus.requiresLegacySqliteBlobMigration || authStatus.requiresManifestMigration) {
         return;
       }
     } catch {
@@ -228,7 +234,7 @@ async function checkAndRestoreSavePromptEarly(ctx: Parameters<typeof createShado
       name: 'aliasvault-save-prompt',
       position: 'inline',
       anchor: 'body',
-      mode: await storage.getItem('local:e2eTestMode') === true ? 'open' : 'closed',
+      mode: SHADOW_ROOT_MODE,
       /**
        * Mount handler for early save prompt restore.
        */
@@ -272,7 +278,7 @@ async function checkAndRestoreSavePromptEarly(ctx: Parameters<typeof createShado
 
     ui.mount();
   } catch (error) {
-    console.error('[AliasVault] Error in early save prompt restore:', error);
+    logFailure('[AliasVault] Error in early save prompt restore', error);
   }
 }
 
@@ -300,8 +306,11 @@ async function checkAndRestorePersistedSavePrompt(container: HTMLElement): Promi
 
     // Check if vault is still unlocked
     try {
-      const authStatus = await sendMessage('CHECK_AUTH_STATUS', { skipMigrationCheck: true });
+      const authStatus = await sendMessage('CHECK_AUTH_STATUS');
       if (!authStatus.isLoggedIn || authStatus.isVaultLocked) {
+        return;
+      }
+      if (authStatus.requiresLegacySqliteBlobMigration || authStatus.requiresManifestMigration) {
         return;
       }
     } catch {
@@ -332,7 +341,7 @@ async function checkAndRestorePersistedSavePrompt(container: HTMLElement): Promi
       );
     }
   } catch (error) {
-    console.error('[AliasVault] Error restoring persisted save prompt:', error);
+    logFailure('[AliasVault] Error restoring persisted save prompt', error);
   }
 }
 
@@ -350,17 +359,21 @@ function initializeLoginDetector(container: HTMLElement): void {
   loginDetector.initialize();
 
   loginDetector.onLoginCapture(async (login: CapturedLogin) => {
-    // Check if the feature is enabled AND vault is unlocked — parallel IPC
-    const [saveEnabled, authStatus] = await Promise.all([
-      isLoginSaveEnabled(),
-      sendMessage('CHECK_AUTH_STATUS', { skipMigrationCheck: true }).catch(() => null),
-    ]);
-
-    if (!saveEnabled) {
+    // Check if the feature is enabled
+    if (!await isLoginSaveEnabled()) {
       return;
     }
 
-    if (!authStatus || !authStatus.isLoggedIn || authStatus.isVaultLocked) {
+    // Check if vault is locked
+    try {
+      const authStatus = await sendMessage('CHECK_AUTH_STATUS');
+      if (!authStatus.isLoggedIn || authStatus.isVaultLocked) {
+        return;
+      }
+      if (authStatus.requiresLegacySqliteBlobMigration || authStatus.requiresManifestMigration) {
+        return;
+      }
+    } catch {
       return;
     }
 
@@ -375,24 +388,20 @@ function initializeLoginDetector(container: HTMLElement): void {
       return;
     }
 
-    // Run duplicate check, settings fetch, and last-autofilled lookup in parallel
-    const [isDuplicate, saveSettings, lastAutofilledResponse] = await Promise.all([
-      isLoginDuplicate(login.domain, login.username),
-      sendMessage('GET_LOGIN_SAVE_SETTINGS').catch(() => null),
-      sendMessage('GET_LAST_AUTOFILLED', {
-        domain: login.domain,
-        username: login.username,
-      }).catch(() => null),
-    ]);
-
-    if (isDuplicate) {
+    // Check if the login already exists in the vault (exact URL + username match)
+    if (await isLoginDuplicate(login.domain, login.username)) {
       return;
     }
 
-    // Get auto-dismiss settings (reused from parallel fetch above)
+    // Get auto-dismiss settings
     let autoDismissMs = 15000;
-    if (saveSettings?.success) {
-      autoDismissMs = saveSettings.autoDismissSeconds * 1000;
+    try {
+      const settings = await sendMessage('GET_LOGIN_SAVE_SETTINGS');
+      if (settings.success) {
+        autoDismissMs = settings.autoDismissSeconds * 1000;
+      }
+    } catch {
+      // Use default
     }
 
     /*
@@ -400,12 +409,18 @@ function initializeLoginDetector(container: HTMLElement): void {
      * If so, offer to add the current URL to that credential instead of creating a new one.
      */
     try {
-      if (lastAutofilledResponse?.success && lastAutofilledResponse.credential) {
+      const lastAutofilledResponse = await sendMessage('GET_LAST_AUTOFILLED', {
+        domain: login.domain,
+        username: login.username,
+      });
+
+      if (lastAutofilledResponse.success && lastAutofilledResponse.credential) {
         /*
          * Skip the prompt when the submitted URL is already linked.
          */
         const linkCheck = await sendMessage('IS_URL_LINKED_TO_CREDENTIAL', {
           itemId: lastAutofilledResponse.credential.itemId,
+          manifestId: lastAutofilledResponse.credential.manifestId,
           url: login.url,
         });
 
@@ -455,24 +470,6 @@ export default defineContentScript({
     await initializeWebAuthnInterceptor(ctx);
 
     /*
-     * Keep the background service worker warm while the vault is unlocked. Chrome MV3 kills
-     * idle workers after ~30s; without this every autofill popup click would wake the worker
-     * cold and show the loading spinner. The open port is dropped again on vault lock.
-     */
-    try {
-      startServiceWorkerKeepalive((callback) => {
-        ctx.onInvalidated(callback);
-      });
-    } catch (error) {
-      /*
-       * Keepalive is a performance optimization only: it must never break the autofill
-       * functionality itself. If it fails for any reason, fall back to the default worker
-       * lifecycle (popup still works, just pays the wake-up cost after idle timeouts).
-       */
-      console.error('[AliasVault] Failed to start service worker keepalive:', error);
-    }
-
-    /*
      * Check for persisted save prompt state immediately (before the 750ms delay).
      * This ensures the save prompt reappears quickly after page navigation.
      */
@@ -486,7 +483,7 @@ export default defineContentScript({
       name: 'aliasvault-ui',
       position: 'inline',
       anchor: 'body',
-      mode: await storage.getItem('local:e2eTestMode') === true ? 'open' : 'closed',
+      mode: SHADOW_ROOT_MODE,
       /**
        * Handle mount.
        */
@@ -571,10 +568,9 @@ export default defineContentScript({
 
             /*
              * Honour av-suppress-save: skip the popup (and the icon) when there is no stored entry
-             * that would actually fill this specific field — credentials for the credentials popup,
-             * TOTP-enabled credentials for the TOTP popup — so we don't invite the user to
-             * "create new" on pages where storing isn't desired by default (e.g. AliasVault's own
-             * login / unlock / Enable 2FA forms).
+             * that would actually fill this specific field. TOTP-enabled credentials for the TOTP 
+             * popup so we don't invite the user to create new TOTP codes on pages where storing 
+             * isn't desired by default (e.g. AliasVault's own login / unlock / Enable 2FA forms).
              */
             if (isAvSuppressSave(inputElement) && !await hasMatchForCurrentUrl(popupType)) {
               devLog('[Autofill] focusin skipped: av-suppress-save active and no matching vault items');
@@ -702,17 +698,28 @@ export default defineContentScript({
           // Close any open inline popup before filling.
           removeExistingPopup(container);
 
-          await fillItem(item as Item, resolvedInput);
+          await fillCreatedItem(item as Item, resolvedInput);
 
           return { success: true };
         });
 
-        // When the vault is unlocked, re-query any pending conditional passkey requests
+        /*
+         * When the vault is unlocked, reopen the autofill popup the user unlocked from, and re-query any pending
+         * conditional passkey requests.
+         */
         onMessage('VAULT_UNLOCKED', async () => {
-          if (ctx.isInvalid || !hasPendingConditionalRequest()) {
+          if (ctx.isInvalid) {
             return;
           }
-          await refreshConditionalPasskeyOptions();
+
+          const resume = consumeUnlockResume();
+          if (resume) {
+            await showPopupWithAuthCheck(resume.input, container, resume.popupType, true);
+          }
+
+          if (hasPendingConditionalRequest()) {
+            await refreshConditionalPasskeyOptions();
+          }
         });
 
         /**
@@ -724,9 +731,8 @@ export default defineContentScript({
          */
         async function hasMatchForCurrentUrl(popupType: PopupType): Promise<boolean> {
           try {
-            const matchingMode = await LocalPreferencesService.getAutofillMatchingMode();
+            const { matchingMode } = await sendMessage('GET_CONTENT_SETTINGS');
             const response = await sendMessage(POPUP_RUNTIME[popupType].matchMessage, {
-              currentUrl: window.location.href,
               pageTitle: document.title,
               matchingMode,
             });
@@ -741,20 +747,7 @@ export default defineContentScript({
          * @returns True if site allows autofill, false if site has disabled it
          */
         async function isSiteAllowed(): Promise<boolean> {
-          const disabledSites = await LocalPreferencesService.getDisabledSites();
-          const temporaryDisabledSites = await LocalPreferencesService.getTemporaryDisabledSites();
-          const currentHostname = window.location.hostname;
-
-          if (disabledSites.includes(currentHostname)) {
-            return false;
-          }
-
-          const temporaryDisabledUntil = temporaryDisabledSites[currentHostname];
-          if (temporaryDisabledUntil && Date.now() < temporaryDisabledUntil) {
-            return false;
-          }
-
-          return true;
+          return (await sendMessage('GET_CONTENT_SETTINGS')).siteAutofillAllowed;
         }
 
         /**
@@ -818,15 +811,12 @@ export default defineContentScript({
          */
         async function showPopupWithAuthCheck(inputElement: HTMLInputElement, container: HTMLElement, popupType: PopupType = DEFAULT_POPUP_TYPE, forceShow: boolean = false) : Promise<void> {
           try {
-            /*
-             * Check auth status. skipMigrationCheck avoids a full vault decrypt here — the popup
-             * path immediately follows with GET_FILTERED_ITEMS which decrypts the vault anyway.
-             */
-            const authStatus = await sendMessage('CHECK_AUTH_STATUS', { skipMigrationCheck: true });
+            // Check auth status and pending migrations in a single call
+            const authStatus = await sendMessage('CHECK_AUTH_STATUS');
 
             if (authStatus.isVaultLocked) {
               // Check if the user has dismissed the vault locked popup
-              const dismissUntil = await LocalPreferencesService.getVaultLockedDismissUntil();
+              const { vaultLockedDismissUntil: dismissUntil } = await sendMessage('GET_CONTENT_SETTINGS');
               if (dismissUntil && Date.now() < dismissUntil) {
                 // User has dismissed the popup, don't show it again
                 return;
@@ -834,11 +824,14 @@ export default defineContentScript({
 
               // Vault is locked, show vault locked popup
               const { createVaultLockedPopup } = await import('@/entrypoints/contentScript/Popup');
-              createVaultLockedPopup(inputElement, container);
+              createVaultLockedPopup(inputElement, container, popupType);
               return;
             }
 
-            if (authStatus.hasPendingMigrations) {
+            /*
+             * Check if the vault requires a migration, if so, show a popup to the user.
+             */
+            if (authStatus.requiresLegacySqliteBlobMigration || authStatus.requiresManifestMigration) {
               // Show upgrade required popup
               await createUpgradeRequiredPopup(inputElement, container, await t('content.vaultUpgradeRequired'));
               return;
@@ -860,7 +853,7 @@ export default defineContentScript({
             }
             // If disabled, don't show any popup (user can rely on clipboard auto-copy for TOTP)
           } catch (error) {
-            console.error('[AliasVault] Error checking vault status:', error);
+            logFailure('[AliasVault] Error checking vault status', error);
             // Fall back to normal autofill popup if check fails
             POPUP_RUNTIME[DEFAULT_POPUP_TYPE].open(inputElement, container);
           }

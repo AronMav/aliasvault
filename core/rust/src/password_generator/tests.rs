@@ -74,27 +74,13 @@ fn basic_short_password_keeps_every_class() {
 }
 
 #[test]
-fn basic_length_clamped_to_max() {
-    // Out-of-range lengths are clamped to the supported maximum (256) rather than honoured.
-    let json = r#"{"Type":"basic","Length":100000}"#;
-    let pw = generate_password(json).unwrap();
-    assert_eq!(pw.chars().count(), 256);
-}
-
-#[test]
-fn basic_zero_length_clamped_to_min() {
-    // Length 0 must not yield an empty password; it is clamped up to the minimum of 1.
-    let json = r#"{"Type":"basic","Length":0}"#;
-    let pw = generate_password(json).unwrap();
-    assert_eq!(pw.chars().count(), 1);
-}
-
-#[test]
-fn diceware_word_count_clamped_to_max() {
-    // More than the supported 10 words is clamped down to 10.
-    let json = r#"{"Type":"diceware","WordCount":50,"Separator":"Dash","Salt":"None"}"#;
-    let pw = generate_password(json).unwrap();
-    assert_eq!(pw.split('-').count(), 10);
+fn out_of_range_sizes_are_clamped() {
+    // Basic length to 1..=256 (0 must not yield an empty password), diceware to at most 10 words.
+    for (json, expected) in [(r#"{"Type":"basic","Length":100000}"#, 256), (r#"{"Type":"basic","Length":0}"#, 1)] {
+        assert_eq!(generate_password(json).unwrap().chars().count(), expected, "{json}");
+    }
+    let words = generate_password(r#"{"Type":"diceware","WordCount":50,"Separator":"Dash","Salt":"None"}"#).unwrap();
+    assert_eq!(words.split('-').count(), 10);
 }
 
 #[test]
@@ -103,6 +89,28 @@ fn basic_no_classes_falls_back_to_lowercase() {
     let pw = generate_password(json).unwrap();
     assert_eq!(pw.chars().count(), 20);
     assert!(pw.chars().all(|c| c.is_ascii_lowercase()));
+}
+
+#[test]
+fn basic_excluded_chars_never_appear() {
+    // Dead keys on a US International layout plus a few letters and digits, spanning every class.
+    let excluded = "^`'\"~$aE7";
+    let json = r#"{"Type":"basic","Length":80,"ExcludedChars":"^`'\"~$aE7"}"#;
+    for _ in 0..20 {
+        let pw = generate_password(json).unwrap();
+        assert!(pw.chars().all(|c| !excluded.contains(c)), "found excluded char in {pw}");
+        assert_eq!(pw.chars().count(), 80);
+    }
+}
+
+#[test]
+fn basic_excluding_a_whole_class_still_fills_the_length() {
+    // Numbers are enabled but all excluded: the mandatory digit is skipped and the rest fills the length.
+    let json = r#"{"Type":"basic","Length":40,"UseLowercase":false,"UseUppercase":false,"UseSpecialChars":false,"UseNumbers":true,"ExcludedChars":"0123456789"}"#;
+    let pw = generate_password(json).unwrap();
+    assert_eq!(pw.chars().count(), 40);
+    // Every enabled character was excluded, so the exclusions are ignored instead of producing nothing.
+    assert!(pw.chars().all(|c| c.is_ascii_digit()), "unexpected chars in {pw}");
 }
 
 #[test]
@@ -168,7 +176,7 @@ fn same_seed_yields_same_output() {
 
 #[test]
 fn same_seed_different_separator_keeps_words() {
-    // With the same seed, only the separator should change — the words stay identical.
+    // With the same seed, only the separator should change; the words stay identical.
     let dash = generate_password(&format!(
         r#"{{"Type":"diceware","WordCount":4,"Separator":"Dash","Seed":"{TEST_SEED}"}}"#
     ))
@@ -186,7 +194,7 @@ fn same_seed_different_separator_keeps_words() {
 
 #[test]
 fn invalid_seed_falls_back_to_random() {
-    // A malformed seed must not error — it falls back to a random seed.
+    // A malformed seed must not error; it falls back to a random seed.
     let pw = generate_password(r#"{"Type":"diceware","Seed":"not-hex"}"#).unwrap();
     assert!(!pw.is_empty());
 }
