@@ -13,13 +13,11 @@ concurrency:
 jobs:
   mirrors:
     name: Push to mirrors
-    # Only run on the upstream repo; forks have no mirror credentials.
+    # Only run on the upstream repo; forks have no mirror credentials
+    # (and force-pushing fork history into the upstream mirrors would be
+    # wrong even if it had them).
     if: github.repository == 'aliasvault/aliasvault'
     runs-on: ubuntu-latest
-    # Only the upstream repo pushes to its own mirrors. A fork has no
-    # credentials for them (and force-pushing fork history into the upstream
-    # mirrors would be wrong even if it had them).
-    if: github.repository == 'aliasvault/aliasvault'
     steps:
       - name: Checkout full history
         uses: actions/checkout@v7
